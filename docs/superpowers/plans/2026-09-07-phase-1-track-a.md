@@ -26,6 +26,7 @@
 
 - `bot.version` reports **`'1.21.9'`** even when `version: '1.21.10'` is requested, because both map to protocol 773. Never assert on `bot.version`.
 - `bot.health` and `bot.food` are **`undefined` at the `spawn` event** and populate ~100ms later on the first `health` event. `connect()` must wait for that (Task 5) or every snapshot taken right after connecting reports health 0.
+- **World chunks finish loading ~450ms AFTER the first `health` packet**, not before or alongside it. Measured during Task 5: `findBlocks()` returns 0 when called on the health event and 5 about 450ms later. So `connect()` must also await `bot.waitForChunksToLoad()` (best-effort — catch and proceed, never fail `connect()` over it), or every block search immediately after connecting comes back empty.
 - `bot.game.dimension` is `'overworld'`, not `'minecraft:overworld'`.
 - `bot.entity.onGround` and `bot.entity.isCollidedHorizontally` are both real booleans, so Task 6's auto-jump works.
 - At spawn (`y≈70`) there are 5+ `stone`/`dirt`/`grass_block` blocks within 24 and ~84 visible entities, so the block-search tests have real data. No `coal_ore` is visible at the surface — that is Phase 4's problem, not Phase 1's.
