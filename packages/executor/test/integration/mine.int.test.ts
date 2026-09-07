@@ -8,6 +8,7 @@ import {
   giveItem,
   clearInventory,
   placeInSlot,
+  sendConsoleCommand,
   type ArenaBounds,
 } from './mc-console.js'
 
@@ -124,6 +125,38 @@ describe('mineBlock against the dev server', () => {
     const r = await executor.mineBlock(ORE, 2)
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toBe('not_found')
+  })
+
+  it('collects the coal and reports collected: true', async () => {
+    executor = await arenaBot('ITMineCollect', 'stone_pickaxe')
+    const before = executor.getState().self.inventory.filter((i) => i.name === 'coal').length
+    expect(before).toBe(0) // clearInventory must actually have fired
+
+    const r = await executor.mineBlock(ORE, 32, { timeoutMs: 60_000 })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.value.collected).toBe(true)
+
+    const coal = executor.getState().self.inventory.find((i) => i.name === 'coal')
+    expect(coal?.count).toBeGreaterThanOrEqual(1)
+  })
+
+  it('reports collected: false — still ok — when the drop cannot be retrieved', async () => {
+    executor = await arenaBot('ITMineNoCollect', 'stone_pickaxe')
+    // Mine the ore, then destroy the drop before the bot can reach it, by
+    // killing item entities the instant the dig finishes. The block WAS
+    // mined, so this must stay ok: reporting a failure would lose that fact,
+    // which is exactly the distinction `collected` exists to carry.
+    const pending = executor.mineBlock(ORE, 32, { timeoutMs: 60_000 })
+    const killer = setInterval(
+      () => sendConsoleCommand(`kill @e[type=item,x=${ORE.x},y=${ORE.y},z=${ORE.z},distance=..20]`),
+      200,
+    )
+    const r = await pending
+    clearInterval(killer)
+
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.value.collected).toBe(false)
+    expect(executor.findBlocks({ names: ['coal_ore'], maxDistance: 32, limit: 5 })).toHaveLength(0)
   })
 
   it('resolves interrupted when aborted before the dig completes', async () => {

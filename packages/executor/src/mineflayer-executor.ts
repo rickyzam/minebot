@@ -739,8 +739,68 @@ export class MineflayerExecutor implements BotExecutor {
       }
       await bot.dig(fresh)
 
-      return ok({ position, collected: false })
+      // --- Step 4: collect the drop ---
+      const collected = await this.collectDrop(bot, signal, block.position)
+      return ok({ position, collected })
     })
+  }
+
+  /**
+   * Walk onto whatever the dig dropped and wait for it to reach the inventory.
+   *
+   * VERIFIED 2026-09-07: mining does not collect. After a successful dig the
+   * coal sat as an item entity 1.72 blocks away and was still uncollected
+   * three seconds later — Minecraft's pickup radius is roughly one block, so
+   * waiting longer would not have helped. The bot has to go and get it.
+   *
+   * Best-effort by design, and never fails the action: the block WAS mined,
+   * and reporting a failure would lose that. A drop that fell in lava or was
+   * grabbed by a mob resolves `collected: false`, which is precisely the
+   * distinction the contract's boolean exists to carry.
+   */
+  private async collectDrop(
+    bot: Bot,
+    signal: AbortSignal,
+    origin: MineflayerVec3,
+  ): Promise<boolean> {
+    const countItems = (): number => bot.inventory.items().reduce((n, i) => n + i.count, 0)
+    const before = countItems()
+    const deadline = Date.now() + 8_000
+
+    // Give the drop a moment to spawn and settle before looking for it.
+    await new Promise((r) => setTimeout(r, 400))
+
+    while (Date.now() < deadline && !signal.aborted) {
+      if (countItems() > before) return true
+
+      // Only drops near where we dug — anything further away is someone
+      // else's litter, not this dig's product.
+      const drop = Object.values(bot.entities)
+        .filter((e) => e?.name === 'item' && e.position && e.position.distanceTo(origin) < 6)
+        .map((e) => ({ entity: e, distance: e.position.distanceTo(bot.entity.position) }))
+        .sort((a, b) => a.distance - b.distance)[0]
+
+      if (!drop) {
+        await new Promise((r) => setTimeout(r, 300))
+        continue
+      }
+
+      // The drop can despawn, be collected, or be killed mid-path; none of
+      // that is an error here, so fall through and re-check the inventory.
+      await this.gotoGoal(
+        bot,
+        signal,
+        new goals.GoalNear(
+          Math.floor(drop.entity.position.x),
+          Math.floor(drop.entity.position.y),
+          Math.floor(drop.entity.position.z),
+          0,
+        ),
+      )
+      await new Promise((r) => setTimeout(r, 500))
+    }
+
+    return countItems() > before
   }
 
   /**
