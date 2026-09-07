@@ -307,11 +307,23 @@ export function runContractSuite(
     // server duplicate-logins and kicks the first. Pairs with disconnect()
     // during an in-flight connect() being a silent no-op.
     describe('connect() reentrancy', () => {
+      // Discriminating via ok/getState() alone is not enough: a
+      // not-actually-shared second attempt costs a mock nothing observable
+      // (it just also succeeds), so a naive "both ok" assertion passes even
+      // with the sharing guard deleted. 'spawned' firing exactly once is the
+      // signal that only one underlying connection attempt ran — two
+      // independent attempts would each emit it.
       it('shares one connection attempt between concurrent connect() calls', async () => {
         await ctx.executor.disconnect()
+        let spawnCount = 0
+        const off = ctx.executor.on('spawned', () => {
+          spawnCount += 1
+        })
         const [a, b] = await Promise.all([ctx.executor.connect(), ctx.executor.connect()])
+        off()
         expect(a.ok).toBe(true)
         expect(b.ok).toBe(true)
+        expect(spawnCount).toBe(1)
         // Still usable afterwards — a duplicate login would have kicked one off.
         expect(() => ctx.executor.getState()).not.toThrow()
       })
@@ -322,11 +334,27 @@ export function runContractSuite(
         expect(() => ctx.executor.getState()).not.toThrow()
       })
 
+      // Post-review Important 1 + 2: the disconnect-honouring check (and the
+      // clearing of the pending-attempt slot) must live *inside* the shared
+      // promise, not in a per-caller wrapper around it — otherwise (a)
+      // disconnect() can return before teardown has actually finished, and
+      // (b) only the caller that owns the wrapper sees the corrected
+      // `interrupted` result while a caller merely sharing the pending
+      // attempt gets back the pre-correction `ok: true`. Racing a disconnect()
+      // against *two* concurrent connect() callers, and pinning both results,
+      // catches both: (a) via the disconnected getState() below, (b) via `b`
+      // (the sharer) being asserted equal to `a` (the owner) rather than
+      // left unchecked.
       it('leaves the executor disconnected when disconnect() races a pending connect()', async () => {
         await ctx.executor.disconnect()
-        const connecting = ctx.executor.connect()
+        const connectingA = ctx.executor.connect()
+        const connectingB = ctx.executor.connect()
         await ctx.executor.disconnect()
-        await connecting
+        const [a, b] = await Promise.all([connectingA, connectingB])
+        expect(a.ok).toBe(false)
+        if (!a.ok) expect(a.reason).toBe('interrupted')
+        expect(b.ok).toBe(false)
+        if (!b.ok) expect(b.reason).toBe('interrupted')
         expect(() => ctx.executor.getState()).toThrow()
       })
     })

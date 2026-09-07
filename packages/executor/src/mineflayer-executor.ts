@@ -70,19 +70,38 @@ export class MineflayerExecutor implements BotExecutor {
     if (this.pendingConnect) return this.pendingConnect
 
     this.disconnectRequested = false
-    this.pendingConnect = this.openConnection()
-    try {
-      const result = await this.pendingConnect
-      if (result.ok && this.disconnectRequested) {
-        // disconnect() was called while this was in flight — honour it rather
-        // than handing back a connection the caller has already abandoned.
-        await this.teardown()
-        return fail('interrupted', 'disconnect() during connect()')
+    // The disconnect-honouring check and the `pendingConnect = null` clear
+    // both live *inside* this shared promise, not in a per-caller wrapper
+    // around it. disconnect() awaits this exact promise, so it cannot
+    // observe completion — and therefore cannot return, or let a fresh
+    // connect() see a cleared slot — until teardown has actually finished.
+    // Every caller sharing `this.pendingConnect` also resolves to the same
+    // (possibly disconnect-corrected) result, not just the first one to
+    // await it. (Fix, post-review: previously this logic sat in connect()'s
+    // own try/finally *around* the shared promise, so only the first caller
+    // got the correction and disconnect() could return while teardown was
+    // still in flight and the slot still non-null.)
+    const attempt = (async (): Promise<Result> => {
+      try {
+        const result = await this.openConnection()
+        if (result.ok && this.disconnectRequested) {
+          // disconnect() was called while this was in flight — honour it rather
+          // than handing back a connection the caller has already abandoned.
+          await this.teardown()
+          return fail('interrupted', 'disconnect() during connect()')
+        }
+        return result
+      } finally {
+        this.pendingConnect = null
       }
-      return result
-    } finally {
-      this.pendingConnect = null
-    }
+    })()
+    // The IIFE above runs synchronously up to its first `await`
+    // (this.openConnection()'s own synchronous setup), so this assignment
+    // still lands before any other synchronous connect() call could run —
+    // the reentrancy guarantee (a second concurrent connect() sees a
+    // non-null pendingConnect) survives moving the logic inside.
+    this.pendingConnect = attempt
+    return attempt
   }
 
   private async openConnection(): Promise<Result> {
