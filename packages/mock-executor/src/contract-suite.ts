@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import type { BotExecutor } from '@minebot/contract'
+import type { ActionOptions, BotExecutor, Result } from '@minebot/contract'
 
 export interface ContractSuiteContext {
   executor: BotExecutor
@@ -10,6 +10,15 @@ export interface ContractSuiteContext {
  * Behavioural contract every BotExecutor must satisfy. Runs identically against
  * the mock and the real Mineflayer implementation; a passing run on both is what
  * makes the Phase 3 mock-to-real swap safe.
+ *
+ * Coverage note: this suite verifies the pre-abort contract — every abortable
+ * action must resolve `{ ok: false, reason: 'interrupted' }` (and never throw)
+ * when handed a signal that is already aborted before the action starts. It
+ * deliberately does NOT test mid-flight cancellation here: that is
+ * timing-dependent and cannot be asserted portably against a live networked
+ * server without flaking. Mid-flight abort stays covered per-implementation —
+ * the mock's `actionDelayMs`-based test, and a Task 6 integration test for the
+ * real executor.
  */
 export function runContractSuite(
   name: string,
@@ -77,15 +86,33 @@ export function runContractSuite(
       }
     })
 
-    it('resolves interrupted — never throws — when the signal is already aborted', async () => {
-      const before = ctx.executor.getState().self.position
-      const r = await ctx.executor.moveTo(
-        { x: before.x + 50, y: before.y, z: before.z + 50 },
-        { signal: AbortSignal.abort() },
-      )
-      expect(r.ok).toBe(false)
-      if (!r.ok) expect(r.reason).toBe('interrupted')
-    })
+    // Valid-shape arguments that need no matching world state: the point of
+    // each case is that the signal check happens before any work, so the
+    // call must resolve `interrupted` regardless of whether the target,
+    // player, block, or entity actually exists.
+    const abortableActions: Array<{
+      name: string
+      run: (executor: BotExecutor, opts: ActionOptions) => Promise<Result<unknown>>
+    }> = [
+      { name: 'moveTo', run: (e, opts) => e.moveTo({ x: 0, y: 64, z: 0 }, opts) },
+      { name: 'followPlayer', run: (e, opts) => e.followPlayer('nonexistent-player', opts) },
+      { name: 'mineBlock', run: (e, opts) => e.mineBlock('stone', 16, opts) },
+      {
+        name: 'placeBlock',
+        run: (e, opts) => e.placeBlock('dirt', { x: 0, y: 64, z: 0 }, opts),
+      },
+      { name: 'attack', run: (e, opts) => e.attack(0, opts) },
+      { name: 'flee', run: (e, opts) => e.flee(opts) },
+    ]
+
+    it.each(abortableActions)(
+      'resolves interrupted — never throws — for $name when the signal is already aborted',
+      async ({ run }) => {
+        const r = await run(ctx.executor, { signal: AbortSignal.abort() })
+        expect(r.ok).toBe(false)
+        if (!r.ok) expect(r.reason).toBe('interrupted')
+      },
+    )
 
     it('returns a callable unsubscribe from on()', () => {
       const off = ctx.executor.on('health', () => {})
