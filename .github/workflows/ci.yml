@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same branch — this suite is fast, but there is
+# no value in finishing a run for a commit that has already been replaced.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: typecheck, unit tests, invariants
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      # `npm ci` rather than `npm install`: it installs strictly from the
+      # lockfile and fails if package.json and the lockfile disagree, which is
+      # what enforces the exact version pins this repo requires.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Unit tests only. The integration suite needs a live Minecraft server and
+      # a tmux session to drive its console, neither of which exists here — see
+      # the note in the PR template. This step DOES run the shared contract suite
+      # against MockExecutor, so the contract's behavioural guarantees are covered.
+      - name: Unit tests
+        run: npm test
+
+      - name: Structural invariants
+        run: node scripts/check-invariants.mjs
