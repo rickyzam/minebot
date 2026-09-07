@@ -51,7 +51,7 @@ Both development tracks build against this one interface. Its three load-bearing
 
 ```bash
 npm install
-npm test        # 117 unit tests — no network, no Minecraft needed
+npm test        # 152 unit tests — no network, no Minecraft needed
 npm run typecheck
 ```
 
@@ -76,6 +76,7 @@ The integration tests and the demo need a **dedicated development server**. Do n
 
 3. **Mods are supported — you do not need to strip them.** A mod that registers content (map mods especially) makes a Fabric server reject a plain vanilla-protocol client, which is exactly what a Mineflayer bot is. The executor completes Fabric's registry-sync handshake, so it connects anyway, and it learns the modded registry ids rather than guessing at them. This is on by default (`fabricCompat`) and is inert against a vanilla server. Adding another mod needs no code change.
 4. Run the server inside `tmux` under the session name `mc`. The integration tests drive its console to build a deterministic test arena.
+5. **Optional but recommended: put a Velocity proxy in front.** It lets players authenticate against Mojang and keep their real UUIDs — so no inventories or advancements are orphaned — while the bots connect to the backend directly for free. See [docs/velocity-proxy-setup.md](docs/velocity-proxy-setup.md). With a proxy, the backend moves to port 25566, which is `MineflayerExecutor`'s default.
 
 Then:
 

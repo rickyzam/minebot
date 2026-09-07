@@ -15,9 +15,21 @@ import {
 import { classifyEntity, toSnapshot, type MineflayerLike } from './snapshot.js'
 import { installFabricHandshake, type ProtocolClientLike } from './fabric-handshake.js'
 import type { RegistryEntry } from './fabric-registry.js'
+import {
+  installVelocityForwarding,
+  type LoginClientLike,
+  type VelocityForwardingOptions,
+} from './velocity-handshake.js'
+import { resolveForwardingSecret } from './forwarding-secret.js'
 
 export interface MineflayerExecutorOptions {
   host?: string
+  /**
+   * Defaults to 25566, the backend server. Port 25565 belongs to the Velocity
+   * proxy, which authenticates against Mojang and so rejects a bot; bots reach
+   * the backend directly and prove themselves with signed forwarding data
+   * instead. See `velocitySecret`.
+   */
   port?: number
   username?: string
   version?: string
@@ -32,6 +44,21 @@ export interface MineflayerExecutorOptions {
    * behaviour.
    */
   fabricCompat?: boolean
+  /**
+   * Shared secret for Velocity modern forwarding. Required when the target
+   * server sits behind a Velocity proxy, because such a backend rejects any
+   * login that cannot present signed forwarding data.
+   *
+   * Defaults to `resolveForwardingSecret()` — the `VELOCITY_FORWARDING_SECRET`
+   * environment variable, else the proxy's secret file. Pass `null` to force it
+   * off for a plain server.
+   */
+  velocitySecret?: string | null
+  /**
+   * Profile properties to forward. A `textures` entry gives the bot a skin, so
+   * several bots are distinguishable on screen. Only used when forwarding is on.
+   */
+  velocityProperties?: VelocityForwardingOptions['properties']
 }
 
 export class MineflayerExecutor implements BotExecutor {
@@ -42,6 +69,8 @@ export class MineflayerExecutor implements BotExecutor {
   private readonly version: string
   private readonly connectTimeoutMs: number
   private readonly fabricCompat: boolean
+  private readonly velocitySecret: string | null
+  private readonly velocityProperties: VelocityForwardingOptions['properties']
   /**
    * Registry entries the server reported that a vanilla client would not know —
    * anything outside the `minecraft` namespace. Empty against a vanilla server.
@@ -79,11 +108,14 @@ export class MineflayerExecutor implements BotExecutor {
 
   constructor(opts: MineflayerExecutorOptions = {}) {
     this.host = opts.host ?? 'localhost'
-    this.port = opts.port ?? 25565
+    this.port = opts.port ?? 25566
     this.username = opts.username ?? 'MineBot'
     this.version = opts.version ?? '1.21.10'
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 30_000
     this.fabricCompat = opts.fabricCompat ?? true
+    this.velocitySecret =
+      opts.velocitySecret === undefined ? resolveForwardingSecret() : opts.velocitySecret
+    this.velocityProperties = opts.velocityProperties
   }
 
   /**
@@ -168,6 +200,16 @@ export class MineflayerExecutor implements BotExecutor {
     const fabric = this.fabricCompat
       ? installFabricHandshake(bot._client as unknown as ProtocolClientLike)
       : null
+
+    // Must also be installed before any await: the forwarding demand arrives
+    // during the login phase, earlier still than the Fabric exchange.
+    if (this.velocitySecret) {
+      installVelocityForwarding(bot._client as unknown as LoginClientLike, {
+        secret: this.velocitySecret,
+        username: this.username,
+        properties: this.velocityProperties,
+      })
+    }
 
     return new Promise<Result>((resolve) => {
       let settled = false
