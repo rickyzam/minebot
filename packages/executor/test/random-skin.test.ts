@@ -21,6 +21,24 @@ describe('toSkinChoices', () => {
   it('returns nothing for an empty listing', () => {
     expect(toSkinChoices([])).toEqual([])
   })
+
+  it('de-duplicates by texture hash', () => {
+    // Observed live: the listing carried one texture under two upload ids, and
+    // two bots spawned in identical skins. Shuffling cannot fix that, because
+    // the duplicates are distinct entries — they have to be collapsed here.
+    const hash = 'a'.repeat(64)
+    const other = 'b'.repeat(64)
+    expect(toSkinChoices([{ texture: hash }, { texture: hash }, { texture: other }])).toEqual([
+      { texture: hash, url: `${TEXTURE_CDN}/${hash}` },
+      { texture: other, url: `${TEXTURE_CDN}/${other}` },
+    ])
+  })
+
+  it('preserves listing order for the entries it keeps', () => {
+    const a = 'a'.repeat(64)
+    const b = 'b'.repeat(64)
+    expect(toSkinChoices([{ texture: b }, { texture: a }]).map((c) => c.texture)).toEqual([b, a])
+  })
 })
 
 describe('pickRandom', () => {

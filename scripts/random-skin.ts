@@ -39,11 +39,25 @@ export function pickRandom<T>(items: readonly T[], count: number): T[] {
   return pool.slice(0, count)
 }
 
-/** Turn a raw MineSkin listing into usable choices, dropping malformed entries. */
+/**
+ * Turn a raw MineSkin listing into usable choices, dropping malformed entries
+ * and **de-duplicating by texture hash**.
+ *
+ * The listing can carry the same texture under more than one upload id, which
+ * once put two bots in identical skins on the same run — shuffling cannot help
+ * with that, because the duplicates are distinct entries.
+ */
 export function toSkinChoices(entries: readonly MineSkinEntry[]): SkinChoice[] {
-  return entries
-    .filter((e): e is { texture: string } => typeof e.texture === 'string' && /^[0-9a-f]{16,}$/.test(e.texture))
-    .map((e) => ({ texture: e.texture, url: `${TEXTURE_CDN}/${e.texture}` }))
+  const seen = new Set<string>()
+  const choices: SkinChoice[] = []
+  for (const entry of entries) {
+    const texture = entry.texture
+    if (typeof texture !== 'string' || !/^[0-9a-f]{16,}$/.test(texture)) continue
+    if (seen.has(texture)) continue
+    seen.add(texture)
+    choices.push({ texture, url: `${TEXTURE_CDN}/${texture}` })
+  }
+  return choices
 }
 
 /**
