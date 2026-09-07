@@ -116,6 +116,17 @@ describe('MockExecutor specifics', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toBe('not_found')
   })
+
+  it('delivers events to a handler registered before the first connect()', async () => {
+    const m = new MockExecutor()
+    let seen = 0
+    const off = m.on('spawned', () => {
+      seen += 1
+    })
+    await m.connect()
+    expect(seen).toBe(1)
+    off()
+  })
 })
 
 describe('MockExecutor failure injection', () => {

@@ -237,5 +237,47 @@ export function runContractSuite(
         expect(() => off?.()).not.toThrow()
       })
     })
+
+    // Design spec §9.1: the reflex layer subscribes once at startup and expects
+    // to keep hearing about damage for the session's lifetime. Handlers bound
+    // to a single Bot instance silently stopped firing after any reconnect.
+    describe('subscription lifetime', () => {
+      it('delivers events to a handler registered while not connected', async () => {
+        await ctx.executor.disconnect()
+        let seen = 0
+        const off = ctx.executor.on('spawned', () => {
+          seen += 1
+        })
+        const r = await ctx.executor.connect()
+        expect(r.ok).toBe(true)
+        expect(seen).toBeGreaterThan(0)
+        off()
+      })
+
+      it('keeps a subscription alive across a disconnect/reconnect cycle', async () => {
+        let seen = 0
+        const off = ctx.executor.on('spawned', () => {
+          seen += 1
+        })
+        await ctx.executor.disconnect()
+        const before = seen
+        const r = await ctx.executor.connect()
+        expect(r.ok).toBe(true)
+        expect(seen).toBeGreaterThan(before)
+        off()
+      })
+
+      it('stops delivering after unsubscribe, even across a reconnect', async () => {
+        let seen = 0
+        const off = ctx.executor.on('spawned', () => {
+          seen += 1
+        })
+        off()
+        const atUnsubscribe = seen
+        await ctx.executor.disconnect()
+        await ctx.executor.connect()
+        expect(seen).toBe(atUnsubscribe)
+      })
+    })
   })
 }

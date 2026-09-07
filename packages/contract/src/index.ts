@@ -133,11 +133,11 @@ export interface BotExecutor {
   findBlocks(query: BlockQuery): readonly BlockInfo[]
 
   /**
-   * Subscribe to a push event. Registering while not connected is a no-op
-   * that returns a callable (but inert) unsubscribe — there is no live bot to
-   * attach a listener to, and a later `connect()` does not retroactively wire
-   * it up (subscriptions surviving a reconnect is an open contract question,
-   * deferred — see the design spec).
+   * Subscribe to the push event stream. Safe to call before `connect()`, and
+   * the subscription survives disconnect/reconnect cycles — the executor owns
+   * the emitter, not any single underlying connection. The reflex layer
+   * subscribes once at startup and must keep hearing about damage for the
+   * whole session.
    */
   on<K extends keyof BotEvents>(
     event: K,

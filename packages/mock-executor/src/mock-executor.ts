@@ -90,7 +90,9 @@ export class MockExecutor implements BotExecutor {
 
   async connect(): Promise<Result> {
     this.record('connect')
+    if (this.connected) return ok(undefined)
     this.connected = true
+    this.emit('spawned', {})
     return ok(undefined)
   }
 
@@ -138,10 +140,9 @@ export class MockExecutor implements BotExecutor {
     event: K,
     handler: (payload: BotEvents[K]) => void,
   ): Unsubscribe {
-    // Agrees with MineflayerExecutor: a safe no-op while disconnected — never
-    // throws, registers nothing, and returns a callable but inert
-    // unsubscribe. See the contract's on() doc comment.
-    if (!this.connected) return () => {}
+    // Design spec §9.1: the executor owns a long-lived handler registry, so a
+    // subscription taken before connect() — or held across a reconnect — keeps
+    // working. Registering while disconnected is legal and is NOT a no-op.
     const set = this.handlers.get(event) ?? new Set<Handler>()
     set.add(handler as Handler)
     this.handlers.set(event, set)

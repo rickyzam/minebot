@@ -39,6 +39,16 @@ export class MineflayerExecutor implements BotExecutor {
    * brake" Phase 5's reflex layer depends on.
    */
   private inFlightStop: (() => void) | null = null
+  /**
+   * Design spec §9.1. Handlers live on the executor, not on any single Bot, so
+   * a subscription taken before connect() — or held across a reconnect — keeps
+   * firing. Previously handlers bound to the Bot live at subscribe time, so
+   * after a drop they attached to a dead emitter and silently went quiet, which
+   * is exactly the failure the reflex layer could not survive.
+   */
+  private readonly handlers = new Map<keyof BotEvents, Set<(payload: never) => void>>()
+  /** Detach functions for the Mineflayer listeners feeding the emitter. */
+  private botWiring: Array<() => void> = []
 
   constructor(opts: MineflayerExecutorOptions = {}) {
     this.host = opts.host ?? 'localhost'
@@ -90,7 +100,13 @@ export class MineflayerExecutor implements BotExecutor {
       }
       const onSpawn = (): void => {
         this.bot = bot
+        this.wireBotEvents(bot)
         this.watchForUnexpectedDisconnect(bot)
+        // The 'spawn' listener added by wireBotEvents was attached during this
+        // very 'spawn' dispatch, so it does not see the event that is firing
+        // now. Emit it explicitly, or a handler registered before connect()
+        // misses the spawn it was waiting for.
+        this.emit('spawned', {})
         // VERIFIED 2026-09-07: bot.health is `undefined` at the 'spawn' event and
         // only populates when the server's first health packet lands, ~100ms later.
         // Resolving on 'spawn' alone would hand callers a snapshot reporting health 0.
@@ -129,6 +145,7 @@ export class MineflayerExecutor implements BotExecutor {
     const bot = this.bot
     if (!bot) return
     this.bot = null
+    this.unwireBotEvents()
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 5_000)
       bot.once('end', () => {
@@ -184,77 +201,61 @@ export class MineflayerExecutor implements BotExecutor {
     event: K,
     handler: (payload: BotEvents[K]) => void,
   ): Unsubscribe {
-    // Decision (Fix 2, post-review): unlike getState()/findBlocks(), on() does
-    // not throw when disconnected — it is a benign registration, not a read of
-    // world state, and throwing here would forbid the common pattern of
-    // subscribing before the first connect() call. Registering while
-    // disconnected is a safe no-op: it returns a callable but inert
-    // unsubscribe, and nothing is wired up for a later connect() to activate
-    // (subscriptions surviving a reconnect is deferred — see the design spec).
-    const bot = this.bot
-    if (!bot) return () => {}
-    const emit = handler as (p: unknown) => void
-
-    switch (event) {
-      case 'spawned': {
-        const h = (): void => emit({})
-        bot.on('spawn', h)
-        return () => void bot.removeListener('spawn', h)
-      }
-      case 'health': {
-        const h = (): void => emit({ health: bot.health, food: bot.food })
-        bot.on('health', h)
-        return () => void bot.removeListener('health', h)
-      }
-      case 'damaged': {
-        const h = (entity: { id: number }): void => {
-          if (entity.id !== bot.entity.id) return
-          emit({ health: bot.health, source: null })
-        }
-        bot.on('entityHurt', h)
-        return () => void bot.removeListener('entityHurt', h)
-      }
-      case 'entityNearby': {
-        const h = (e: { id: number; position: { x: number; y: number; z: number } }): void => {
-          const origin = bot.entity.position
-          emit({
-            entity: {
-              id: e.id,
-              name:
-                (e as { username?: string }).username ??
-                (e as { name?: string }).name ??
-                'unknown',
-              kind: classifyEntity(e as never),
-              position: { x: e.position.x, y: e.position.y, z: e.position.z },
-              distance: Math.hypot(
-                e.position.x - origin.x,
-                e.position.y - origin.y,
-                e.position.z - origin.z,
-              ),
-            },
-          })
-        }
-        bot.on('entitySpawn', h)
-        return () => void bot.removeListener('entitySpawn', h)
-      }
-      case 'chat': {
-        const h = (username: string, message: string): void => emit({ username, message })
-        bot.on('chat', h)
-        return () => void bot.removeListener('chat', h)
-      }
-      case 'death': {
-        const h = (): void => emit({})
-        bot.on('death', h)
-        return () => void bot.removeListener('death', h)
-      }
-      case 'disconnected': {
-        const h = (reason: string): void => emit({ reason })
-        bot.on('end', h)
-        return () => void bot.removeListener('end', h)
-      }
-      default:
-        return () => {}
+    const set = this.handlers.get(event) ?? new Set<(payload: never) => void>()
+    set.add(handler as (payload: never) => void)
+    this.handlers.set(event, set)
+    return () => {
+      set.delete(handler as (payload: never) => void)
     }
+  }
+
+  private emit<K extends keyof BotEvents>(event: K, payload: BotEvents[K]): void {
+    for (const h of this.handlers.get(event) ?? []) {
+      ;(h as (p: BotEvents[K]) => void)(payload)
+    }
+  }
+
+  /** Wire one Bot's events into the long-lived emitter. Idempotent per bot. */
+  private wireBotEvents(bot: Bot): void {
+    const add = <A extends unknown[]>(
+      mineflayerEvent: string,
+      handler: (...args: A) => void,
+    ): void => {
+      bot.on(mineflayerEvent as never, handler as never)
+      this.botWiring.push(() => void bot.removeListener(mineflayerEvent as never, handler as never))
+    }
+
+    add('spawn', () => this.emit('spawned', {}))
+    add('health', () => this.emit('health', { health: bot.health, food: bot.food }))
+    add('entityHurt', (entity: { id: number }) => {
+      if (entity.id !== bot.entity?.id) return
+      this.emit('damaged', { health: bot.health, source: null })
+    })
+    add('entitySpawn', (e: { id: number; position: { x: number; y: number; z: number } }) => {
+      const origin = bot.entity?.position
+      if (!origin) return
+      this.emit('entityNearby', {
+        entity: {
+          id: e.id,
+          name: (e as { username?: string }).username ?? (e as { name?: string }).name ?? 'unknown',
+          kind: classifyEntity(e as never),
+          position: { x: e.position.x, y: e.position.y, z: e.position.z },
+          distance: Math.hypot(
+            e.position.x - origin.x,
+            e.position.y - origin.y,
+            e.position.z - origin.z,
+          ),
+        },
+      })
+    })
+    add('chat', (username: string, message: string) => this.emit('chat', { username, message }))
+    add('death', () => this.emit('death', {}))
+    add('end', (reason: string) => this.emit('disconnected', { reason }))
+  }
+
+  private unwireBotEvents(): void {
+    for (const detach of this.botWiring) detach()
+    this.botWiring = []
   }
 
   async moveTo(target: Vec3, opts?: ActionOptions): Promise<Result> {
@@ -396,7 +397,10 @@ export class MineflayerExecutor implements BotExecutor {
    */
   private watchForUnexpectedDisconnect(bot: Bot): void {
     bot.once('end', () => {
-      if (this.bot === bot) this.bot = null
+      if (this.bot === bot) {
+        this.bot = null
+        this.unwireBotEvents()
+      }
     })
   }
 }
