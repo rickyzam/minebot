@@ -10,6 +10,36 @@
 
 **Spec:** [`docs/superpowers/specs/2026-09-07-phase-2-pathfinding-and-mining-design.md`](../specs/2026-09-07-phase-2-pathfinding-and-mining-design.md)
 
+## STATUS — read before starting
+
+**The GATE and Tasks 1-4 are DONE** (merged in PR #3). Track B's agreement was
+confirmed and all four design-spec §9 contract changes shipped. Do not re-run
+them; **start at Task 5.**
+
+Their checkboxes below are left unticked because the file was committed as an
+un-executed plan and never ticked in place — the git history is the record, not
+the boxes.
+
+**The environment changed after this plan was written.** Three things happened
+between Task 4 and Task 5, none of which this plan anticipated:
+
+1. **The dev server now runs content mods** (`nitwitmap`, `fabrictailor`). A
+   Fabric server with such a mod rejects a plain Mineflayer client; the executor
+   completes Fabric's registry-sync handshake automatically. Nothing to do —
+   just know that `fabric.int.test.ts` failing means that handshake broke.
+2. **A Velocity proxy now fronts the server.** Humans connect to the proxy on
+   25565 with Mojang auth; the backend moved to `127.0.0.1:25566` and bots reach
+   it directly with signed forwarding. `MineflayerExecutor`'s **default port is
+   now 25566**, so tests and scripts need no change — but any hard-coded 25565
+   is wrong.
+3. **Test baselines moved.** Before starting Task 5 the tree is at **153 unit
+   tests** and **61 integration tests**. Task 6 asks you to record counts before
+   and after a refactor; those are the numbers to expect, not the ones written
+   when this plan was drafted.
+
+See [`CLAUDE.md`](../../../CLAUDE.md) for the current topology and the
+environment facts both changes produced.
+
 ## Global Constraints
 
 - Node `>=24`. All packages are ESM (`"type": "module"`). `verbatimModuleSyntax` is on — use `import type` for type-only imports.
@@ -20,7 +50,7 @@
 - **Contract rule:** on abort, an action MUST resolve `{ ok: false, reason: 'interrupted' }`. It MUST NOT throw and MUST NOT resolve `ok: true`.
 - **Never weaken `runContractSuite` to make an implementation pass.** If the real executor fails an assertion, fix the executor.
 - Unit tests never touch the network. Integration tests live under `packages/*/test/integration/` and are the only tests requiring a running server.
-- Dev server: Fabric 1.21.10, `localhost:25565`, offline mode, survival + peaceful, in a **tmux session named `mc`**. Do not stop or restart it without asking. Drive its console with `tmux send-keys -t mc '<command>' Enter`.
+- Dev server: Fabric 1.21.10 backend on `127.0.0.1:25566` (tmux session `mc`), behind a Velocity proxy on `0.0.0.0:25565` (tmux session `velocity`). Bots connect to the **backend**, which is the executor's default port. Do not stop or restart either without asking. Drive the backend console with `tmux send-keys -t mc '<command>' Enter`.
 - Integration tests connect with a distinct username each and MUST disconnect in `afterEach`, or they leak a bot onto the server.
 
 ## Verified environment facts
