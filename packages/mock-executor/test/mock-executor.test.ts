@@ -1,0 +1,64 @@
+import { describe, it, expect } from 'vitest'
+import { MockExecutor } from '@minebot/mock-executor'
+import { runContractSuite } from '@minebot/mock-executor/contract-suite'
+
+runContractSuite('MockExecutor', async () => {
+  const executor = new MockExecutor({ actionDelayMs: 20 })
+  await executor.connect()
+  return { executor, cleanup: () => executor.disconnect() }
+})
+
+describe('MockExecutor specifics', () => {
+  it('records the calls made against it', async () => {
+    const m = new MockExecutor()
+    await m.connect()
+    await m.moveTo({ x: 1, y: 2, z: 3 })
+    m.chat('hello')
+    expect(m.calls.map((c) => c.name)).toEqual(['connect', 'moveTo', 'chat'])
+  })
+
+  it('updates its position after a successful moveTo', async () => {
+    const m = new MockExecutor({ position: { x: 0, y: 64, z: 0 } })
+    await m.connect()
+    const r = await m.moveTo({ x: 10, y: 64, z: -5 })
+    expect(r.ok).toBe(true)
+    expect(m.getState().self.position).toEqual({ x: 10, y: 64, z: -5 })
+  })
+
+  it('does not move when the action is aborted mid-flight', async () => {
+    const m = new MockExecutor({ position: { x: 0, y: 64, z: 0 }, actionDelayMs: 500 })
+    await m.connect()
+    const c = new AbortController()
+    const p = m.moveTo({ x: 99, y: 64, z: 99 }, { signal: c.signal })
+    setTimeout(() => c.abort(), 10)
+    const r = await p
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('interrupted')
+    expect(m.getState().self.position).toEqual({ x: 0, y: 64, z: 0 })
+  })
+
+  it('returns canned blocks filtered by name, distance and limit', async () => {
+    const m = new MockExecutor({
+      blocks: [
+        { name: 'coal_ore', position: { x: 5, y: 60, z: 0 }, distance: 5 },
+        { name: 'coal_ore', position: { x: 40, y: 60, z: 0 }, distance: 40 },
+        { name: 'iron_ore', position: { x: 6, y: 60, z: 0 }, distance: 6 },
+      ],
+    })
+    await m.connect()
+    const found = m.findBlocks({ names: ['coal_ore'], maxDistance: 32, limit: 10 })
+    expect(found).toHaveLength(1)
+    expect(found[0]?.name).toBe('coal_ore')
+  })
+
+  it('delivers emitted events to subscribers and stops after unsubscribe', async () => {
+    const m = new MockExecutor()
+    await m.connect()
+    const seen: number[] = []
+    const off = m.on('health', (p) => seen.push(p.health))
+    m.emit('health', { health: 12, food: 20 })
+    off()
+    m.emit('health', { health: 3, food: 20 })
+    expect(seen).toEqual([12])
+  })
+})
