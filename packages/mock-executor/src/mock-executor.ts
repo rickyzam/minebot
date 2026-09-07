@@ -14,6 +14,8 @@ import {
   type WorldSnapshot,
 } from '@minebot/contract'
 
+const describeVec = (v: Vec3): string => `(${v.x}, ${v.y}, ${v.z})`
+
 export interface MockOptions {
   position?: Vec3
   health?: number
@@ -145,21 +147,34 @@ export class MockExecutor implements BotExecutor {
   }
 
   async mineBlock(
-    blockName: string,
+    target: string | Vec3,
     maxDistance: number,
     opts?: ActionOptions,
   ): Promise<Result<{ position: Vec3; collected: boolean }>> {
-    this.record('mineBlock', blockName, maxDistance)
+    this.record('mineBlock', target, maxDistance)
     const r = await this.simulate(opts)
     if (!r.ok) return r
-    const match = this.blocks.find(
-      (b) => b.name === blockName && b.distance <= maxDistance,
-    )
-    if (!match) return fail('not_found', `no ${blockName} within ${maxDistance} blocks`)
+
+    const match =
+      typeof target === 'string'
+        ? this.blocks.find((b) => b.name === target && b.distance <= maxDistance)
+        : this.blocks.find(
+            (b) =>
+              b.position.x === target.x &&
+              b.position.y === target.y &&
+              b.position.z === target.z &&
+              b.distance <= maxDistance,
+          )
+
+    if (!match) {
+      const what = typeof target === 'string' ? target : `block at ${describeVec(target)}`
+      return fail('not_found', `no ${what} within ${maxDistance} blocks`)
+    }
+
     this.blocks = this.blocks.filter((b) => b !== match)
     this.inventory = [
       ...this.inventory,
-      { name: blockName, count: 1, slot: this.inventory.length },
+      { name: match.name, count: 1, slot: this.inventory.length },
     ]
     return ok({ position: match.position, collected: true })
   }

@@ -79,4 +79,40 @@ describe('MockExecutor specifics', () => {
     m.emit('health', { health: 3, food: 20 })
     expect(seen).toEqual([12])
   })
+
+  it('mines the exact block a Vec3 target names, not the nearest match', async () => {
+    const m = new MockExecutor({
+      blocks: [
+        { name: 'coal_ore', position: { x: 2, y: 60, z: 0 }, distance: 2 },
+        { name: 'coal_ore', position: { x: 9, y: 60, z: 0 }, distance: 9 },
+      ],
+    })
+    await m.connect()
+    const r = await m.mineBlock({ x: 9, y: 60, z: 0 }, 32)
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.value.position).toEqual({ x: 9, y: 60, z: 0 })
+    // The nearer block must still be standing — a name-based re-search would
+    // have taken it instead.
+    expect(m.findBlocks({ names: ['coal_ore'], maxDistance: 32, limit: 5 })).toHaveLength(1)
+  })
+
+  it('fails not_found for a Vec3 target with no block at it', async () => {
+    const m = new MockExecutor({
+      blocks: [{ name: 'coal_ore', position: { x: 2, y: 60, z: 0 }, distance: 2 }],
+    })
+    await m.connect()
+    const r = await m.mineBlock({ x: 40, y: 60, z: 0 }, 32)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('not_found')
+  })
+
+  it('fails not_found for a Vec3 target beyond maxDistance', async () => {
+    const m = new MockExecutor({
+      blocks: [{ name: 'coal_ore', position: { x: 9, y: 60, z: 0 }, distance: 9 }],
+    })
+    await m.connect()
+    const r = await m.mineBlock({ x: 9, y: 60, z: 0 }, 4)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('not_found')
+  })
 })

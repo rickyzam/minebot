@@ -149,8 +149,25 @@ export interface BotExecutor {
   // doc comment above.
   moveTo(target: Vec3, opts?: ActionOptions): Promise<Result>
   followPlayer(playerName: string, opts?: ActionOptions): Promise<Result>
+  /**
+   * Mine a block and try to collect its drop.
+   *
+   * `target` is either a block name (mine the nearest match within
+   * `maxDistance`) or an exact position (mine *that* block — the block
+   * `findBlocks` returned and the planner reasoned about). Accepting a
+   * position is what makes the search-choose-approach-mine loop expressible;
+   * a name-only signature re-searches and may pick a different block.
+   *
+   * `maxDistance` bounds the search for a name target, and bounds how far the
+   * bot will travel for a position target. A position further away than
+   * `maxDistance` fails `not_found` rather than walking across the world.
+   *
+   * Resolves `ok` with `collected: false` when the block was mined but its
+   * drop could not be retrieved — mining succeeded, and that fact must not be
+   * lost by reporting a failure.
+   */
   mineBlock(
-    blockName: string,
+    target: string | Vec3,
     maxDistance: number,
     opts?: ActionOptions,
   ): Promise<Result<{ position: Vec3; collected: boolean }>>

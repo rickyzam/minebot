@@ -135,6 +135,10 @@ export function runContractSuite(
       { name: 'followPlayer', run: (e, opts) => e.followPlayer('nonexistent-player', opts) },
       { name: 'mineBlock', run: (e, opts) => e.mineBlock('stone', 16, opts) },
       {
+        name: 'mineBlock(Vec3)',
+        run: (e, opts) => e.mineBlock({ x: 0, y: 64, z: 0 }, 16, opts),
+      },
+      {
         name: 'placeBlock',
         run: (e, opts) => e.placeBlock('dirt', { x: 0, y: 64, z: 0 }, opts),
       },
