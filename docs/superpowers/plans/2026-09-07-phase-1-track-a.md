@@ -16,7 +16,7 @@
 - Package names are scoped `@minebot/*`. All are `"private": true`.
 - `packages/contract` MUST have zero runtime dependencies. It is types plus two helper functions only.
 - `packages/agent` MUST NOT depend on `mineflayer`. Track B talks to the contract only.
-- Minecraft dev server: Fabric **1.21.10**, `localhost:25565`, `online-mode=false`, world seed `minebot`, survival + peaceful.
+- Minecraft dev server: Fabric **1.21.10**, `localhost:25565`, `online-mode=false`, world seed `openfield`, survival + peaceful.
 - Mineflayer connects with `auth: 'offline'` and an explicit `version: '1.21.10'`.
 - **Contract rule:** on abort, an action MUST resolve `{ ok: false, reason: 'interrupted' }`. It MUST NOT throw and MUST NOT resolve `ok: true`.
 - Unit tests never touch the network. Integration tests are the only tests that require a running server, and live under `packages/*/test/integration/`.
@@ -26,7 +26,10 @@
 
 - `bot.version` reports **`'1.21.9'`** even when `version: '1.21.10'` is requested, because both map to protocol 773. Never assert on `bot.version`.
 - `bot.health` and `bot.food` are **`undefined` at the `spawn` event** and populate ~100ms later on the first `health` event. `connect()` must wait for that (Task 5) or every snapshot taken right after connecting reports health 0.
+- **World chunks finish loading ~450ms AFTER the first `health` packet**, not before or alongside it. Measured during Task 5: `findBlocks()` returns 0 when called on the health event and 5 about 450ms later. So `connect()` must also await `bot.waitForChunksToLoad()` (best-effort — catch and proceed, never fail `connect()` over it), or every block search immediately after connecting comes back empty.
 - `bot.game.dimension` is `'overworld'`, not `'minecraft:overworld'`.
+- **Player spawn position varies between world generations even with a fixed seed**, and by more than a couple of blocks (measured y=110 and y=91 across two generations of the same seed). Never hard-code a spawn coordinate or assume a test starts where the last one did.
+- **The world was reseeded from `minebot` to `openfield` on 2026-09-07.** The original seed spawned in jungle, which defeats Phase 1's deliberately naive raw movement — dense trunks and 1-block gaps left the bot with 0 walkable blocks in every direction, and it repeatedly wedged against a 4-block oak log. `openfield` spawns on open plains: 0 tree logs within 32 blocks, no surface water, and 20–24 walkable blocks in all four directions. The jungle world is archived at `~/minecraft/server/minebot/world-archived-jungle-*` rather than deleted.
 - `bot.entity.onGround` and `bot.entity.isCollidedHorizontally` are both real booleans, so Task 6's auto-jump works.
 - At spawn (`y≈70`) there are 5+ `stone`/`dirt`/`grass_block` blocks within 24 and ~84 visible entities, so the block-search tests have real data. No `coal_ore` is visible at the surface — that is Phase 4's problem, not Phase 1's.
 
@@ -1103,7 +1106,7 @@ npm test
 npm run typecheck
 ```
 
-Expected: 14 new tests PASS.
+Expected: 13 new tests PASS (5 for `classifyEntity`, 8 for `toSnapshot`).
 
 - [ ] **Step 6: Commit**
 
