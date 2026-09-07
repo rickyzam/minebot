@@ -200,3 +200,20 @@ export async function buildArena(bounds: ArenaBounds): Promise<void> {
 export function placeArenaBlock(position: { x: number; y: number; z: number }, block: string): void {
   sendConsoleCommand(`setblock ${position.x} ${position.y} ${position.z} ${block}`)
 }
+
+/**
+ * Gives `username` an item via the server console. Tests need items the bot
+ * could not otherwise obtain in a fresh world.
+ */
+export function giveItem(username: string, item: string, count = 1): void {
+  sendConsoleCommand(`give ${username} ${item} ${count}`)
+}
+
+/**
+ * Empties `username`'s inventory. Tests asserting on what arrived in the
+ * inventory must start from a known-empty one, or an item left by an earlier
+ * test reads as this test's result.
+ */
+export function clearInventory(username: string): void {
+  sendConsoleCommand(`clear ${username}`)
+}

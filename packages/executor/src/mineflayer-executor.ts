@@ -13,6 +13,8 @@ import {
   type WorldSnapshot,
 } from '@minebot/contract'
 import { classifyEntity, toSnapshot, type MineflayerLike } from './snapshot.js'
+import { installFabricHandshake, type ProtocolClientLike } from './fabric-handshake.js'
+import type { RegistryEntry } from './fabric-registry.js'
 
 export interface MineflayerExecutorOptions {
   host?: string
@@ -20,6 +22,16 @@ export interface MineflayerExecutorOptions {
   username?: string
   version?: string
   connectTimeoutMs?: number
+  /**
+   * Complete Fabric API's registry-sync handshake so the bot can join a server
+   * running content-registering mods. Defaults to `true`.
+   *
+   * On by default because it is inert against a vanilla server — the channel
+   * advertisement goes unused and no sync payload ever arrives — while being
+   * required by any modded one. Set `false` only to reproduce the unpatched
+   * behaviour.
+   */
+  fabricCompat?: boolean
 }
 
 export class MineflayerExecutor implements BotExecutor {
@@ -29,6 +41,14 @@ export class MineflayerExecutor implements BotExecutor {
   private readonly username: string
   private readonly version: string
   private readonly connectTimeoutMs: number
+  private readonly fabricCompat: boolean
+  /**
+   * Registry entries the server reported that a vanilla client would not know —
+   * anything outside the `minecraft` namespace. Empty against a vanilla server.
+   * Refreshed on each connect, since a reconnect may reach a differently-modded
+   * server.
+   */
+  private fabricModdedEntries: readonly RegistryEntry[] = []
   /**
    * Settles the currently in-flight cancellable action (currently only
    * `moveTo`) as `interrupted`, if one is running. `stop()` invokes this
@@ -63,6 +83,19 @@ export class MineflayerExecutor implements BotExecutor {
     this.username = opts.username ?? 'MineBot'
     this.version = opts.version ?? '1.21.10'
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 30_000
+    this.fabricCompat = opts.fabricCompat ?? true
+  }
+
+  /**
+   * Registry entries the connected server reported outside the `minecraft`
+   * namespace — modded items, blocks and data components. Empty against a
+   * vanilla server, or when `fabricCompat` is disabled.
+   *
+   * Populated from whatever the server actually registered, so a newly added mod
+   * appears here with no code change.
+   */
+  moddedRegistryEntries(): readonly RegistryEntry[] {
+    return this.fabricModdedEntries
   }
 
   async connect(): Promise<Result> {
@@ -124,6 +157,18 @@ export class MineflayerExecutor implements BotExecutor {
       version: this.version,
     })
 
+    // Reset first, so nothing from a previous connection can survive even if
+    // the install below throws.
+    this.fabricModdedEntries = []
+
+    // Install before anything can await: the handshake lives entirely in the
+    // configuration phase, which begins immediately after login and well before
+    // 'spawn'. Registering later would miss it, and the server would kick us for
+    // never advertising the channels.
+    const fabric = this.fabricCompat
+      ? installFabricHandshake(bot._client as unknown as ProtocolClientLike)
+      : null
+
     return new Promise<Result>((resolve) => {
       let settled = false
       let healthTimer: ReturnType<typeof setTimeout> | undefined
@@ -165,6 +210,9 @@ export class MineflayerExecutor implements BotExecutor {
         // semantics the explicit spawned emit below already relies on.
         this.watchForUnexpectedDisconnect(bot)
         this.wireBotEvents(bot)
+        // By 'spawn' the configuration phase is over, so the handshake has
+        // either completed or the server never asked for one.
+        this.fabricModdedEntries = fabric?.moddedEntries ?? []
         // The 'spawn' listener added by wireBotEvents was attached during this
         // very 'spawn' dispatch, so it does not see the event that is firing
         // now. Emit it explicitly, or a handler registered before connect()
@@ -194,16 +242,19 @@ export class MineflayerExecutor implements BotExecutor {
       const onError = (e: Error): void => {
         this.bot = null
         this.unwireBotEvents()
+        this.fabricModdedEntries = []
         finish(fail('disconnected', e.message))
       }
       const onKicked = (reason: unknown): void => {
         this.bot = null
         this.unwireBotEvents()
+        this.fabricModdedEntries = []
         finish(fail('disconnected', `kicked: ${JSON.stringify(reason)}`))
       }
       const timer = setTimeout(() => {
         this.bot = null
         this.unwireBotEvents()
+        this.fabricModdedEntries = []
         try {
           bot.quit()
         } catch {
@@ -230,6 +281,7 @@ export class MineflayerExecutor implements BotExecutor {
     if (!bot) return
     this.bot = null
     this.unwireBotEvents()
+    this.fabricModdedEntries = []
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 5_000)
       bot.once('end', () => {
@@ -494,6 +546,7 @@ export class MineflayerExecutor implements BotExecutor {
       if (this.bot === bot) {
         this.bot = null
         this.unwireBotEvents()
+        this.fabricModdedEntries = []
       }
     })
   }

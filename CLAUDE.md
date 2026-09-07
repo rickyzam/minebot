@@ -11,9 +11,9 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 ## Commands
 
 ```bash
-npm test                  # 77 unit tests. No network. Fast. Run these constantly.
+npm test                  # 117 unit tests. No network. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
-npm run test:integration  # 47 tests. Requires the live dev server.
+npm run test:integration  # 53 tests. Requires the live dev server.
 npm run smoke             # Minimal "can a bot connect at all" check.
 npm run demo              # Connect, print snapshot, walk. The Phase 1 deliverable.
 ```
@@ -24,7 +24,7 @@ When an integration test fails, run `npm run smoke` first. It separates "my code
 
 **`packages/contract/` and `packages/mock-executor/` are a shared surface.** A second developer builds the LLM planning loop against them, with no Minecraft server. Changing a type, a method signature, or a documented guarantee there is a change to the integration boundary between two people's work.
 
-Do not change them to make something convenient. Additive changes still need agreement — see spec §9, which records four such changes deliberately left unapplied.
+Do not change them to make something convenient. Additive changes still need agreement — spec §9 records four that were held back until Track B agreed, then applied together as one unit.
 
 The corollary: **never weaken `runContractSuite` to make an implementation pass.** That suite is the entire mechanism by which the mock-to-real swap is verified. If the real executor fails an assertion, fix the executor. A suite bent to fit its implementations verifies nothing.
 
@@ -42,6 +42,12 @@ These cost real debugging time to discover. Treat them as settled.
 | `bot.entities` includes the bot's **own** entity | `toSnapshot` filters it out; anything reading raw Mineflayer entities must too |
 | `bot.entity.isCollidedHorizontally` is real at runtime but missing from `prismarine-entity`'s `.d.ts` | Needs a narrow cast |
 | Mineflayer's `findBlocks` sorts by distance from the **floored** origin | The executor re-sorts by exact distance to match what it reports |
+| A Fabric server running any content-registering mod rejects a plain Mineflayer client: *"This server requires Fabric Loader and Fabric API installed on your client!"* | Not a Mineflayer limitation — the client is kicked for never answering, not for failing a check. `installFabricHandshake` fixes it |
+| Fabric's `canSend` is satisfied purely by advertising the channel via `minecraft:register` in the **configuration** phase | Advertise before spawn; registering later misses the window |
+| The `fabric:registry/sync/direct` payload is chunked, terminated by a **zero-length** chunk | Acknowledge once, on the terminator. Acknowledging a chunk ends Fabric's task early and the next reply kills the connection with `Unexpected request for task finish, current task: synchronize_registries` |
+| Modded registry ids are appended **after** vanilla and delta-encoded, so vanilla ids do not move | Measured with a mod loaded: `coal` stayed 896, `stone_pickaxe` stayed 923. `minecraft-data` stays valid |
+| The sync payload is zero-padded to the chunk size | Decode to the declared structure, not to the end of the buffer |
+| nmp logs a non-fatal `partial packet` warning for packets carrying a **modded data component** | Expected, not a bug in our code. Unknown component codecs cannot be decoded; the bot degrades rather than failing |
 | `/fill` silently refuses unloaded chunks with "That position is not loaded" | The test arena is `forceload`ed. This bug once made every test pass against a freefalling bot |
 
 ## The dev server
@@ -51,7 +57,8 @@ Fabric 1.21.10, `localhost:25565`, offline mode, survival + peaceful, running in
 - **Do not stop, restart, or reconfigure it without asking.** Someone may be logged in, and it is shared state outside the repo.
 - Drive its console with `tmux send-keys -t mc '<command>' Enter`. This is how integration tests build reproducible scenarios.
 - Use `stop` for shutdown, never `kill` — the world needs to flush.
-- Any mod registering client-side content makes the server reject Mineflayer entirely. Only `fabric-api` should be loaded.
+- Mods are supported. A mod that registers content makes the server reject a *plain* Mineflayer client, but the executor completes Fabric's registry-sync handshake, so it connects anyway — see [`fabric-registry.ts`](packages/executor/src/fabric-registry.ts). Currently loaded: `fabric-api`, `nitwitmap` (adds an item), `fabrictailor` (skins, server-side only).
+- Adding another mod needs **no code change**. The handshake reports whatever the server registered, keyed on namespace rather than any mod list. If a new mod ever does break it, the failing test will be `fabric.int.test.ts`.
 
 ## Testing discipline
 
