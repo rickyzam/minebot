@@ -40,3 +40,5 @@ export {
   FORWARDING_SECRET_ENV,
   DEFAULT_FORWARDING_SECRET_PATH,
 } from './forwarding-secret.js'
+export { canHarvest, bestHarvestTool } from './harvest.js'
+export type { HarvestableBlock, ToolItem } from './harvest.js'
