@@ -34,7 +34,7 @@ export interface RawItem {
 }
 
 export interface MineflayerLike {
-  entity: { position: RawPosition; onGround?: boolean } | null
+  entity: { id: number; position: RawPosition; onGround?: boolean } | null
   health?: number
   food?: number
   game?: { dimension?: string }
@@ -42,6 +42,19 @@ export interface MineflayerLike {
   inventory: { items(): RawItem[] }
   heldItem?: RawItem | null
 }
+
+/**
+ * `nearbyEntities` cap. Spec §3.3 rejected an unbounded `nearbyBlocks` state
+ * dump because it cannot fit in an LLM prompt (~10^5 blocks in a 16-chunk
+ * radius) and replaced it with a server-filtered `findBlocks()`. The same
+ * argument applies to entities: ~84 were measured in `bot.entities` at spawn
+ * on the dev server, and that list is otherwise unbounded. `nearbyEntities`
+ * stays a plain array (no separate query method — entities move every tick,
+ * so a `findEntities()`-style pull API would be stale by the time a caller
+ * read it) but is capped and radius-limited here instead.
+ */
+export const NEARBY_ENTITY_RADIUS = 32
+export const NEARBY_ENTITY_LIMIT = 20
 
 export function classifyEntity(e: RawEntity): EntityKind {
   if (e.type === 'player') return 'player'
@@ -82,9 +95,12 @@ export function toSnapshot(bot: MineflayerLike, now: number = Date.now()): World
     heldItem: bot.heldItem ? freezeItem(bot.heldItem) : null,
   })
 
+  const selfId = bot.entity.id
   const nearbyEntities: readonly EntityInfo[] = Object.freeze(
     Object.values(bot.entities)
-      .filter((e): e is RawEntity => e !== undefined && e.position !== undefined)
+      .filter(
+        (e): e is RawEntity => e !== undefined && e.position !== undefined && e.id !== selfId,
+      )
       .map((e) =>
         Object.freeze({
           id: e.id,
@@ -95,7 +111,9 @@ export function toSnapshot(bot: MineflayerLike, now: number = Date.now()): World
           ...(e.health === undefined ? {} : { health: e.health }),
         }),
       )
-      .sort((a, b) => a.distance - b.distance),
+      .filter((e) => e.distance <= NEARBY_ENTITY_RADIUS)
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, NEARBY_ENTITY_LIMIT),
   )
 
   return Object.freeze({ takenAt: now, self, nearbyEntities })
