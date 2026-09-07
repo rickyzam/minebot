@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { MineflayerExecutor } from '../../src/index.js'
-import { buildArena, teleportAndWait, type ArenaBounds } from './mc-console.js'
+import { buildArena, teleportAndWait, waitForOnGround, type ArenaBounds } from './mc-console.js'
 
 /**
  * A fixed, self-healing test surface, built fresh via the server console
@@ -30,8 +30,18 @@ const ARENA: ArenaBounds = {
 const START = { x: 505, y: ARENA.floorY + 1, z: 4 }
 
 async function resetToArena(executor: MineflayerExecutor, username: string): Promise<void> {
-  buildArena(ARENA)
+  await buildArena(ARENA)
   await teleportAndWait(executor, username, START)
+  // teleportAndWait only confirms *position* converged — it says nothing about
+  // whether the floor is actually there (/tp succeeds regardless, and a falling
+  // bot's position briefly looks "close enough" too). Confirm the bot actually
+  // landed on solid ground *at the arena's height* before any test proceeds —
+  // checking onGround alone isn't enough, since a bot falling through a missing
+  // floor eventually lands on real terrain far below and satisfies onGround too,
+  // just at the wrong height — so a broken or missing arena fails loudly here
+  // instead of moveTo silently passing on a bot that's drifting through (or
+  // resting far beneath) empty air.
+  await waitForOnGround(executor, { expectedY: START.y })
 }
 
 describe('MineflayerExecutor.moveTo', () => {

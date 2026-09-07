@@ -67,6 +67,63 @@ export async function teleportAndWait(
   }
 }
 
+/**
+ * Polls the bot's own reported `self.onGround` (and, if `expectedY` is
+ * given, that its height matches) until satisfied, or throws if it hasn't
+ * within `timeoutMs`.
+ *
+ * `teleportAndWait` only confirms *position* converged near the target —
+ * that says nothing about whether there was actually a floor there. `/tp`
+ * succeeds regardless of what's beneath the destination, and a bot in
+ * freefall reads a position close to the teleport target for a brief
+ * moment before gravity pulls it away, so a position-only check can
+ * converge on a bot that is falling through empty air. Since `moveTo`'s
+ * arrival check is horizontal-only, that falling bot could still drift
+ * horizontally into a target and report `ok: true` — a test passing
+ * without its fixture (the arena floor) having actually been there.
+ *
+ * `onGround` alone is not quite enough, though — proven empirically while
+ * building this fix: a bot falling through a missing arena floor doesn't
+ * fall forever, it falls all the way down to whatever real terrain exists
+ * far below, and *that* eventually satisfies `onGround: true` too, just at
+ * the wrong height. Pass `expectedY` (the arena's `floorY + 1`) so this
+ * only accepts "on the ground" at the height the fixture is supposed to put
+ * it at, not "on the ground" anywhere in the world.
+ *
+ * Poll rather than assert instantly: immediately after a teleport the bot
+ * is still settling (typically through the ~0.7 block corner-of-block
+ * offset `/tp` leaves — see `teleportAndWait`), so a brief `onGround: false`
+ * right after landing is expected, not a failure.
+ */
+export async function waitForOnGround(
+  executor: MineflayerExecutor,
+  opts: { timeoutMs?: number; expectedY?: number; yTolerance?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 8_000
+  const yTolerance = opts.yTolerance ?? 1.0
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const self = executor.getState().self
+    const atExpectedHeight =
+      opts.expectedY === undefined || Math.abs(self.position.y - opts.expectedY) <= yTolerance
+    if (self.onGround && atExpectedHeight) return
+    if (Date.now() >= deadline) {
+      const heightNote =
+        opts.expectedY !== undefined ? ` at the expected height (y ≈ ${opts.expectedY})` : ''
+      throw new Error(
+        `waitForOnGround: bot did not settle onto solid ground${heightNote} within ` +
+          `${timeoutMs}ms (last position (${self.position.x.toFixed(2)}, ` +
+          `${self.position.y.toFixed(2)}, ${self.position.z.toFixed(2)}), ` +
+          `onGround=${self.onGround}). The arena floor is most likely missing, its /fill ` +
+          `didn't take, or its chunk wasn't loaded when the fill ran — check buildArena's ` +
+          `bounds and forceload call, and check the server log for "Successfully filled" ` +
+          `vs "That position is not loaded" / "No blocks were filled".`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+}
+
 export interface ArenaBounds {
   /** Inclusive world-space bounds of the platform, in blocks. */
   x0: number
@@ -102,10 +159,34 @@ export interface ArenaBounds {
  * test in this file does `buildArena` then `teleportAndWait`. Keep the
  * volume (`(x1-x0+1) * (clearance+1) * (z1-z0+1)`, applied twice — once for
  * the air fill, once for the floor) well under `/fill`'s 32768-block limit.
+ *
+ * `/fill` silently refuses to touch a chunk that isn't currently loaded — it
+ * reports "That position is not loaded" or "No blocks were filled" rather
+ * than failing the command outright, so nothing in the console output on its
+ * own signals the no-op to a caller that isn't watching for it. Nothing
+ * keeps chunks this far from spawn loaded on their own (view-distance is
+ * finite, and no bot is near this coordinate until *after* the arena is
+ * supposed to already exist) — confirmed happening for real: every fill this
+ * suite issued before this fix failed exactly this way (see
+ * task-6-report.md). `/forceload` keeps chunks loaded independently of
+ * player proximity, closing that gap at the root rather than only detecting
+ * it after the fact (`waitForOnGround` below remains the detection layer —
+ * the two are complementary, not alternatives).
+ *
+ * Left forceloaded permanently: `forceload remove` is never called. This is
+ * a tiny, isolated region on a dev server, so the ongoing simulation cost is
+ * negligible, and leaving it loaded means every subsequent call skips
+ * re-paying the chunk-load race — `forceload add` is idempotent, so calling
+ * it again on an already-forceloaded region is a harmless no-op.
  */
-export function buildArena(bounds: ArenaBounds): void {
+export async function buildArena(bounds: ArenaBounds): Promise<void> {
   const { x0, x1, z0, z1, floorY } = bounds
   const clearance = bounds.clearance ?? 6
+  sendConsoleCommand(`forceload add ${x0} ${z0} ${x1} ${z1}`)
+  // Give the server a moment to actually load/generate the chunks before
+  // filling them — forceload registering the region is not the same as the
+  // chunks already being resident.
+  await new Promise((resolve) => setTimeout(resolve, 500))
   sendConsoleCommand(`fill ${x0} ${floorY + 1} ${z0} ${x1} ${floorY + clearance} ${z1} air`)
   sendConsoleCommand(`fill ${x0} ${floorY} ${z0} ${x1} ${floorY} ${z1} stone`)
 }
