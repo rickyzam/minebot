@@ -14,8 +14,12 @@
  */
 import { randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { MineflayerExecutor, texturesProperty } from '../packages/executor/src/index.js'
+import { MineflayerExecutor } from '../packages/executor/src/index.js'
 import { fetchRandomSkins, type SkinChoice } from './random-skin.js'
+import { loadHistory, saveHistory, remember, DEFAULT_HISTORY_LIMIT } from './skin-history.js'
+
+/** Gitignored; ~70 KB at the default 1000-entry cap. */
+const HISTORY_PATH = new URL('../.skin-history.json', import.meta.url).pathname
 
 /**
  * Distinct names, plus an armour colour used only as a fallback.
@@ -69,9 +73,17 @@ async function main(): Promise<void> {
 
   // Fetched before connecting: the skin travels in the login payload, so it has
   // to be chosen up front rather than applied afterwards.
-  const skins: SkinChoice[] = wantSkins ? await fetchRandomSkins(roster.length) : []
+  const history = wantSkins ? loadHistory(HISTORY_PATH) : { used: [] }
+  const skins: SkinChoice[] = wantSkins
+    ? await fetchRandomSkins(roster.length, { history })
+    : []
   if (wantSkins && skins.length === 0) {
     console.log('No skins available (offline or rate-limited) — falling back to dyed armour.')
+  } else if (wantSkins) {
+    saveHistory(HISTORY_PATH, remember(history, skins.map((s) => s.texture)))
+    console.log(
+      `${skins.length} skin(s) chosen; ${history.used.length}/${DEFAULT_HISTORY_LIMIT} previously used skins excluded.`,
+    )
   }
 
   for (const [index, { username, colour, label }] of roster.entries()) {
@@ -84,8 +96,10 @@ async function main(): Promise<void> {
     const executor = new MineflayerExecutor({
       username,
       velocityUuid: uuid,
+      // Mojang's signed pair, forwarded verbatim. Building the property by
+      // hand produces an unsigned one, which clients silently discard.
       velocityProperties: skin
-        ? [texturesProperty({ url: skin.url, username, uuid })]
+        ? [{ name: 'textures', value: skin.value, signature: skin.signature }]
         : undefined,
     })
     const result = await executor.connect()
@@ -123,6 +137,33 @@ async function main(): Promise<void> {
     console.error('No bots connected.')
     process.exit(1)
   }
+
+  // New players are placed at a random point inside the server's spawn radius,
+  // so with several bots two can land on the same block — seen for real. Spread
+  // them once everyone is in, which also puts each on solid ground rather than
+  // wherever the spawn roll happened to leave them.
+  //
+  // Targets are named explicitly rather than using @a: this must never move a
+  // human who happens to be standing at spawn.
+  const names = executors.map((e) => e.username).join(' ')
+  mc(`spreadplayers 0 0 4 24 false ${names}`)
+  await sleep(1500)
+
+  const positions = new Map<string, string>()
+  for (const { username, executor } of executors) {
+    try {
+      const p = executor.getState().self.position
+      positions.set(username, `${Math.round(p.x)},${Math.round(p.z)}`)
+    } catch {
+      // Disconnected mid-spread; the status loop below will report it.
+    }
+  }
+  const overlapping = positions.size - new Set(positions.values()).size
+  console.log(
+    overlapping === 0
+      ? `Spread: all ${positions.size} bots on distinct blocks.`
+      : `Spread: ${overlapping} bot(s) still sharing a block.`,
+  )
 
   console.log(`\n${executors.length} bot(s) online. Ctrl-C to disconnect them.`)
 

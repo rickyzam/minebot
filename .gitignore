@@ -12,3 +12,6 @@ coverage/
 # Never commit a proxy forwarding secret.
 forwarding.secret
 *.secret
+
+# Rotating list of recently used bot skins.
+.skin-history.json
