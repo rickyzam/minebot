@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { MockExecutor } from '@minebot/mock-executor'
 import { runContractSuite } from '@minebot/mock-executor/contract-suite'
+import type { FailureReason } from '@minebot/contract'
 
 // Fix 4 (post-review): a suite instance seeded with zero blocks made every
 // findBlocks assertion in the shared suite vacuous (`[].length <= limit`
@@ -114,5 +115,62 @@ describe('MockExecutor specifics', () => {
     const r = await m.mineBlock({ x: 9, y: 60, z: 0 }, 4)
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toBe('not_found')
+  })
+})
+
+describe('MockExecutor failure injection', () => {
+  const ALL_REASONS: FailureReason[] = [
+    'not_found', 'unreachable', 'interrupted', 'invalid_target', 'missing_tool',
+    'inventory_full', 'timeout', 'disconnected', 'internal',
+  ]
+
+  it.each(ALL_REASONS)('can produce %s from moveTo', async (reason) => {
+    const m = new MockExecutor({ failures: { moveTo: { reason } } })
+    await m.connect()
+    const r = await m.moveTo({ x: 1, y: 64, z: 1 })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe(reason)
+  })
+
+  it('carries the injected detail string', async () => {
+    const m = new MockExecutor({ failures: { mineBlock: { reason: 'missing_tool', detail: 'need a pickaxe' } } })
+    await m.connect()
+    const r = await m.mineBlock('coal_ore', 16)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.detail).toBe('need a pickaxe')
+  })
+
+  it('injects per action, leaving others working', async () => {
+    const m = new MockExecutor({ failures: { flee: { reason: 'internal' } } })
+    await m.connect()
+    expect((await m.moveTo({ x: 1, y: 64, z: 1 })).ok).toBe(true)
+    expect((await m.flee()).ok).toBe(false)
+  })
+
+  it('setFailure drives a fail-then-succeed retry sequence on one instance', async () => {
+    const m = new MockExecutor()
+    await m.connect()
+    m.setFailure('moveTo', { reason: 'unreachable' })
+    expect((await m.moveTo({ x: 5, y: 64, z: 5 })).ok).toBe(false)
+    m.setFailure('moveTo', null)
+    expect((await m.moveTo({ x: 5, y: 64, z: 5 })).ok).toBe(true)
+    expect(m.getState().self.position).toEqual({ x: 5, y: 64, z: 5 })
+  })
+
+  it('does not let injection override the abort rule', async () => {
+    // The contract's resolve-interrupted-on-abort rule outranks injection;
+    // otherwise a test could use injection to fake a contract violation.
+    const m = new MockExecutor({ failures: { moveTo: { reason: 'internal' } } })
+    await m.connect()
+    const r = await m.moveTo({ x: 1, y: 64, z: 1 }, { signal: AbortSignal.abort() })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('interrupted')
+  })
+
+  it('does not let injection mask being disconnected', async () => {
+    const m = new MockExecutor({ failures: { moveTo: { reason: 'internal' } } })
+    const r = await m.moveTo({ x: 1, y: 64, z: 1 })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('disconnected')
   })
 })

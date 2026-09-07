@@ -7,6 +7,7 @@ import {
   type BotEvents,
   type BotExecutor,
   type EntityInfo,
+  type FailureReason,
   type ItemStack,
   type Result,
   type Unsubscribe,
@@ -15,6 +16,19 @@ import {
 } from '@minebot/contract'
 
 const describeVec = (v: Vec3): string => `(${v.x}, ${v.y}, ${v.z})`
+
+export type MockActionName =
+  | 'moveTo'
+  | 'followPlayer'
+  | 'mineBlock'
+  | 'placeBlock'
+  | 'attack'
+  | 'flee'
+
+export interface InjectedFailure {
+  reason: FailureReason
+  detail?: string
+}
 
 export interface MockOptions {
   position?: Vec3
@@ -25,6 +39,12 @@ export interface MockOptions {
   blocks?: BlockInfo[]
   /** Simulated duration of each action, so cancellation can be exercised. */
   actionDelayMs?: number
+  /**
+   * Force an action to fail with a chosen reason. Exists because the mock can
+   * otherwise only produce 3 of 9 FailureReason values, leaving Track B unable
+   * to test the retry policy the contract's closed reason set exists for.
+   */
+  failures?: Partial<Record<MockActionName, InjectedFailure>>
 }
 
 export interface RecordedCall {
@@ -53,6 +73,7 @@ export class MockExecutor implements BotExecutor {
    * against both implementations.
    */
   private inFlightStop: (() => void) | null = null
+  private readonly failures = new Map<MockActionName, InjectedFailure>()
 
   constructor(opts: MockOptions = {}) {
     this.position = opts.position ?? { x: 0, y: 64, z: 0 }
@@ -62,6 +83,9 @@ export class MockExecutor implements BotExecutor {
     this.entities = opts.entities ?? []
     this.blocks = opts.blocks ?? []
     this.delayMs = opts.actionDelayMs ?? 0
+    for (const [action, failure] of Object.entries(opts.failures ?? {})) {
+      if (failure) this.failures.set(action as MockActionName, failure)
+    }
   }
 
   async connect(): Promise<Result> {
@@ -135,7 +159,7 @@ export class MockExecutor implements BotExecutor {
 
   async moveTo(target: Vec3, opts?: ActionOptions): Promise<Result> {
     this.record('moveTo', target)
-    const r = await this.simulate(opts)
+    const r = await this.simulate('moveTo', opts)
     if (!r.ok) return r
     this.position = { ...target }
     return ok(undefined)
@@ -143,7 +167,7 @@ export class MockExecutor implements BotExecutor {
 
   async followPlayer(playerName: string, opts?: ActionOptions): Promise<Result> {
     this.record('followPlayer', playerName)
-    return this.simulate(opts)
+    return this.simulate('followPlayer', opts)
   }
 
   async mineBlock(
@@ -152,7 +176,7 @@ export class MockExecutor implements BotExecutor {
     opts?: ActionOptions,
   ): Promise<Result<{ position: Vec3; collected: boolean }>> {
     this.record('mineBlock', target, maxDistance)
-    const r = await this.simulate(opts)
+    const r = await this.simulate('mineBlock', opts)
     if (!r.ok) return r
 
     const match =
@@ -181,12 +205,12 @@ export class MockExecutor implements BotExecutor {
 
   async placeBlock(blockName: string, position: Vec3, opts?: ActionOptions): Promise<Result> {
     this.record('placeBlock', blockName, position)
-    return this.simulate(opts)
+    return this.simulate('placeBlock', opts)
   }
 
   async attack(entityId: number, opts?: ActionOptions): Promise<Result> {
     this.record('attack', entityId)
-    const r = await this.simulate(opts)
+    const r = await this.simulate('attack', opts)
     if (!r.ok) return r
     if (!this.entities.some((e) => e.id === entityId)) {
       return fail('not_found', `no entity ${entityId}`)
@@ -196,7 +220,7 @@ export class MockExecutor implements BotExecutor {
 
   async flee(opts?: ActionOptions): Promise<Result> {
     this.record('flee')
-    return this.simulate(opts)
+    return this.simulate('flee', opts)
   }
 
   chat(message: string): void {
@@ -208,6 +232,16 @@ export class MockExecutor implements BotExecutor {
     const cancel = this.inFlightStop
     this.inFlightStop = null
     cancel?.()
+  }
+
+  /**
+   * Change (or clear, with `null`) an injected failure on a live mock, so a
+   * fail-then-succeed retry sequence can be driven without building a second
+   * executor.
+   */
+  setFailure(action: MockActionName, failure: InjectedFailure | null): void {
+    if (failure) this.failures.set(action, failure)
+    else this.failures.delete(action)
   }
 
   private record(name: string, ...args: unknown[]): void {
@@ -222,9 +256,13 @@ export class MockExecutor implements BotExecutor {
    * MineflayerExecutor's per-action checks: already-aborted first, then
    * disconnected.
    */
-  private simulate(opts?: ActionOptions): Promise<Result> {
+  private simulate(action: MockActionName, opts?: ActionOptions): Promise<Result> {
+    // Contract rule first: an already-aborted signal resolves `interrupted`
+    // whatever is injected. Injection must not be able to fake a violation.
     if (opts?.signal?.aborted) return Promise.resolve(fail('interrupted', 'aborted before start'))
     if (!this.connected) return Promise.resolve(fail('disconnected', 'not connected'))
+    const injected = this.failures.get(action)
+    if (injected) return Promise.resolve(fail(injected.reason, injected.detail ?? `injected ${injected.reason}`))
     if (this.delayMs === 0) return Promise.resolve(ok(undefined))
     return new Promise<Result>((resolve) => {
       let settled = false
