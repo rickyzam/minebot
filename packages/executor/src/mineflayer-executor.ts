@@ -24,6 +24,7 @@ import {
   type VelocityForwardingOptions,
 } from './velocity-handshake.js'
 import { resolveForwardingSecret } from './forwarding-secret.js'
+import { canHarvest, bestHarvestTool, type ToolItem } from './harvest.js'
 
 // VERIFIED 2026-09-07: `goals` is not an ESM named export of this CJS package
 // — Node's named-export detection finds only `Movements`, `pathfinder` and
@@ -37,6 +38,18 @@ const { pathfinder, Movements, goals } = pathfinderPkg
  * compile time instead of trusted.
  */
 type PathfinderGoal = PathfinderGoals.Goal
+
+/**
+ * The Block and Vec3 types Mineflayer hands back, derived from its own
+ * signatures rather than imported from `prismarine-block`/`vec3`. Those are
+ * only transitive dependencies, and this repository pins every dependency it
+ * imports explicitly; deriving keeps the types exact with no manifest change.
+ *
+ * Note `MineflayerVec3` is prismarine's class — with `.offset()`, `.set()`,
+ * `.distanceTo()` — not the contract's plain `{ x, y, z }` `Vec3`.
+ */
+type MineflayerBlock = NonNullable<ReturnType<Bot['blockAt']>>
+type MineflayerVec3 = MineflayerBlock['position']
 
 export interface MineflayerExecutorOptions {
   host?: string
@@ -659,13 +672,125 @@ export class MineflayerExecutor implements BotExecutor {
   }
 
   async mineBlock(
-    _target: string | Vec3,
-    _maxDistance: number,
+    target: string | Vec3,
+    maxDistance: number,
     opts?: ActionOptions,
   ): Promise<Result<{ position: Vec3; collected: boolean }>> {
-    if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
-    if (!this.bot) return fail('disconnected', 'not connected')
-    return fail('internal', 'mineBlock arrives in Phase 2')
+    return this.runAction(opts, 60_000, async (bot, signal) => {
+      // --- Step 1: resolve the target to a concrete block ---
+      const resolved = this.resolveMineTarget(bot, target, maxDistance)
+      if (!resolved.ok) return resolved
+      const block = resolved.value
+      const position: Vec3 = {
+        x: block.position.x,
+        y: block.position.y,
+        z: block.position.z,
+      }
+
+      // --- Step 2: harvest check BEFORE digging ---
+      // Ordering is the whole point. Bare-handed or wrong-tooled, coal ore
+      // takes 15 seconds to break and drops nothing (measured), so checking
+      // afterwards would mean destroying the resource to discover we could
+      // not have collected it.
+      const items: ToolItem[] = bot.inventory
+        .items()
+        .map((i) => ({ name: i.name, type: i.type, slot: i.slot }))
+      const held = bot.heldItem
+        ? { name: bot.heldItem.name, type: bot.heldItem.type, slot: bot.heldItem.slot }
+        : null
+
+      if (!canHarvest(block, held)) {
+        const better = bestHarvestTool(block, items)
+        if (!better) {
+          return fail(
+            'missing_tool',
+            `nothing in inventory can harvest ${block.name}; the block was left standing`,
+          )
+        }
+        const toEquip = bot.inventory.items().find((i) => i.slot === better.slot)
+        if (!toEquip) {
+          return fail('internal', `tool in slot ${better.slot} vanished before equipping`)
+        }
+        await bot.equip(toEquip, 'hand')
+      }
+
+      if (bot.inventory.emptySlotCount() === 0) {
+        return fail('inventory_full', 'no free inventory slot for the drop')
+      }
+      if (signal.aborted) return ok({ position, collected: false })
+
+      // --- Step 3: approach, then dig ---
+      const approach = await this.gotoGoal(
+        bot,
+        signal,
+        new goals.GoalLookAtBlock(block.position, bot.world),
+      )
+      if (!approach.ok) return approach
+      if (signal.aborted) return ok({ position, collected: false })
+
+      // Re-read the block: the approach took time, and something else may have
+      // broken it while we walked.
+      const fresh = bot.blockAt(block.position)
+      if (!fresh || fresh.name === 'air') {
+        return fail(
+          'not_found',
+          `${block.name} at ${position.x},${position.y},${position.z} is gone`,
+        )
+      }
+      await bot.dig(fresh)
+
+      return ok({ position, collected: false })
+    })
+  }
+
+  /**
+   * Resolve a mine target to a live block. A name searches for the nearest
+   * match; a position names one block exactly — which is the point of
+   * accepting a Vec3 at all, since a name re-search may pick a different
+   * block than the planner reasoned about.
+   */
+  private resolveMineTarget(
+    bot: Bot,
+    target: string | Vec3,
+    maxDistance: number,
+  ): Result<MineflayerBlock> {
+    if (typeof target === 'string') {
+      if (!bot.registry.blocksByName[target]) {
+        return fail('invalid_target', `unknown block name "${target}"`)
+      }
+      const nearest = this.findBlocks({ names: [target], maxDistance, limit: 1 })[0]
+      if (!nearest) return fail('not_found', `no ${target} within ${maxDistance} blocks`)
+      const block = bot.blockAt(
+        this.toBlockPos(bot, nearest.position.x, nearest.position.y, nearest.position.z),
+      )
+      if (!block) return fail('not_found', `the ${target} found is no longer loaded`)
+      return ok(block)
+    }
+
+    const origin = bot.entity.position
+    const distance = Math.hypot(target.x - origin.x, target.y - origin.y, target.z - origin.z)
+    if (distance > maxDistance) {
+      return fail(
+        'not_found',
+        `target is ${distance.toFixed(1)} blocks away, beyond maxDistance ${maxDistance}`,
+      )
+    }
+    const block = bot.blockAt(this.toBlockPos(bot, target.x, target.y, target.z))
+    if (!block || block.name === 'air') {
+      return fail('not_found', `no block at (${target.x}, ${target.y}, ${target.z})`)
+    }
+    return ok(block)
+  }
+
+  /**
+   * Build a prismarine Vec3 without importing `vec3` directly. `vec3` is only
+   * a transitive dependency of mineflayer, and this repository pins every
+   * dependency it imports explicitly — cloning a Vec3 the bot already owns
+   * gets the same instance type with no manifest change. `offset()` returns a
+   * new vector, so the bot's own position is never mutated.
+   */
+  private toBlockPos(bot: Bot, x: number, y: number, z: number): MineflayerVec3 {
+    return bot.entity.position.offset(0, 0, 0).set(x, y, z)
   }
 
   async placeBlock(_blockName: string, _position: Vec3, opts?: ActionOptions): Promise<Result> {

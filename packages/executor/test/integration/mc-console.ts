@@ -234,3 +234,21 @@ export function giveItem(username: string, item: string, count = 1): void {
 export function clearInventory(username: string): void {
   sendConsoleCommand(`clear ${username}`)
 }
+
+/**
+ * Puts `item` in an exact inventory slot, using vanilla's slot names —
+ * `hotbar.0`…`hotbar.8`, `inventory.0`…`inventory.26`, `weapon.mainhand`.
+ *
+ * `giveItem` cannot express "in the inventory but NOT in the hand", and the
+ * difference is not academic: `/give` fills the first free slot, and whether
+ * that slot is the *held* one depends on the player's selected hotbar slot.
+ * That selection persists in player data, survives `/clear`, and carries over
+ * between runs — `bot.equip()` moves it, so a test that equips a tool changes
+ * what the next run of that same test starts out holding. A test needing the
+ * tool out of the hand must place it exactly, or it passes or fails according
+ * to what the previous run left behind. (Learned here: the equip test passed
+ * alone and failed in the full suite for exactly this reason.)
+ */
+export function placeInSlot(username: string, slot: string, item: string, count = 1): void {
+  sendConsoleCommand(`item replace entity ${username} ${slot} with ${item} ${count}`)
+}
