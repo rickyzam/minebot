@@ -29,6 +29,13 @@ export const FABRIC_SYNC_COMPLETE = 'fabric:registry/sync/complete'
 /** The channels a client must advertise to be treated as Fabric-capable. */
 export const FABRIC_CHANNELS: readonly string[] = [FABRIC_SYNC_DIRECT, FABRIC_SYNC_COMPLETE]
 
+/**
+ * Ceiling on an assembled sync payload. Generous — a real capture from a server
+ * with one content mod was a single 32768-byte chunk — but bounded, so a server
+ * that never terminates the stream fails loudly instead of exhausting memory.
+ */
+export const MAX_ASSEMBLED_BYTES = 8 * 1024 * 1024
+
 /** One registry entry the server reported: its full id and its numeric id. */
 export interface RegistryEntry {
   /** Registry this entry belongs to, e.g. `minecraft:item`. */
@@ -61,16 +68,32 @@ export function encodeRegisterPayload(channels: readonly string[]): Buffer {
  * So `push` returns `null` until the terminator arrives, and the assembled buffer
  * exactly once when it does.
  */
-export function createChunkAssembler(): { push(chunk: Buffer): Buffer | null } {
+export function createChunkAssembler(
+  maxBytes: number = MAX_ASSEMBLED_BYTES,
+): { push(chunk: Buffer): Buffer | null } {
   let chunks: Buffer[] = []
+  let total = 0
   return {
     push(chunk: Buffer): Buffer | null {
       if (chunk.length > 0) {
+        total += chunk.length
+        // The remote server decides how much it sends. Without a cap, a server
+        // that streams chunks and never sends the terminator — malicious, buggy,
+        // or just interrupted — grows this array until the process dies. This is
+        // the only place remote input drives unbounded allocation.
+        if (total > maxBytes) {
+          chunks = []
+          total = 0
+          throw new Error(
+            `registry sync: payload exceeded ${maxBytes} bytes without a terminator`,
+          )
+        }
         chunks.push(chunk)
         return null
       }
       const assembled = Buffer.concat(chunks)
       chunks = []
+      total = 0
       return assembled
     },
   }
@@ -85,20 +108,19 @@ class Reader {
     this.buf = buf
   }
 
-  get done(): boolean {
-    return this.offset >= this.buf.length
-  }
-
   varInt(): number {
     let value = 0
     let shift = 0
     let byte: number
     do {
       if (this.offset >= this.buf.length) throw new Error('registry sync: truncated varint')
+      // Checked before the shift, not after: JS bitwise operands are 32-bit, so
+      // a sixth byte would be OR'd at `<< 35`, which evaluates as `<< 3` and
+      // silently corrupts the value before any later guard could reject it.
+      if (shift >= 35) throw new Error('registry sync: varint too long')
       byte = this.buf[this.offset++]!
       value |= (byte & 0x7f) << shift
       shift += 7
-      if (shift > 35) throw new Error('registry sync: varint too long')
     } while (byte & 0x80)
     return value >>> 0
   }

@@ -5,6 +5,7 @@ import {
   encodeRegisterPayload,
   createChunkAssembler,
   parseRegistrySync,
+  MAX_ASSEMBLED_BYTES,
   moddedEntries,
   FABRIC_CHANNELS,
   FABRIC_SYNC_DIRECT,
@@ -50,6 +51,27 @@ describe('createChunkAssembler', () => {
     // task finish, current task: synchronize_registries".
     const a = createChunkAssembler()
     expect(a.push(Buffer.alloc(32768, 7))).toBeNull()
+  })
+
+  it('rejects a stream that never terminates, instead of growing forever', () => {
+    // The remote server decides how much it sends. Proven to fire rather than
+    // assumed: a small cap here is the same code path as the 8MB default.
+    const a = createChunkAssembler(10)
+    expect(a.push(Buffer.alloc(6))).toBeNull()
+    expect(() => a.push(Buffer.alloc(6))).toThrow(/exceeded 10 bytes/)
+  })
+
+  it('recovers after rejecting an oversized stream', () => {
+    const a = createChunkAssembler(10)
+    expect(() => a.push(Buffer.alloc(20))).toThrow()
+    // The abandoned chunks must not count against the next payload.
+    expect(a.push(Buffer.from([1, 2]))).toBeNull()
+    expect(a.push(Buffer.alloc(0))).toEqual(Buffer.from([1, 2]))
+  })
+
+  it('defaults to a generous but bounded cap', () => {
+    expect(MAX_ASSEMBLED_BYTES).toBeGreaterThan(32768)
+    expect(Number.isFinite(MAX_ASSEMBLED_BYTES)).toBe(true)
   })
 
   it('handles a terminator with no preceding chunks', () => {
@@ -125,6 +147,29 @@ describe('parseRegistrySync', () => {
 
   it('throws rather than inventing entries when the payload is truncated', () => {
     expect(() => parseRegistrySync(FIXTURE.subarray(0, 200))).toThrow(/truncated|varint/i)
+  })
+
+  it('rejects an over-long varint rather than decoding it wrongly', () => {
+    // Six continuation bytes. JS bitwise operands are 32-bit, so a sixth byte
+    // would be OR'd at `<< 35` — evaluated as `<< 3` — silently corrupting the
+    // value. This guard must fire before that shift, so prove it does.
+    const evil = Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01])
+    expect(() => parseRegistrySync(evil)).toThrow(/varint too long/)
+  })
+
+  it('rejects a string whose declared length runs past the buffer', () => {
+    // nRegistryNamespaces=1, then a namespace string claiming 200 bytes that
+    // are not there. Without the bounds check this would read whatever follows.
+    const evil = Buffer.from([0x01, 0xc8, 0x01, 0x41, 0x42])
+    expect(() => parseRegistrySync(evil)).toThrow(/truncated string/)
+  })
+
+  it('does not hang or over-allocate on absurd declared counts', () => {
+    // A hostile payload declaring 4 billion registries must fail fast, not spin.
+    const evil = Buffer.from([0xff, 0xff, 0xff, 0xff, 0x0f])
+    const started = Date.now()
+    expect(() => parseRegistrySync(evil)).toThrow()
+    expect(Date.now() - started).toBeLessThan(1_000)
   })
 })
 

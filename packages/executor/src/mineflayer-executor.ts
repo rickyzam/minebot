@@ -157,6 +157,10 @@ export class MineflayerExecutor implements BotExecutor {
       version: this.version,
     })
 
+    // Reset first, so nothing from a previous connection can survive even if
+    // the install below throws.
+    this.fabricModdedEntries = []
+
     // Install before anything can await: the handshake lives entirely in the
     // configuration phase, which begins immediately after login and well before
     // 'spawn'. Registering later would miss it, and the server would kick us for
@@ -164,7 +168,6 @@ export class MineflayerExecutor implements BotExecutor {
     const fabric = this.fabricCompat
       ? installFabricHandshake(bot._client as unknown as ProtocolClientLike)
       : null
-    this.fabricModdedEntries = []
 
     return new Promise<Result>((resolve) => {
       let settled = false
@@ -239,16 +242,19 @@ export class MineflayerExecutor implements BotExecutor {
       const onError = (e: Error): void => {
         this.bot = null
         this.unwireBotEvents()
+        this.fabricModdedEntries = []
         finish(fail('disconnected', e.message))
       }
       const onKicked = (reason: unknown): void => {
         this.bot = null
         this.unwireBotEvents()
+        this.fabricModdedEntries = []
         finish(fail('disconnected', `kicked: ${JSON.stringify(reason)}`))
       }
       const timer = setTimeout(() => {
         this.bot = null
         this.unwireBotEvents()
+        this.fabricModdedEntries = []
         try {
           bot.quit()
         } catch {
@@ -275,6 +281,7 @@ export class MineflayerExecutor implements BotExecutor {
     if (!bot) return
     this.bot = null
     this.unwireBotEvents()
+    this.fabricModdedEntries = []
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 5_000)
       bot.once('end', () => {
@@ -539,6 +546,7 @@ export class MineflayerExecutor implements BotExecutor {
       if (this.bot === bot) {
         this.bot = null
         this.unwireBotEvents()
+        this.fabricModdedEntries = []
       }
     })
   }

@@ -12,12 +12,13 @@ interface Written {
 }
 
 /** Fake protocol client that records writes and lets a test drive the phases. */
-function fakeClient() {
+function fakeClient(opts: { state?: string } = {}) {
   const written: Written[] = []
   let stateHandler: ((s: string) => void) | undefined
   let packetHandler: ((d: PacketData, m: PacketMeta) => void) | undefined
 
   const client = {
+    state: opts.state,
     write(name: string, params: unknown) {
       written.push({ name, params: params as Written['params'] })
     },
@@ -135,6 +136,64 @@ describe('installFabricHandshake', () => {
 
     expect(f.completions()).toHaveLength(0)
     expect(handshake.completed).toBe(false)
+  })
+
+  it('advertises extra channels alongside the Fabric ones', () => {
+    // Escape hatch for a mod running its own canSend check on its own channel,
+    // so accommodating one needs no change to this module.
+    const f = fakeClient()
+    installFabricHandshake(f.client, { extraChannels: ['somemod:handshake'] })
+    f.enterConfiguration()
+    expect(f.registrations()[0]!.params.data!.toString('utf8').split('\0')).toEqual([
+      FABRIC_SYNC_DIRECT,
+      FABRIC_SYNC_COMPLETE,
+      'somemod:handshake',
+    ])
+  })
+
+  it('advertises immediately when installed after configuration already began', () => {
+    // The 'state' transition has already fired by then, so waiting for it would
+    // mean never advertising — and the kick would give no hint that install
+    // timing was the cause.
+    const f = fakeClient({ state: 'configuration' })
+    installFabricHandshake(f.client)
+    expect(f.registrations()).toHaveLength(1)
+  })
+
+  it('does not advertise early when the client is not yet in configuration', () => {
+    const f = fakeClient({ state: 'login' })
+    installFabricHandshake(f.client)
+    expect(f.registrations()).toHaveLength(0)
+  })
+
+  it('surfaces a decode failure instead of looking like a vanilla server', () => {
+    const f = fakeClient()
+    const handshake = installFabricHandshake(f.client)
+    f.enterConfiguration()
+    f.sendSyncChunk(Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff]))
+    f.sendSyncChunk(Buffer.alloc(0))
+    expect(handshake.decodeError).toBeInstanceOf(Error)
+    expect(handshake.completed).toBe(true)
+  })
+
+  it('leaves decodeError null on a clean sync', () => {
+    const f = fakeClient()
+    const handshake = installFabricHandshake(f.client)
+    f.enterConfiguration()
+    f.sendSyncChunk(FIXTURE)
+    f.sendSyncChunk(Buffer.alloc(0))
+    expect(handshake.decodeError).toBeNull()
+  })
+
+  it('does not acknowledge a stream it abandoned for exceeding the cap', () => {
+    // Acknowledging would tell the server we synced when we did not.
+    const f = fakeClient()
+    const handshake = installFabricHandshake(f.client, { maxAssembledBytes: 10 })
+    f.enterConfiguration()
+    f.sendSyncChunk(Buffer.alloc(64))
+    expect(f.completions()).toHaveLength(0)
+    expect(handshake.completed).toBe(false)
+    expect(handshake.decodeError?.message).toMatch(/exceeded/)
   })
 
   it('reports nothing for a vanilla server that never syncs', () => {

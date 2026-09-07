@@ -51,7 +51,7 @@ Both development tracks build against this one interface. Its three load-bearing
 
 ```bash
 npm install
-npm test        # 50 unit tests — no network, no Minecraft needed
+npm test        # 117 unit tests — no network, no Minecraft needed
 npm run typecheck
 ```
 
@@ -74,7 +74,7 @@ The integration tests and the demo need a **dedicated development server**. Do n
    | `pause-when-empty-seconds` | `0` | Otherwise the world stops ticking between runs. |
    | `level-seed` | fixed | Reproducibility. Prefer a spawn in open terrain — see below. |
 
-3. **Remove client-required mods.** Any mod that registers client-side content (map mods especially) makes the server reject every vanilla-protocol client, which is exactly what a Mineflayer bot is. Only `fabric-api` is needed.
+3. **Mods are supported — you do not need to strip them.** A mod that registers content (map mods especially) makes a Fabric server reject a plain vanilla-protocol client, which is exactly what a Mineflayer bot is. The executor completes Fabric's registry-sync handshake, so it connects anyway, and it learns the modded registry ids rather than guessing at them. This is on by default (`fabricCompat`) and is inert against a vanilla server. Adding another mod needs no code change.
 4. Run the server inside `tmux` under the session name `mc`. The integration tests drive its console to build a deterministic test arena.
 
 Then:
