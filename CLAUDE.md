@@ -11,9 +11,9 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 ## Commands
 
 ```bash
-npm test                  # 152 unit tests. No network. Fast. Run these constantly.
+npm test                  # 153 unit tests. No network. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
-npm run test:integration  # 59 tests. Requires the live dev server.
+npm run test:integration  # 61 tests. Requires the live dev server.
 npm run smoke             # Minimal "can a bot connect at all" check.
 npm run demo              # Connect, print snapshot, walk. The Phase 1 deliverable.
 ```
@@ -50,6 +50,7 @@ These cost real debugging time to discover. Treat them as settled.
 | nmp logs a non-fatal `partial packet` warning for packets carrying a **modded data component** | Expected, not a bug in our code. Unknown component codecs cannot be decoded; the bot degrades rather than failing |
 | The Velocity backend rejects unforwarded logins: *"This server requires you to connect with Velocity."* | Bots must sign a forwarding payload. `installVelocityForwarding` does it; the secret is shared with the proxy |
 | **node-minecraft-protocol already answers `login_plugin_request`** with "not understood" | Adding a second handler sends two responses for one message id and the server kicks with `Unexpected custom data from client`. Displace nmp's handler, do not stack on it |
+| A **wrong** secret kicks with `Unable to verify player details`; **no** forwarding kicks with `This server requires you to connect with Velocity` | Two distinct failures. `Secret check failed.` is only a server-side log line and never reaches the client |
 | The backend advertises forwarding version **4**, but version **1** is accepted | Later versions only add a Mojang public key, which a bot does not have |
 | Bot UUIDs are the offline-mode ones (`MD5("OfflinePlayer:<name>")`, v3) | Deliberate: a bot's identity and player data survive the proxy being added or removed |
 | `/fill` silently refuses unloaded chunks with "That position is not loaded" | The test arena is `forceload`ed. This bug once made every test pass against a freefalling bot |

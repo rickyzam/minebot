@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { MineflayerExecutor, resolveForwardingSecret, texturesProperty } from '../../src/index.js'
+import {
+  MineflayerExecutor,
+  resolveForwardingSecret,
+  texturesProperty,
+  offlineUuid,
+  formatUuid,
+} from '../../src/index.js'
 
 /**
  * These run against the backend behind the Velocity proxy. The backend is in
@@ -13,7 +19,21 @@ import { MineflayerExecutor, resolveForwardingSecret, texturesProperty } from '.
  */
 const secret = resolveForwardingSecret()
 
-describe.skipIf(!secret)('Velocity forwarding', () => {
+// Opt OUT explicitly, never skip silently. If these vanished whenever a secret
+// went missing, the whole feature could rot unnoticed against a non-proxied
+// server while the rest of the suite stayed green — the exact failure mode
+// CLAUDE.md records twice. Running against a plain server? Set MINEBOT_NO_PROXY.
+const proxyExpected = process.env.MINEBOT_NO_PROXY !== '1'
+
+describe.skipIf(!proxyExpected)('Velocity forwarding', () => {
+  it('has a forwarding secret available', () => {
+    expect(
+      secret,
+      'No Velocity forwarding secret found. Set VELOCITY_FORWARDING_SECRET, or ' +
+        'set MINEBOT_NO_PROXY=1 if this server is not behind a proxy.',
+    ).toBeTruthy()
+  })
+
   let executor: MineflayerExecutor | null = null
 
   afterEach(async () => {
@@ -52,7 +72,17 @@ describe.skipIf(!secret)('Velocity forwarding', () => {
     })
     const r = await executor.connect()
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.reason).toBe('disconnected')
+    if (!r.ok) {
+      expect(r.reason).toBe('disconnected')
+      // Specifically the HMAC check, not some unrelated refusal — this is what
+      // stops anyone reaching the port from forging an identity.
+      //
+      // Measured: a bad signature kicks with "Unable to verify player details",
+      // which is distinct from the "requires you to connect with Velocity"
+      // given when no forwarding data is sent at all. ("Secret check failed."
+      // exists only as a server-side log line, never reaching the client.)
+      expect(r.detail).toMatch(/unable to verify player details/i)
+    }
   })
 
   it('completes the Fabric registry sync through a forwarded login too', async () => {
@@ -79,9 +109,18 @@ describe.skipIf(!secret)('Velocity forwarding', () => {
 
   it('gives a bot the same uuid an offline server would', async () => {
     // Identity must not depend on the proxy being present, or a bot's player
-    // data is orphaned the first time the topology changes.
+    // data is orphaned the first time the topology changes. Assert the UUID the
+    // server actually assigned, not merely that the bot connected — the latter
+    // would pass against an implementation forwarding a random one.
     executor = new MineflayerExecutor({ username: 'ITStableUuid' })
     expect((await executor.connect()).ok).toBe(true)
-    expect(executor.getState().self.position).toBeDefined()
+    expect(executor.uuid()).toBe(formatUuid(offlineUuid('ITStableUuid')))
+  })
+
+  it('reports the forwarding exchange it performed', async () => {
+    executor = new MineflayerExecutor({ username: 'ITFwdState' })
+    expect((await executor.connect()).ok).toBe(true)
+    expect(executor.velocityForwarding()?.answered).toBe(true)
+    expect(executor.velocityForwarding()?.requestedVersion).toBe(4)
   })
 })

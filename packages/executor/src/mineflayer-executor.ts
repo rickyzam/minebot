@@ -18,6 +18,7 @@ import type { RegistryEntry } from './fabric-registry.js'
 import {
   installVelocityForwarding,
   type LoginClientLike,
+  type VelocityForwarding,
   type VelocityForwardingOptions,
 } from './velocity-handshake.js'
 import { resolveForwardingSecret } from './forwarding-secret.js'
@@ -61,6 +62,11 @@ export interface MineflayerExecutorOptions {
   velocityProperties?: VelocityForwardingOptions['properties']
 }
 
+/** Is `host` this machine, and therefore trusted to receive a signed payload? */
+function isLoopbackHost(host: string): boolean {
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]'
+}
+
 export class MineflayerExecutor implements BotExecutor {
   private bot: Bot | null = null
   private readonly host: string
@@ -69,8 +75,14 @@ export class MineflayerExecutor implements BotExecutor {
   private readonly version: string
   private readonly connectTimeoutMs: number
   private readonly fabricCompat: boolean
-  private readonly velocitySecret: string | null
+  /**
+   * Held in a closure rather than a field so the secret is not an enumerable
+   * property: `JSON.stringify(executor)` in a log must not be able to print it.
+   * Returns null when forwarding is off.
+   */
+  private readonly velocitySecret: () => string | null
   private readonly velocityProperties: VelocityForwardingOptions['properties']
+  private velocityForwardingState: VelocityForwarding | null = null
   /**
    * Registry entries the server reported that a vanilla client would not know —
    * anything outside the `minecraft` namespace. Empty against a vanilla server.
@@ -113,9 +125,37 @@ export class MineflayerExecutor implements BotExecutor {
     this.version = opts.version ?? '1.21.10'
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 30_000
     this.fabricCompat = opts.fabricCompat ?? true
-    this.velocitySecret =
-      opts.velocitySecret === undefined ? resolveForwardingSecret() : opts.velocitySecret
+    // An explicit secret is always honoured. An *auto-discovered* one is used
+    // only for a loopback host: signing is an oracle, and pointing the executor
+    // at someone else's server should not hand its operator a replayable
+    // forwarding token for this bot's username. The proxied backend is loopback
+    // by design, so this costs nothing in practice.
+    const secret =
+      opts.velocitySecret === undefined
+        ? isLoopbackHost(this.host)
+          ? resolveForwardingSecret()
+          : null
+        : opts.velocitySecret
+    this.velocitySecret = () => secret
     this.velocityProperties = opts.velocityProperties
+  }
+
+  /**
+   * UUID the server assigned this bot, or null when not connected. With
+   * forwarding on, this is the identity we asserted — so it is the thing to
+   * assert against, not merely that a connection succeeded.
+   */
+  uuid(): string | null {
+    const raw = (this.bot?._client as { uuid?: string } | undefined)?.uuid
+    return raw ?? null
+  }
+
+  /**
+   * State of the Velocity forwarding exchange for the current connection, or
+   * null when forwarding is disabled or no connection has been made.
+   */
+  velocityForwarding(): VelocityForwarding | null {
+    return this.velocityForwardingState
   }
 
   /**
@@ -203,12 +243,17 @@ export class MineflayerExecutor implements BotExecutor {
 
     // Must also be installed before any await: the forwarding demand arrives
     // during the login phase, earlier still than the Fabric exchange.
-    if (this.velocitySecret) {
-      installVelocityForwarding(bot._client as unknown as LoginClientLike, {
-        secret: this.velocitySecret,
-        username: this.username,
-        properties: this.velocityProperties,
-      })
+    this.velocityForwardingState = null
+    const velocitySecret = this.velocitySecret()
+    if (velocitySecret) {
+      this.velocityForwardingState = installVelocityForwarding(
+        bot._client as unknown as LoginClientLike,
+        {
+          secret: velocitySecret,
+          username: this.username,
+          properties: this.velocityProperties,
+        },
+      )
     }
 
     return new Promise<Result>((resolve) => {

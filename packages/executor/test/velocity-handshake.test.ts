@@ -28,6 +28,9 @@ function fakeClient() {
     on(_event: string, handler: (p: LoginPluginRequest) => void) {
       handlers.push(handler)
     },
+    listeners(_event: string) {
+      return [...handlers]
+    },
     removeAllListeners(_event: string) {
       handlers = []
     },
@@ -57,7 +60,6 @@ describe('installVelocityForwarding', () => {
     expect(fwd.answered).toBe(true)
     const responses = f.responses()
     expect(responses).toHaveLength(1)
-    expect(responses[0]!.params.successful).toBe(true)
     expect(responses[0]!.params.data).toEqual(
       buildForwardingResponse('k', {
         address: '127.0.0.1',
@@ -93,7 +95,6 @@ describe('installVelocityForwarding', () => {
     const responses = f.responses()
     expect(responses).toHaveLength(1)
     expect(responses[0]!.params.messageId).toBe(7)
-    expect(responses[0]!.params.successful).toBeUndefined()
     expect(responses[0]!.params.data).toBeUndefined()
     expect(fwd.answered).toBe(false)
   })
@@ -129,6 +130,19 @@ describe('installVelocityForwarding', () => {
     installVelocityForwarding(f.client, { secret: 'k', username: 'MineBot', address: '10.0.0.5' })
     f.request(velocityRequest())
     expect(f.responses()[0]!.params.data!.toString('utf8')).toContain('10.0.0.5')
+  })
+
+  it('delegates an unknown channel to the handler it displaced', () => {
+    // Rather than reimplementing nmp's reply, the displaced handler is called,
+    // so a third-party handler keeps working exactly as before.
+    const f = fakeClient()
+    let sawDelegated: number | null = null
+    f.client.on('login_plugin_request', (p) => {
+      sawDelegated = p.messageId ?? null
+    })
+    installVelocityForwarding(f.client, { secret: 'k', username: 'MineBot' })
+    f.request({ messageId: 9, channel: 'somemod:hello' })
+    expect(sawDelegated).toBe(9)
   })
 
   it('stays quiet for a request with no message id', () => {

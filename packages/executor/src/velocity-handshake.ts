@@ -12,6 +12,8 @@ import {
 export interface LoginClientLike {
   write(name: string, params: unknown): void
   on(event: 'login_plugin_request', handler: (packet: LoginPluginRequest) => void): void
+  /** Existing handlers, captured so they can be preserved — see below. */
+  listeners(event: 'login_plugin_request'): Array<(packet: LoginPluginRequest) => void>
   /**
    * Needed to displace node-minecraft-protocol's own handler — see
    * `installVelocityForwarding`.
@@ -49,16 +51,23 @@ export interface VelocityForwarding {
  * Without it the backend disconnects during login with "This server requires you
  * to connect with Velocity."
  *
- * **Why it removes existing listeners.** node-minecraft-protocol registers its
+ * **Why it displaces existing listeners.** node-minecraft-protocol registers its
  * own `login_plugin_request` handler that unconditionally answers "not
  * understood", mimicking the vanilla client. Merely adding a second handler
  * means the server receives *two* responses for one message id and drops the
- * connection with "Unexpected custom data from client". So this displaces that
- * handler and re-implements the same default for every channel it does not
- * recognise, leaving non-Velocity behaviour unchanged.
+ * connection with "Unexpected custom data from client" — observed against a live
+ * backend.
+ *
+ * So existing handlers are captured and then removed, and channels we do not
+ * recognise are delegated back to them. That keeps any third-party handler
+ * working exactly as before, and avoids having to keep a copy of nmp's reply in
+ * sync with it. Only one response is ever produced for a Velocity request.
+ *
+ * A handler registered *after* this one can still double-respond; install this
+ * last, as `openConnection` does.
  *
  * Safe to install unconditionally: a server not behind a proxy never sends the
- * request, and the fallback path behaves exactly as the stock client does.
+ * request, and every other channel behaves exactly as it did before.
  */
 export function installVelocityForwarding(
   client: LoginClientLike,
@@ -66,13 +75,16 @@ export function installVelocityForwarding(
 ): VelocityForwarding {
   const state = { answered: false, requestedVersion: null as number | null }
 
+  const displaced = client.listeners('login_plugin_request')
   client.removeAllListeners('login_plugin_request')
   client.on('login_plugin_request', (packet: LoginPluginRequest) => {
     if (packet.messageId === undefined) return
 
     if (packet.channel !== VELOCITY_PLAYER_INFO_CHANNEL) {
-      // The stock behaviour we displaced: answer "not understood".
-      client.write('login_plugin_response', { messageId: packet.messageId })
+      // Not ours: hand it back to whoever was handling it before, so their
+      // behaviour — nmp's "not understood" reply, or a third party's — is
+      // preserved exactly rather than reimplemented here.
+      for (const handler of displaced) handler(packet)
       return
     }
 
@@ -81,9 +93,12 @@ export function installVelocityForwarding(
     // only add a Mojang public key that a bot does not have.
     state.requestedVersion = packet.data?.length ? (packet.data[0] ?? null) : null
 
+    // No `successful` field: across every protocol version in minecraft-data,
+    // `login_plugin_response` is `{ messageId, data: option(restBuffer) }`. The
+    // success flag on the wire is the option's presence byte, which protodef
+    // derives from `data` being defined.
     client.write('login_plugin_response', {
       messageId: packet.messageId,
-      successful: true,
       data: buildForwardingResponse(opts.secret, {
         address: opts.address ?? '127.0.0.1',
         uuid: offlineUuid(opts.username),
