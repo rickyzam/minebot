@@ -1,5 +1,38 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { MineflayerExecutor } from '../../src/index.js'
+import { buildArena, teleportAndWait, type ArenaBounds } from './mc-console.js'
+
+/**
+ * A fixed, self-healing test surface, built fresh via the server console
+ * before every test rather than found by searching the world for a clear
+ * spot. The previous version of this suite targeted "current position + 6
+ * on x" against whatever terrain a fixed username's persisted position
+ * happened to carry over from the last run — on a persistent shared world,
+ * every successful run walked the bot further into unknown terrain, so the
+ * test degraded from green-when-written to reliably red once it wandered
+ * into an obstacle raw movement can't climb (see task-6-report.md for the
+ * root-cause diagnosis). Building a platform at a fixed coordinate makes
+ * this biome- and terrain-independent: it verifies that moveTo walks the
+ * bot to a target, not that the world happens to be cooperative.
+ *
+ * Coordinates picked well clear of spawn and any structures, high enough in
+ * the sky that no terrain (jungle canopy included) intrudes on the arena
+ * regardless of what generates around it.
+ */
+const ARENA: ArenaBounds = {
+  x0: 500,
+  x1: 560,
+  z0: 0,
+  z1: 8,
+  floorY: 199,
+  clearance: 6,
+}
+const START = { x: 505, y: ARENA.floorY + 1, z: 4 }
+
+async function resetToArena(executor: MineflayerExecutor, username: string): Promise<void> {
+  buildArena(ARENA)
+  await teleportAndWait(executor, username, START)
+}
 
 describe('MineflayerExecutor.moveTo', () => {
   let executor: MineflayerExecutor | null = null
@@ -12,6 +45,7 @@ describe('MineflayerExecutor.moveTo', () => {
   it('walks to a nearby coordinate', async () => {
     executor = new MineflayerExecutor({ username: 'ITMove' })
     await executor.connect()
+    await resetToArena(executor, 'ITMove')
     const start = executor.getState().self.position
     const target = { x: Math.round(start.x) + 6, y: start.y, z: Math.round(start.z) }
 
@@ -25,6 +59,7 @@ describe('MineflayerExecutor.moveTo', () => {
   it('resolves interrupted when the signal is already aborted, without moving', async () => {
     executor = new MineflayerExecutor({ username: 'ITMovePreAbort' })
     await executor.connect()
+    await resetToArena(executor, 'ITMovePreAbort')
     const start = executor.getState().self.position
 
     const r = await executor.moveTo(
@@ -41,6 +76,7 @@ describe('MineflayerExecutor.moveTo', () => {
   it('resolves interrupted when aborted mid-walk and stops moving', async () => {
     executor = new MineflayerExecutor({ username: 'ITMoveAbort' })
     await executor.connect()
+    await resetToArena(executor, 'ITMoveAbort')
     const start = executor.getState().self.position
     const controller = new AbortController()
 
@@ -63,6 +99,7 @@ describe('MineflayerExecutor.moveTo', () => {
   it('times out on an unreachable target', async () => {
     executor = new MineflayerExecutor({ username: 'ITMoveTimeout' })
     await executor.connect()
+    await resetToArena(executor, 'ITMoveTimeout')
     const start = executor.getState().self.position
 
     const r = await executor.moveTo(
