@@ -310,3 +310,47 @@ what is visible in-game.
 3. **`qwen3:30b-a3b` as an alternative.** MoE with ~3B active params — potentially
    faster per decision than the dense 14B — but 18.6GB exceeds 16GB VRAM and would spill
    to system RAM. Worth benchmarking at Phase 6, not before.
+
+## 9. Contract changes proposed after Phase 1 — need Track B's agreement
+
+Phase 1's final review surfaced four gaps in `BotExecutor`. All are **additive** and all
+get more expensive once Track B has code depending on the current shapes, so they should
+be settled before the planning loop is built out. They were deliberately not applied
+unilaterally: §4 says `contract` and `mock-executor` change only by mutual agreement.
+
+1. **`on()` subscriptions do not survive a reconnect.** Handlers bind to the `Bot`
+   instance live at subscribe time. After a drop, `connect()` builds a *new* bot and the
+   old subscription is attached to a dead emitter — it silently never fires again.
+   `on()` also throws if called before `connect()`. The reflex layer subscribes once at
+   startup and expects to keep hearing about damage for the session's lifetime.
+   *Proposed:* the executor owns a long-lived emitter; `connect()` wires the bot into it
+   and `disconnect()` unwires. `on()` then works before connect and across reconnects.
+
+2. **`mineBlock` cannot target a block `findBlocks` returned.** `findBlocks` yields
+   `BlockInfo` with a `position`, but `mineBlock(blockName, maxDistance)` re-searches by
+   name and may pick a different block than the one the planner reasoned about. The
+   obvious agent loop — search, choose, approach, mine *that one* — is inexpressible, and
+   Phase 4's spiral search makes it worse. *Proposed:* `mineBlock(target: string | Vec3, …)`.
+
+3. **`MockExecutor` cannot produce five of the nine `FailureReason` values.** It emits
+   only `interrupted`, `not_found` and `disconnected`. Track B builds entirely against the
+   mock and so cannot exercise `unreachable`, `timeout`, `missing_tool`, `inventory_full`
+   or `internal` — that is, cannot test the Phase 4 retry policy that §3.2 exists to
+   enable. *Proposed:* a failure-injection option on `MockOptions`.
+
+4. **`connect()` is not reentrant.** `this.bot` is set only on `spawn`, so a second
+   `connect()` before the first resolves creates a second bot — which, on an offline-mode
+   server, duplicate-logins and kicks the first. Pairs with `disconnect()` during an
+   in-flight `connect()` being a no-op. *Proposed:* fix both together with a pending-promise
+   guard, before any supervisor or reconnect logic is written.
+
+### Known gaps in the shared contract suite
+
+The suite is strong on freezing, snapshot distinctness, the pre-abort rule for all six
+actions, `stop()` cancellation, disconnected behaviour, and `findBlocks` non-emptiness and
+ordering. It does **not** verify: mid-flight cancellation (timing-dependent, deliberately
+left to per-implementation tests), or `nearbyEntities`' documented 32-block radius — that
+last one has a unit test, but the fixture cannot actually fail if the radius filter were
+removed, because the count cap masks it. Also, `ContractSuiteContext.expectFindable` is
+optional and its test silently no-ops when absent, so a future implementation that forgets
+to declare it regresses to a vacuous pass with no signal.
