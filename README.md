@@ -51,7 +51,7 @@ Both development tracks build against this one interface. Its three load-bearing
 
 ```bash
 npm install
-npm test        # 153 unit tests — no network, no Minecraft needed
+npm test        # 168 unit tests — no network, no Minecraft needed
 npm run typecheck
 ```
 

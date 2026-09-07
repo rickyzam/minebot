@@ -11,7 +11,7 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 ## Commands
 
 ```bash
-npm test                  # 153 unit tests. No network. Fast. Run these constantly.
+npm test                  # 168 unit tests. No network. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
 npm run test:integration  # 61 tests. Requires the live dev server.
 npm run smoke             # Minimal "can a bot connect at all" check.
