@@ -301,5 +301,34 @@ export function runContractSuite(
         offRecorder()
       })
     })
+
+    // Design spec §9.4: this.bot was set only on spawn, so a second connect()
+    // before the first resolved built a *second* bot — which on an offline-mode
+    // server duplicate-logins and kicks the first. Pairs with disconnect()
+    // during an in-flight connect() being a silent no-op.
+    describe('connect() reentrancy', () => {
+      it('shares one connection attempt between concurrent connect() calls', async () => {
+        await ctx.executor.disconnect()
+        const [a, b] = await Promise.all([ctx.executor.connect(), ctx.executor.connect()])
+        expect(a.ok).toBe(true)
+        expect(b.ok).toBe(true)
+        // Still usable afterwards — a duplicate login would have kicked one off.
+        expect(() => ctx.executor.getState()).not.toThrow()
+      })
+
+      it('is idempotent when already connected', async () => {
+        const r = await ctx.executor.connect()
+        expect(r.ok).toBe(true)
+        expect(() => ctx.executor.getState()).not.toThrow()
+      })
+
+      it('leaves the executor disconnected when disconnect() races a pending connect()', async () => {
+        await ctx.executor.disconnect()
+        const connecting = ctx.executor.connect()
+        await ctx.executor.disconnect()
+        await connecting
+        expect(() => ctx.executor.getState()).toThrow()
+      })
+    })
   })
 }

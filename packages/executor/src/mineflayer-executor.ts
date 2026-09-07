@@ -49,6 +49,13 @@ export class MineflayerExecutor implements BotExecutor {
   private readonly handlers = new Map<keyof BotEvents, Set<(payload: never) => void>>()
   /** Detach functions for the Mineflayer listeners feeding the emitter. */
   private botWiring: Array<() => void> = []
+  /**
+   * Design spec §9.4. Without this, a second connect() before the first
+   * resolves creates a second Bot; on an offline-mode server that is a
+   * duplicate login, and the server kicks the first one.
+   */
+  private pendingConnect: Promise<Result> | null = null
+  private disconnectRequested = false
 
   constructor(opts: MineflayerExecutorOptions = {}) {
     this.host = opts.host ?? 'localhost'
@@ -60,7 +67,25 @@ export class MineflayerExecutor implements BotExecutor {
 
   async connect(): Promise<Result> {
     if (this.bot) return ok(undefined)
+    if (this.pendingConnect) return this.pendingConnect
 
+    this.disconnectRequested = false
+    this.pendingConnect = this.openConnection()
+    try {
+      const result = await this.pendingConnect
+      if (result.ok && this.disconnectRequested) {
+        // disconnect() was called while this was in flight — honour it rather
+        // than handing back a connection the caller has already abandoned.
+        await this.teardown()
+        return fail('interrupted', 'disconnect() during connect()')
+      }
+      return result
+    } finally {
+      this.pendingConnect = null
+    }
+  }
+
+  private async openConnection(): Promise<Result> {
     const bot = mineflayer.createBot({
       host: this.host,
       port: this.port,
@@ -150,6 +175,13 @@ export class MineflayerExecutor implements BotExecutor {
   }
 
   async disconnect(): Promise<void> {
+    this.disconnectRequested = true
+    const pending = this.pendingConnect
+    if (pending) await pending.catch(() => undefined)
+    await this.teardown()
+  }
+
+  private async teardown(): Promise<void> {
     const bot = this.bot
     if (!bot) return
     this.bot = null

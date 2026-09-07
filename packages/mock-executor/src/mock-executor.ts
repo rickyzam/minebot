@@ -74,6 +74,8 @@ export class MockExecutor implements BotExecutor {
    */
   private inFlightStop: (() => void) | null = null
   private readonly failures = new Map<MockActionName, InjectedFailure>()
+  private pendingConnect: Promise<Result> | null = null
+  private disconnectRequested = false
 
   constructor(opts: MockOptions = {}) {
     this.position = opts.position ?? { x: 0, y: 64, z: 0 }
@@ -91,13 +93,29 @@ export class MockExecutor implements BotExecutor {
   async connect(): Promise<Result> {
     this.record('connect')
     if (this.connected) return ok(undefined)
-    this.connected = true
-    this.emit('spawned', {})
-    return ok(undefined)
+    if (this.pendingConnect) return this.pendingConnect
+
+    this.disconnectRequested = false
+    this.pendingConnect = (async (): Promise<Result> => {
+      if (this.delayMs > 0) await new Promise((r) => setTimeout(r, this.delayMs))
+      if (this.disconnectRequested) return fail('interrupted', 'disconnect() during connect()')
+      this.connected = true
+      this.emit('spawned', {})
+      return ok(undefined)
+    })()
+
+    try {
+      return await this.pendingConnect
+    } finally {
+      this.pendingConnect = null
+    }
   }
 
   async disconnect(): Promise<void> {
     this.record('disconnect')
+    this.disconnectRequested = true
+    const pending = this.pendingConnect
+    if (pending) await pending.catch(() => undefined)
     this.connected = false
   }
 
