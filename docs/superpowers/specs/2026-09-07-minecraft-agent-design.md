@@ -311,46 +311,70 @@ what is visible in-game.
    faster per decision than the dense 14B — but 18.6GB exceeds 16GB VRAM and would spill
    to system RAM. Worth benchmarking at Phase 6, not before.
 
-## 9. Contract changes proposed after Phase 1 — need Track B's agreement
+## 9. Contract changes proposed after Phase 1 — AGREED AND APPLIED
 
-Phase 1's final review surfaced four gaps in `BotExecutor`. All are **additive** and all
-get more expensive once Track B has code depending on the current shapes, so they should
-be settled before the planning loop is built out. They were deliberately not applied
-unilaterally: §4 says `contract` and `mock-executor` change only by mutual agreement.
+**Status: all four applied at the start of Phase 2**, agreed with Track B beforehand per
+§4. This section is kept as the record of what changed and why; it is no longer a list of
+pending proposals. Nothing here is outstanding.
 
-1. **`on()` subscriptions do not survive a reconnect.** Handlers bind to the `Bot`
-   instance live at subscribe time. After a drop, `connect()` builds a *new* bot and the
-   old subscription is attached to a dead emitter — it silently never fires again.
-   `on()` also throws if called before `connect()`. The reflex layer subscribes once at
-   startup and expects to keep hearing about damage for the session's lifetime.
-   *Proposed:* the executor owns a long-lived emitter; `connect()` wires the bot into it
-   and `disconnect()` unwires. `on()` then works before connect and across reconnects.
+Phase 1's final review surfaced four gaps in `BotExecutor`. All were additive, and all
+would have grown more expensive once Track B had code depending on the old shapes — so
+they were settled before the planning loop was built, while `packages/agent/` did not yet
+exist.
 
-2. **`mineBlock` cannot target a block `findBlocks` returned.** `findBlocks` yields
-   `BlockInfo` with a `position`, but `mineBlock(blockName, maxDistance)` re-searches by
-   name and may pick a different block than the one the planner reasoned about. The
-   obvious agent loop — search, choose, approach, mine *that one* — is inexpressible, and
-   Phase 4's spiral search makes it worse. *Proposed:* `mineBlock(target: string | Vec3, …)`.
+1. **`on()` subscriptions did not survive a reconnect.** *Applied.* The executor now owns
+   a long-lived emitter; `connect()` wires a bot into it and `disconnect()` unwires. `on()`
+   works before the first connect and across reconnects, so the reflex layer can subscribe
+   once at startup and keep hearing about damage for the session's lifetime.
 
-3. **`MockExecutor` cannot produce five of the nine `FailureReason` values.** It emits
-   only `interrupted`, `not_found` and `disconnected`. Track B builds entirely against the
-   mock and so cannot exercise `unreachable`, `timeout`, `missing_tool`, `inventory_full`
-   or `internal` — that is, cannot test the Phase 4 retry policy that §3.2 exists to
-   enable. *Proposed:* a failure-injection option on `MockOptions`.
+   Two things surfaced in review and are part of the guarantee: the executor registers its
+   unexpected-disconnect watch *before* wiring events, so a `disconnected` subscriber
+   observes the executor as already not-connected (otherwise a handler reacting by calling
+   `connect()` hits the already-connected guard, silently no-ops, and reports success); and
+   `emit()` isolates each handler in a `try`/`catch`, so one throwing subscriber cannot
+   break the emitter or the connect path.
 
-4. **`connect()` is not reentrant.** `this.bot` is set only on `spawn`, so a second
-   `connect()` before the first resolves creates a second bot — which, on an offline-mode
-   server, duplicate-logins and kicks the first. Pairs with `disconnect()` during an
-   in-flight `connect()` being a no-op. *Proposed:* fix both together with a pending-promise
-   guard, before any supervisor or reconnect logic is written.
+2. **`mineBlock` could not target a block `findBlocks` returned.** *Applied* as
+   `mineBlock(target: string | Vec3, maxDistance, opts?)`. A name still searches for the
+   nearest match; a position names one block exactly, which makes the
+   search-choose-approach-mine loop expressible. `maxDistance` bounds the search for a
+   name and bounds travel for a position.
+
+3. **`MockExecutor` could produce only three of the nine `FailureReason` values.**
+   *Applied* as `MockOptions.failures` plus `setFailure(action, failure | null)` for
+   driving fail-then-succeed sequences on a live mock. All nine reasons are now producible,
+   asserted by test. Injection is checked *after* the abort and disconnected rules, never
+   before, so it cannot be used to fake a contract violation.
+
+4. **`connect()` was not reentrant.** *Applied.* A pending-promise guard makes concurrent
+   `connect()` calls share one attempt instead of creating a second bot (a duplicate login
+   on an offline-mode server, which kicks the first). `disconnect()` during an in-flight
+   `connect()` now cancels it and tears down, rather than silently no-opping.
+
+   Review note worth keeping: the disconnect-honouring check belongs *inside* the shared
+   promise, not in the per-caller wrapper. Outside it, `disconnect()` could return while
+   `pendingConnect` was still set, so a `connect()` in that window resolved `ok` against a
+   disconnected executor — and a caller *sharing* an attempt got a different answer from
+   the mock than from the real executor.
 
 ### Known gaps in the shared contract suite
 
 The suite is strong on freezing, snapshot distinctness, the pre-abort rule for all six
-actions, `stop()` cancellation, disconnected behaviour, and `findBlocks` non-emptiness and
-ordering. It does **not** verify: mid-flight cancellation (timing-dependent, deliberately
-left to per-implementation tests), or `nearbyEntities`' documented 32-block radius — that
-last one has a unit test, but the fixture cannot actually fail if the radius filter were
-removed, because the count cap masks it. Also, `ContractSuiteContext.expectFindable` is
-optional and its test silently no-ops when absent, so a future implementation that forgets
-to declare it regresses to a vacuous pass with no signal.
+actions (and for both `mineBlock` target forms), `stop()` cancellation, disconnected
+behaviour, and `findBlocks` non-emptiness and ordering. The §9 work added: subscription
+lifetime (registered while disconnected, surviving a reconnect, and staying unsubscribed
+across one), isolation of a throwing subscriber, and `connect()` reentrancy.
+
+It does **not** verify: mid-flight cancellation (timing-dependent, deliberately left to
+per-implementation tests), or `nearbyEntities`' documented 32-block radius — that last one
+has a unit test, but the fixture cannot actually fail if the radius filter were removed,
+because the count cap masks it. Also, `ContractSuiteContext.expectFindable` is optional and
+its test silently no-ops when absent, so a future implementation that forgets to declare it
+regresses to a vacuous pass with no signal.
+
+One caveat carried over from the §9 review, worth remembering when adding cases: a suite
+test that asserts an executor still *works* after some operation tends to pass against the
+mock no matter what, because a duplicate or skipped attempt has no observable cost there.
+Where the guarantee is "only one thing happened," assert on something observable through
+the interface — an event firing exactly once, say — rather than on the executor merely
+still being usable.
