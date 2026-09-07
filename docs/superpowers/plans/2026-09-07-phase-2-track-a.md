@@ -32,7 +32,7 @@ between Task 4 and Task 5, none of which this plan anticipated:
    it directly with signed forwarding. `MineflayerExecutor`'s **default port is
    now 25566**, so tests and scripts need no change — but any hard-coded 25565
    is wrong.
-3. **Test baselines moved.** Before starting Task 5 the tree is at **153 unit
+3. **Test baselines moved.** Before starting Task 5 the tree is at **168 unit
    tests** and **61 integration tests**. Task 6 asks you to record counts before
    and after a refactor; those are the numbers to expect, not the ones written
    when this plan was drafted.
