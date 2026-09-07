@@ -19,6 +19,14 @@ export type FailureReason =
   | 'missing_tool'
   | 'inventory_full'
   | 'timeout'
+  /**
+   * Every action (`moveTo`, `followPlayer`, `mineBlock`, `placeBlock`,
+   * `attack`, `flee`) resolves `fail('disconnected', …)` — never throws —
+   * when called while not connected. This is the one place `getState()` and
+   * `findBlocks()` differ from the rest of the surface: both of those throw
+   * instead (see their doc comments) because they have no `Result` to report
+   * failure through.
+   */
   | 'disconnected'
   | 'internal'
 
@@ -56,6 +64,7 @@ export interface EntityInfo {
   readonly health?: number
 }
 
+/** Result of a {@link BlockQuery}. See {@link BotExecutor.findBlocks} for ordering. */
 export interface BlockInfo {
   readonly name: string
   readonly position: Vec3
@@ -81,6 +90,14 @@ export interface SelfState {
 export interface WorldSnapshot {
   readonly takenAt: number
   readonly self: SelfState
+  /**
+   * Other entities near the bot — never includes the bot's own entity.
+   * Bounded (nearest-first, up to an implementation-defined radius and
+   * count — see the executor package for the current defaults) rather than
+   * a full world dump: an unfiltered entity list can run into the dozens
+   * even in ordinary play, which doesn't fit in an LLM prompt any better
+   * than an unfiltered block dump does (§3.3).
+   */
   readonly nearbyEntities: readonly EntityInfo[]
 }
 
@@ -106,13 +123,30 @@ export interface BotExecutor {
 
   /** Immutable point-in-time snapshot. Throws if not connected. */
   getState(): WorldSnapshot
+  /**
+   * Nearest-first: results are ordered by ascending {@link BlockInfo.distance}.
+   * Throws if not connected, for the same reason as {@link getState}: there
+   * is no world to search, and a silent `[]` would be indistinguishable from
+   * "connected, searched, found nothing" — an important difference for a
+   * caller deciding whether to retry.
+   */
   findBlocks(query: BlockQuery): readonly BlockInfo[]
 
+  /**
+   * Subscribe to a push event. Registering while not connected is a no-op
+   * that returns a callable (but inert) unsubscribe — there is no live bot to
+   * attach a listener to, and a later `connect()` does not retroactively wire
+   * it up (subscriptions surviving a reconnect is an open contract question,
+   * deferred — see the design spec).
+   */
   on<K extends keyof BotEvents>(
     event: K,
     handler: (payload: BotEvents[K]) => void,
   ): Unsubscribe
 
+  // Every action below resolves `fail('disconnected', …)` — never throws —
+  // when called while not connected. See the `disconnected` FailureReason
+  // doc comment above.
   moveTo(target: Vec3, opts?: ActionOptions): Promise<Result>
   followPlayer(playerName: string, opts?: ActionOptions): Promise<Result>
   mineBlock(

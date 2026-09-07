@@ -4,6 +4,20 @@ import type { ActionOptions, BotExecutor, Result } from '@minebot/contract'
 export interface ContractSuiteContext {
   executor: BotExecutor
   cleanup?: () => Promise<void>
+  /**
+   * Declares that this executor instance is seeded (or, for a live world,
+   * known) to have at least `minCount` blocks matching `names` findable with
+   * a generous query. Without this, the suite's findBlocks assertions run
+   * against an executor that may have zero matching blocks in its world —
+   * `found.length <= limit` passes trivially on an empty array, and any
+   * per-block assertions never execute. Optional so a factory that genuinely
+   * cannot guarantee findable blocks can omit it, but every current factory
+   * (the mock's seeded suite instance, and the real executor's integration
+   * factory against blocks reliably near dev-server spawn) supplies it, and
+   * new factories should too rather than let the block section degrade back
+   * to vacuous.
+   */
+  expectFindable?: { names: readonly string[]; minCount: number }
 }
 
 /**
@@ -74,15 +88,38 @@ export function runContractSuite(
     })
 
     it('never returns more blocks than the requested limit', () => {
-      const found = ctx.executor.findBlocks({
-        names: ['stone', 'dirt', 'grass_block'],
-        maxDistance: 16,
-        limit: 2,
-      })
+      // Reuse the fixture's seeded names when declared, so this actually
+      // exercises the per-block loop below instead of running (vacuously)
+      // against an executor with zero matching blocks in its world.
+      const names = ctx.expectFindable?.names ?? ['stone', 'dirt', 'grass_block']
+      const found = ctx.executor.findBlocks({ names: [...names], maxDistance: 32, limit: 2 })
       expect(found.length).toBeLessThanOrEqual(2)
       for (const b of found) {
         expect(typeof b.name).toBe('string')
         expect(b.distance).toBeGreaterThanOrEqual(0)
+      }
+    })
+
+    it('finds seeded blocks nearest-first (BlockQuery/BlockInfo ordering guarantee)', () => {
+      // Skipped (not failed) when a factory hasn't declared expectFindable —
+      // see the field's doc comment. Both factories in this repo declare it,
+      // so in practice this always runs.
+      if (!ctx.expectFindable) return
+      const { names, minCount } = ctx.expectFindable
+
+      const found = ctx.executor.findBlocks({ names: [...names], maxDistance: 64, limit: 20 })
+
+      // The core false-green fix: assert a *non-empty*, seed-backed result,
+      // not just "no more than the limit" (which an always-[] findBlocks
+      // would also satisfy).
+      expect(found.length).toBeGreaterThanOrEqual(minCount)
+      for (const b of found) {
+        expect(names).toContain(b.name)
+        expect(b.distance).toBeGreaterThanOrEqual(0)
+      }
+      // Nearest-first: distances must be non-decreasing across the result.
+      for (let i = 1; i < found.length; i++) {
+        expect(found[i]!.distance).toBeGreaterThanOrEqual(found[i - 1]!.distance)
       }
     })
 
@@ -128,6 +165,73 @@ export function runContractSuite(
     it('treats stop() as safe and idempotent', () => {
       expect(() => ctx.executor.stop()).not.toThrow()
       expect(() => ctx.executor.stop()).not.toThrow()
+    })
+
+    // Fix 1 (post-review): stop() must be an emergency brake, not just a
+    // best-effort request. Before the fix, stop() cleared control states once,
+    // but moveTo's own physicsTick handler re-asserted forward movement on the
+    // very next tick, so a moveTo already in flight sailed on regardless and
+    // eventually resolved 'timeout' (or 'ok', if it happened to arrive) —
+    // never 'interrupted'. Target a point far enough away that neither
+    // implementation could possibly have arrived (or even come close) between
+    // starting the call and stop() cancelling it one line later.
+    it('stop() settles an in-flight action as interrupted', async () => {
+      const start = ctx.executor.getState().self.position
+      const pending = ctx.executor.moveTo(
+        { x: start.x + 10_000, y: start.y, z: start.z },
+        { timeoutMs: 5_000 },
+      )
+      ctx.executor.stop()
+      const result = await pending
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.reason).toBe('interrupted')
+
+      // Not just "reports interrupted" — actually halted. A bot that kept
+      // walking after stop() but merely mislabeled the eventual timeout as
+      // interrupted would still fail this.
+      const after = ctx.executor.getState().self.position
+      expect(Math.hypot(after.x - start.x, after.z - start.z)).toBeLessThan(5)
+    })
+
+    // Fix 2 (post-review): the mock and real executor used to disagree about
+    // what "not connected" means. The real executor threw synchronously from
+    // every action (via requireBot()); the mock silently succeeded — moveTo
+    // while disconnected returned `ok` and updated its position, findBlocks
+    // returned `[]` instead of throwing. Nothing here exercised any of it, so
+    // Track B could write `if (!r.ok) switch (r.reason)` against one
+    // implementation and get an unhandled rejection against the other.
+    describe('disconnected behaviour', () => {
+      it.each(abortableActions)(
+        'resolves disconnected — never throws — for $name after disconnect()',
+        async ({ run }) => {
+          await ctx.executor.disconnect()
+          const r = await run(ctx.executor, {})
+          expect(r.ok).toBe(false)
+          if (!r.ok) expect(r.reason).toBe('disconnected')
+        },
+      )
+
+      it('throws from getState() after disconnect(), same as before connecting', async () => {
+        await ctx.executor.disconnect()
+        expect(() => ctx.executor.getState()).toThrow()
+      })
+
+      it('throws from findBlocks() after disconnect() rather than returning []', async () => {
+        await ctx.executor.disconnect()
+        expect(() =>
+          ctx.executor.findBlocks({ names: ['stone'], maxDistance: 16, limit: 1 }),
+        ).toThrow()
+      })
+
+      it('registers safely (never throws) from on() after disconnect()', async () => {
+        await ctx.executor.disconnect()
+        let off: (() => void) | undefined
+        expect(() => {
+          off = ctx.executor.on('health', () => {})
+        }).not.toThrow()
+        expect(typeof off).toBe('function')
+        expect(() => off?.()).not.toThrow()
+      })
     })
   })
 }

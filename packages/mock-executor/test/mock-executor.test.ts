@@ -2,10 +2,28 @@ import { describe, it, expect } from 'vitest'
 import { MockExecutor } from '@minebot/mock-executor'
 import { runContractSuite } from '@minebot/mock-executor/contract-suite'
 
+// Fix 4 (post-review): a suite instance seeded with zero blocks made every
+// findBlocks assertion in the shared suite vacuous (`[].length <= limit`
+// passes trivially, and the per-block loop body never runs). Seed a handful
+// of matching blocks at distinct, increasing distances — more than the
+// suite's smallest `limit` — so both the "respects limit" and "nearest-first,
+// non-empty" assertions actually exercise real data.
+const SEEDED_BLOCK_NAMES = ['stone', 'dirt', 'grass_block']
+const seededBlocks = [
+  { name: 'stone', position: { x: 3, y: 64, z: 0 }, distance: 3 },
+  { name: 'dirt', position: { x: 5, y: 64, z: 0 }, distance: 5 },
+  { name: 'grass_block', position: { x: 8, y: 64, z: 0 }, distance: 8 },
+  { name: 'stone', position: { x: 12, y: 64, z: 0 }, distance: 12 },
+]
+
 runContractSuite('MockExecutor', async () => {
-  const executor = new MockExecutor({ actionDelayMs: 20 })
+  const executor = new MockExecutor({ actionDelayMs: 20, blocks: [...seededBlocks] })
   await executor.connect()
-  return { executor, cleanup: () => executor.disconnect() }
+  return {
+    executor,
+    cleanup: () => executor.disconnect(),
+    expectFindable: { names: SEEDED_BLOCK_NAMES, minCount: seededBlocks.length },
+  }
 })
 
 describe('MockExecutor specifics', () => {

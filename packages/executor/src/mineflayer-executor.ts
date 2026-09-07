@@ -29,6 +29,16 @@ export class MineflayerExecutor implements BotExecutor {
   private readonly username: string
   private readonly version: string
   private readonly connectTimeoutMs: number
+  /**
+   * Settles the currently in-flight cancellable action (currently only
+   * `moveTo`) as `interrupted`, if one is running. `stop()` invokes this
+   * before clearing control states — without it, `stop()` only cleared
+   * control states for a single tick, and `moveTo`'s own `physicsTick`
+   * handler re-asserted `setControlState('forward', true)` on the very next
+   * tick (≤50ms later), so the bot kept walking through the "emergency
+   * brake" Phase 5's reflex layer depends on.
+   */
+  private inFlightStop: (() => void) | null = null
 
   constructor(opts: MineflayerExecutorOptions = {}) {
     this.host = opts.host ?? 'localhost'
@@ -135,7 +145,7 @@ export class MineflayerExecutor implements BotExecutor {
   }
 
   getState(): WorldSnapshot {
-    return toSnapshot(this.requireBot() as unknown as MineflayerLike)
+    return toSnapshot(this.requireBot() as MineflayerLike)
   }
 
   findBlocks(query: BlockQuery): readonly BlockInfo[] {
@@ -149,13 +159,24 @@ export class MineflayerExecutor implements BotExecutor {
       count: query.limit,
     })
     return Object.freeze(
-      positions.slice(0, query.limit).map((p) =>
-        Object.freeze({
-          name: bot.blockAt(p)?.name ?? 'unknown',
-          position: Object.freeze({ x: p.x, y: p.y, z: p.z }),
-          distance: Math.hypot(p.x - origin.x, p.y - origin.y, p.z - origin.z),
-        }),
-      ),
+      positions
+        .slice(0, query.limit)
+        .map((p) =>
+          Object.freeze({
+            name: bot.blockAt(p)?.name ?? 'unknown',
+            position: Object.freeze({ x: p.x, y: p.y, z: p.z }),
+            distance: Math.hypot(p.x - origin.x, p.y - origin.y, p.z - origin.z),
+          }),
+        )
+        // Fix 4 (post-review): Mineflayer's own findBlocks() sorts nearest-first
+        // relative to a *floored* origin point, but we report `distance`
+        // relative to the bot's exact (unfloored) position — the two can
+        // disagree by up to ~sqrt(3) blocks, which was enough to occasionally
+        // flip the reported order out of the nearest-first guarantee
+        // BlockQuery/BlockInfo document. Re-sort by the exact distance we
+        // actually report, so the array we hand back is self-consistently
+        // ordered by its own `distance` field.
+        .sort((a, b) => a.distance - b.distance),
     )
   }
 
@@ -163,7 +184,15 @@ export class MineflayerExecutor implements BotExecutor {
     event: K,
     handler: (payload: BotEvents[K]) => void,
   ): Unsubscribe {
-    const bot = this.requireBot()
+    // Decision (Fix 2, post-review): unlike getState()/findBlocks(), on() does
+    // not throw when disconnected — it is a benign registration, not a read of
+    // world state, and throwing here would forbid the common pattern of
+    // subscribing before the first connect() call. Registering while
+    // disconnected is a safe no-op: it returns a callable but inert
+    // unsubscribe, and nothing is wired up for a later connect() to activate
+    // (subscriptions surviving a reconnect is deferred — see the design spec).
+    const bot = this.bot
+    if (!bot) return () => {}
     const emit = handler as (p: unknown) => void
 
     switch (event) {
@@ -229,8 +258,9 @@ export class MineflayerExecutor implements BotExecutor {
   }
 
   async moveTo(target: Vec3, opts?: ActionOptions): Promise<Result> {
-    const bot = this.requireBot()
     if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
+    const bot = this.bot
+    if (!bot) return fail('disconnected', 'not connected')
 
     const timeoutMs = opts?.timeoutMs ?? 30_000
     const tolerance = 1.5
@@ -243,6 +273,7 @@ export class MineflayerExecutor implements BotExecutor {
         clearTimeout(timer)
         bot.removeListener('physicsTick', onTick)
         signal?.removeEventListener('abort', onAbort)
+        if (this.inFlightStop === stopThisMove) this.inFlightStop = null
         try {
           bot.clearControlStates()
         } catch {
@@ -255,10 +286,14 @@ export class MineflayerExecutor implements BotExecutor {
         cleanup()
         resolve(result)
       }
-      function onAbort(): void {
+      const onAbort = (): void => {
         finish(fail('interrupted', 'aborted mid-move'))
       }
-      function onTick(): void {
+      const stopThisMove = (): void => {
+        finish(fail('interrupted', 'stopped via stop()'))
+      }
+      this.inFlightStop = stopThisMove
+      const onTick = (): void => {
         const p = bot.entity.position
         const dx = target.x - p.x
         const dz = target.z - p.z
@@ -289,6 +324,7 @@ export class MineflayerExecutor implements BotExecutor {
 
   async followPlayer(_playerName: string, opts?: ActionOptions): Promise<Result> {
     if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
+    if (!this.bot) return fail('disconnected', 'not connected')
     return fail('internal', 'followPlayer arrives in Phase 5')
   }
 
@@ -298,21 +334,25 @@ export class MineflayerExecutor implements BotExecutor {
     opts?: ActionOptions,
   ): Promise<Result<{ position: Vec3; collected: boolean }>> {
     if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
+    if (!this.bot) return fail('disconnected', 'not connected')
     return fail('internal', 'mineBlock arrives in Phase 2')
   }
 
   async placeBlock(_blockName: string, _position: Vec3, opts?: ActionOptions): Promise<Result> {
     if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
+    if (!this.bot) return fail('disconnected', 'not connected')
     return fail('internal', 'placeBlock arrives in Phase 5')
   }
 
   async attack(_entityId: number, opts?: ActionOptions): Promise<Result> {
     if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
+    if (!this.bot) return fail('disconnected', 'not connected')
     return fail('internal', 'attack arrives in Phase 5')
   }
 
   async flee(opts?: ActionOptions): Promise<Result> {
     if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
+    if (!this.bot) return fail('disconnected', 'not connected')
     return fail('internal', 'flee arrives in Phase 5')
   }
 
@@ -321,6 +361,13 @@ export class MineflayerExecutor implements BotExecutor {
   }
 
   stop(): void {
+    // Settle any in-flight cancellable action first (as `interrupted`) — its
+    // own cleanup clears control states, but we clear them again below
+    // unconditionally, in case something set a control state outside of a
+    // tracked action.
+    const cancel = this.inFlightStop
+    this.inFlightStop = null
+    cancel?.()
     try {
       this.bot?.clearControlStates()
     } catch {

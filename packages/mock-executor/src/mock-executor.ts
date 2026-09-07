@@ -44,6 +44,13 @@ export class MockExecutor implements BotExecutor {
   private blocks: BlockInfo[]
   private readonly delayMs: number
   private readonly handlers = new Map<string, Set<Handler>>()
+  /**
+   * Settles the currently in-flight simulated action as `interrupted`, if
+   * one is running. Mirrors MineflayerExecutor's `stop()`/in-flight-action
+   * behaviour so the contract suite's stop() assertions hold identically
+   * against both implementations.
+   */
+  private inFlightStop: (() => void) | null = null
 
   constructor(opts: MockOptions = {}) {
     this.position = opts.position ?? { x: 0, y: 64, z: 0 }
@@ -85,10 +92,17 @@ export class MockExecutor implements BotExecutor {
   }
 
   findBlocks(query: BlockQuery): readonly BlockInfo[] {
+    // Agrees with MineflayerExecutor: throws (never returns `[]`) when
+    // disconnected, for the same reason getState() throws — see the
+    // contract's findBlocks doc comment.
+    if (!this.connected) throw new Error('MockExecutor.findBlocks() called while disconnected')
     const names = new Set(query.names)
     return Object.freeze(
       this.blocks
         .filter((b) => names.has(b.name) && b.distance <= query.maxDistance)
+        // Nearest-first, matching the real executor (which inherits Mineflayer's
+        // nearest-first search order) — see BlockQuery/BlockInfo in the contract.
+        .sort((a, b) => a.distance - b.distance)
         .slice(0, query.limit)
         .map((b) => Object.freeze({ ...b })),
     )
@@ -98,6 +112,10 @@ export class MockExecutor implements BotExecutor {
     event: K,
     handler: (payload: BotEvents[K]) => void,
   ): Unsubscribe {
+    // Agrees with MineflayerExecutor: a safe no-op while disconnected — never
+    // throws, registers nothing, and returns a callable but inert
+    // unsubscribe. See the contract's on() doc comment.
+    if (!this.connected) return () => {}
     const set = this.handlers.get(event) ?? new Set<Handler>()
     set.add(handler as Handler)
     this.handlers.set(event, set)
@@ -172,26 +190,42 @@ export class MockExecutor implements BotExecutor {
 
   stop(): void {
     this.record('stop')
+    const cancel = this.inFlightStop
+    this.inFlightStop = null
+    cancel?.()
   }
 
   private record(name: string, ...args: unknown[]): void {
     this.calls.push({ name, args })
   }
 
-  /** Honour the contract's cancellation rule: resolve interrupted, never throw. */
+  /**
+   * Honour the contract's cancellation rule: resolve interrupted, never
+   * throw. Also the single choke point all six actions share, so the
+   * `disconnected` check lives here once rather than duplicated across
+   * moveTo/followPlayer/mineBlock/placeBlock/attack/flee — order matches
+   * MineflayerExecutor's per-action checks: already-aborted first, then
+   * disconnected.
+   */
   private simulate(opts?: ActionOptions): Promise<Result> {
     if (opts?.signal?.aborted) return Promise.resolve(fail('interrupted', 'aborted before start'))
+    if (!this.connected) return Promise.resolve(fail('disconnected', 'not connected'))
     if (this.delayMs === 0) return Promise.resolve(ok(undefined))
     return new Promise<Result>((resolve) => {
+      let settled = false
       const signal = opts?.signal
-      const onAbort = () => {
+      const finish = (result: Result): void => {
+        if (settled) return
+        settled = true
         clearTimeout(timer)
-        resolve(fail('interrupted', 'aborted mid-action'))
-      }
-      const timer = setTimeout(() => {
         signal?.removeEventListener('abort', onAbort)
-        resolve(ok(undefined))
-      }, this.delayMs)
+        if (this.inFlightStop === stopThisAction) this.inFlightStop = null
+        resolve(result)
+      }
+      const onAbort = (): void => finish(fail('interrupted', 'aborted mid-action'))
+      const stopThisAction = (): void => finish(fail('interrupted', 'stopped via stop()'))
+      this.inFlightStop = stopThisAction
+      const timer = setTimeout(() => finish(ok(undefined)), this.delayMs)
       signal?.addEventListener('abort', onAbort, { once: true })
     })
   }
