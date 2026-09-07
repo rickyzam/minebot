@@ -110,6 +110,13 @@ export interface BotEvents {
   entityNearby: { entity: EntityInfo }
   chat: { username: string; message: string }
   death: Record<string, never>
+  /**
+   * Fires only for a connection that drops unexpectedly (kick, network loss,
+   * server restart, …). A deliberate, caller-initiated `disconnect()` emits
+   * nothing at all — both the mock and the real executor agree on this. A
+   * handler written as `on('disconnected', () => reconnect())` therefore
+   * never needs to guard against reacting to its own shutdown.
+   */
   disconnected: { reason: string }
 }
 

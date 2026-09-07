@@ -1,7 +1,7 @@
 # Phase 2 (Track A) — Pathfinding and Mining — Design
 
 **Date:** 2026-09-07
-**Status:** Awaiting review
+**Status:** Approved, in progress
 **Builds on:** [`2026-09-07-minecraft-agent-design.md`](./2026-09-07-minecraft-agent-design.md) — the binding contract. This
 document does not relitigate it; it applies §9's four pending changes and specifies
 the Phase 2 slice the notes describe as "pathfinding + hardcoded mining."
@@ -56,9 +56,10 @@ only because two probe runs disagreed.
 
 ## 3. Contract changes (design spec §9)
 
-All four §9 items land together, in a single commit, **before** any executor work —
-`contract`, `mock-executor`, and the contract suite move as one unit, and the executor
-is written against the result.
+All four §9 items land together, as one unit, **before** any executor work —
+`contract`, `mock-executor`, and the contract suite move together, with no executor
+work interleaved, and the executor is written against the result. They landed across
+several commits, not a single one; what matters is that the unit held.
 
 **This is a change to the shared integration surface.** Spec §4 and CLAUDE.md both say
 `contract/` and `mock-executor/` change only by mutual agreement with Track B. The

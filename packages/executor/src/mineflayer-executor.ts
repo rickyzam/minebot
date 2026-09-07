@@ -66,8 +66,19 @@ export class MineflayerExecutor implements BotExecutor {
   }
 
   async connect(): Promise<Result> {
-    if (this.bot) return ok(undefined)
+    // `pendingConnect` must be checked BEFORE `this.bot`. `this.bot` is
+    // assigned in onSpawn, but openConnection() doesn't resolve until the
+    // health-packet/chunk-load wait finishes, ~550ms later — so for most of
+    // every connect(), `this.bot` is already non-null while `pendingConnect`
+    // is still unresolved. A spawned-but-not-ready bot must not satisfy the
+    // fast path: if the `this.bot` guard ran first, a concurrent connect()
+    // in that window would return `ok` immediately, and the caller would see
+    // health 0 / an empty findBlocks() — exactly what the health/chunk waits
+    // exist to prevent. It would also let that caller resolve `ok` while
+    // every caller sharing `pendingConnect` resolves `interrupted` in the
+    // disconnect race, contradicting the invariant at lines ~90-100 below.
     if (this.pendingConnect) return this.pendingConnect
+    if (this.bot) return ok(undefined)
 
     this.disconnectRequested = false
     // The disconnect-honouring check and the `pendingConnect = null` clear
@@ -169,16 +180,30 @@ export class MineflayerExecutor implements BotExecutor {
         healthTimer = setTimeout(() => proceed(), 5_000)
         bot.once('health', () => proceed())
       }
+      // Fix (post-review): onError/onKicked/the connect timeout can all fire
+      // *after* onSpawn already ran — during the ~550ms health/chunk wait —
+      // at which point wireBotEvents() has already attached its seven
+      // listeners to this bot. Nulling this.bot without unwiring them left a
+      // dead bot's listeners attached to the executor's long-lived emitter
+      // forever (teardown() can't reach them either, since it early-returns
+      // when this.bot is already null), including firing 'disconnected' at
+      // subscribers for a bot no caller ever knew was live. A duplicate-login
+      // kick during that window is realistic on this offline-mode server —
+      // the integration tests deliberately provoke it. unwireBotEvents() is a
+      // safe no-op when onSpawn never ran (botWiring is still empty).
       const onError = (e: Error): void => {
         this.bot = null
+        this.unwireBotEvents()
         finish(fail('disconnected', e.message))
       }
       const onKicked = (reason: unknown): void => {
         this.bot = null
+        this.unwireBotEvents()
         finish(fail('disconnected', `kicked: ${JSON.stringify(reason)}`))
       }
       const timer = setTimeout(() => {
         this.bot = null
+        this.unwireBotEvents()
         try {
           bot.quit()
         } catch {
@@ -399,7 +424,7 @@ export class MineflayerExecutor implements BotExecutor {
   }
 
   async mineBlock(
-    _blockName: string,
+    _target: string | Vec3,
     _maxDistance: number,
     opts?: ActionOptions,
   ): Promise<Result<{ position: Vec3; collected: boolean }>> {
