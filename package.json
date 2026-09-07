@@ -2,14 +2,19 @@
   "name": "minebot",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/*"],
-  "engines": { "node": ">=24" },
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "test": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/smoke-connect.ts",
-    "demo": "tsx packages/executor/src/cli.ts"
+    "demo": "tsx packages/executor/src/cli.ts",
+    "bots": "tsx scripts/spawn-bots.ts"
   },
   "devDependencies": {
     "@types/node": "26.4.1",
