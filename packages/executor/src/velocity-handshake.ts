@@ -31,6 +31,13 @@ export interface VelocityForwardingOptions {
   /** Shared secret, matching the proxy's `forwarding-secret-file`. */
   readonly secret: string
   readonly username: string
+  /**
+   * Identity to claim. Defaults to the offline UUID for `username`, which keeps
+   * a bot's player data stable across runs. Pass a random one for a throwaway
+   * bot: clients cache skins per identity, so a reused UUID makes a viewer keep
+   * showing the skin it saw last time.
+   */
+  readonly uuid?: Buffer
   /** Address to report as the player's origin. Defaults to loopback. */
   readonly address?: string
   /** Profile properties; a `textures` entry here gives the bot a skin. */
@@ -101,7 +108,7 @@ export function installVelocityForwarding(
       messageId: packet.messageId,
       data: buildForwardingResponse(opts.secret, {
         address: opts.address ?? '127.0.0.1',
-        uuid: offlineUuid(opts.username),
+        uuid: opts.uuid ?? offlineUuid(opts.username),
         username: opts.username,
         properties: opts.properties,
       }),

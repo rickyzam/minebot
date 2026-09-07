@@ -60,29 +60,60 @@ export function toSkinChoices(entries: readonly MineSkinEntry[]): SkinChoice[] {
   return choices
 }
 
+interface MineSkinPage {
+  skins?: MineSkinEntry[]
+  pagination?: { next?: { after?: string } }
+}
+
 /**
  * Fetch a batch of skins and return `count` of them at random.
+ *
+ * The listing is ordered newest-first, so two runs minutes apart see almost the
+ * same page and keep drawing the same skins — which is exactly what was observed.
+ * Following the pagination cursor a **random number of pages** first lands the
+ * pool somewhere different in MineSkin's history on each run, so repeats across
+ * runs become unlikely rather than routine.
  *
  * Returns fewer — or none — rather than throwing: the caller treats skins as
  * decoration and carries on without them.
  */
 export async function fetchRandomSkins(
   count: number,
-  opts: { poolSize?: number; timeoutMs?: number } = {},
+  opts: { poolSize?: number; timeoutMs?: number; maxDepth?: number } = {},
 ): Promise<SkinChoice[]> {
   const poolSize = opts.poolSize ?? 48
-  const timeoutMs = opts.timeoutMs ?? 8_000
+  const timeoutMs = opts.timeoutMs ?? 12_000
+  const depth = Math.floor(Math.random() * ((opts.maxDepth ?? 12) + 1))
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const response = await fetch(`https://api.mineskin.org/v2/skins?size=${poolSize}`, {
-      signal: controller.signal,
-      headers: { accept: 'application/json' },
-    })
-    if (!response.ok) return []
-    const body = (await response.json()) as { skins?: MineSkinEntry[] }
-    return pickRandom(toSkinChoices(body.skins ?? []), count)
+    const pool: MineSkinEntry[] = []
+    let after: string | undefined
+
+    // One page past the random depth, so the pool is a random slice rather than
+    // always the newest uploads.
+    for (let page = 0; page <= depth; page++) {
+      const query = `size=${poolSize}${after ? `&after=${encodeURIComponent(after)}` : ''}`
+      const response = await fetch(`https://api.mineskin.org/v2/skins?${query}`, {
+        signal: controller.signal,
+        headers: { accept: 'application/json' },
+      })
+      if (!response.ok) break
+      const body = (await response.json()) as MineSkinPage
+      const skins = body.skins ?? []
+      if (skins.length === 0) break
+      // Only the final page feeds the pool; earlier ones are just paging cost.
+      if (page === depth) pool.push(...skins)
+      after = body.pagination?.next?.after
+      if (!after) {
+        // Ran out of history before reaching the target depth — use what we have.
+        if (pool.length === 0) pool.push(...skins)
+        break
+      }
+    }
+
+    return pickRandom(toSkinChoices(pool), count)
   } catch {
     // Offline, rate-limited, or the API changed shape. Not worth failing over.
     return []

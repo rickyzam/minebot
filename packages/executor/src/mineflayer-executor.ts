@@ -60,6 +60,12 @@ export interface MineflayerExecutorOptions {
    * several bots are distinguishable on screen. Only used when forwarding is on.
    */
   velocityProperties?: VelocityForwardingOptions['properties']
+  /**
+   * Identity to claim when forwarding. Defaults to the offline UUID for the
+   * username. Randomise it for disposable bots so viewers do not show a cached
+   * skin from a previous run.
+   */
+  velocityUuid?: Buffer
 }
 
 /** Is `host` this machine, and therefore trusted to receive a signed payload? */
@@ -82,6 +88,7 @@ export class MineflayerExecutor implements BotExecutor {
    */
   private readonly velocitySecret: () => string | null
   private readonly velocityProperties: VelocityForwardingOptions['properties']
+  private readonly velocityUuid: Buffer | undefined
   private velocityForwardingState: VelocityForwarding | null = null
   /**
    * Registry entries the server reported that a vanilla client would not know —
@@ -138,6 +145,7 @@ export class MineflayerExecutor implements BotExecutor {
         : opts.velocitySecret
     this.velocitySecret = () => secret
     this.velocityProperties = opts.velocityProperties
+    this.velocityUuid = opts.velocityUuid
   }
 
   /**
@@ -252,6 +260,7 @@ export class MineflayerExecutor implements BotExecutor {
           secret: velocitySecret,
           username: this.username,
           properties: this.velocityProperties,
+          uuid: this.velocityUuid,
         },
       )
     }

@@ -12,6 +12,7 @@
  * Ctrl-C disconnects them cleanly; without that they linger on the server as
  * ghost players until it notices the socket died.
  */
+import { randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { MineflayerExecutor, texturesProperty } from '../packages/executor/src/index.js'
 import { fetchRandomSkins, type SkinChoice } from './random-skin.js'
@@ -55,6 +56,14 @@ const mc = (command: string): void => {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+/** Random v4 UUID, so each run's bots are new players to any viewer. */
+function randomUuidV4(): Buffer {
+  const bytes = randomBytes(16)
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80
+  return bytes
+}
+
 async function main(): Promise<void> {
   const executors: Array<{ username: string; executor: MineflayerExecutor }> = []
 
@@ -67,10 +76,16 @@ async function main(): Promise<void> {
 
   for (const [index, { username, colour, label }] of roster.entries()) {
     const skin = skins[index]
+    // A fresh identity per run. Viewers cache skins per player identity, so a
+    // bot reusing its offline UUID keeps showing whatever skin that client saw
+    // last time — which looked like duplicate and repeated skins even though
+    // the server was advertising ten distinct ones.
+    const uuid = randomUuidV4()
     const executor = new MineflayerExecutor({
       username,
+      velocityUuid: uuid,
       velocityProperties: skin
-        ? [texturesProperty({ url: skin.url, username })]
+        ? [texturesProperty({ url: skin.url, username, uuid })]
         : undefined,
     })
     const result = await executor.connect()
