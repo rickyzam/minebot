@@ -3,7 +3,7 @@ import { MineflayerExecutor } from './index.js'
 const main = async (): Promise<void> => {
   const executor = new MineflayerExecutor({ username: 'MineBot' })
 
-  console.log('connecting to localhost:25565 …')
+  console.log('connecting to localhost:25566 …')
   const connected = await executor.connect()
   if (!connected.ok) {
     console.error(`FAILED: ${connected.reason} — ${connected.detail}`)

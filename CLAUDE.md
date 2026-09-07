@@ -11,9 +11,9 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 ## Commands
 
 ```bash
-npm test                  # 117 unit tests. No network. Fast. Run these constantly.
+npm test                  # 153 unit tests. No network. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
-npm run test:integration  # 53 tests. Requires the live dev server.
+npm run test:integration  # 61 tests. Requires the live dev server.
 npm run smoke             # Minimal "can a bot connect at all" check.
 npm run demo              # Connect, print snapshot, walk. The Phase 1 deliverable.
 ```
@@ -48,13 +48,36 @@ These cost real debugging time to discover. Treat them as settled.
 | Modded registry ids are appended **after** vanilla and delta-encoded, so vanilla ids do not move | Measured with a mod loaded: `coal` stayed 896, `stone_pickaxe` stayed 923. `minecraft-data` stays valid |
 | The sync payload is zero-padded to the chunk size | Decode to the declared structure, not to the end of the buffer |
 | nmp logs a non-fatal `partial packet` warning for packets carrying a **modded data component** | Expected, not a bug in our code. Unknown component codecs cannot be decoded; the bot degrades rather than failing |
+| The Velocity backend rejects unforwarded logins: *"This server requires you to connect with Velocity."* | Bots must sign a forwarding payload. `installVelocityForwarding` does it; the secret is shared with the proxy |
+| **node-minecraft-protocol already answers `login_plugin_request`** with "not understood" | Adding a second handler sends two responses for one message id and the server kicks with `Unexpected custom data from client`. Displace nmp's handler, do not stack on it |
+| A **wrong** secret kicks with `Unable to verify player details`; **no** forwarding kicks with `This server requires you to connect with Velocity` | Two distinct failures. `Secret check failed.` is only a server-side log line and never reaches the client |
+| The backend advertises forwarding version **4**, but version **1** is accepted | Later versions only add a Mojang public key, which a bot does not have |
+| Bot UUIDs are the offline-mode ones (`MD5("OfflinePlayer:<name>")`, v3) | Deliberate: a bot's identity and player data survive the proxy being added or removed |
 | `/fill` silently refuses unloaded chunks with "That position is not loaded" | The test arena is `forceload`ed. This bug once made every test pass against a freefalling bot |
 
 ## The dev server
 
-Fabric 1.21.10, `localhost:25565`, offline mode, survival + peaceful, running in a **tmux session named `mc`**.
+Two processes, two tmux sessions:
 
-- **Do not stop, restart, or reconfigure it without asking.** Someone may be logged in, and it is shared state outside the repo.
+| | Port | Session | Notes |
+|---|---|---|---|
+| **Velocity proxy** | `0.0.0.0:25565` | `velocity` | `online-mode=true` — real Mojang auth. Where **people** connect |
+| **Fabric backend** | `127.0.0.1:25566` | `mc` | 1.21.10, offline mode, survival + peaceful. Loopback only, so unreachable from the network |
+
+Players authenticate at the proxy and are forwarded to the backend with their
+**real Mojang UUID**, so inventories and advancements are keyed to the same
+identity they would have on an online-mode server. The backend rejects anything
+that cannot present forwarding data signed with the shared secret.
+
+Bots have no Mojang account, so they connect **directly to the backend on 25566**
+and sign their own forwarding payload — hence `MineflayerExecutor`'s default port
+is 25566, not 25565. See [`velocity-forwarding.ts`](packages/executor/src/velocity-forwarding.ts).
+
+The secret lives at `~/minecraft/velocity/forwarding.secret`, outside this repo,
+and is read via `resolveForwardingSecret()` (env `VELOCITY_FORWARDING_SECRET`
+first, then that file). **Never commit it** — `.gitignore` covers `*.secret`.
+
+- **Do not stop, restart, or reconfigure either without asking.** Someone may be logged in, and both are shared state outside the repo.
 - Drive its console with `tmux send-keys -t mc '<command>' Enter`. This is how integration tests build reproducible scenarios.
 - Use `stop` for shutdown, never `kill` — the world needs to flush.
 - Mods are supported. A mod that registers content makes the server reject a *plain* Mineflayer client, but the executor completes Fabric's registry-sync handshake, so it connects anyway — see [`fabric-registry.ts`](packages/executor/src/fabric-registry.ts). Currently loaded: `fabric-api`, `nitwitmap` (adds an item), `fabrictailor` (skins, server-side only).

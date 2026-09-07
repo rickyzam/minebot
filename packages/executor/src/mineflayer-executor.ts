@@ -15,9 +15,22 @@ import {
 import { classifyEntity, toSnapshot, type MineflayerLike } from './snapshot.js'
 import { installFabricHandshake, type ProtocolClientLike } from './fabric-handshake.js'
 import type { RegistryEntry } from './fabric-registry.js'
+import {
+  installVelocityForwarding,
+  type LoginClientLike,
+  type VelocityForwarding,
+  type VelocityForwardingOptions,
+} from './velocity-handshake.js'
+import { resolveForwardingSecret } from './forwarding-secret.js'
 
 export interface MineflayerExecutorOptions {
   host?: string
+  /**
+   * Defaults to 25566, the backend server. Port 25565 belongs to the Velocity
+   * proxy, which authenticates against Mojang and so rejects a bot; bots reach
+   * the backend directly and prove themselves with signed forwarding data
+   * instead. See `velocitySecret`.
+   */
   port?: number
   username?: string
   version?: string
@@ -32,6 +45,26 @@ export interface MineflayerExecutorOptions {
    * behaviour.
    */
   fabricCompat?: boolean
+  /**
+   * Shared secret for Velocity modern forwarding. Required when the target
+   * server sits behind a Velocity proxy, because such a backend rejects any
+   * login that cannot present signed forwarding data.
+   *
+   * Defaults to `resolveForwardingSecret()` — the `VELOCITY_FORWARDING_SECRET`
+   * environment variable, else the proxy's secret file. Pass `null` to force it
+   * off for a plain server.
+   */
+  velocitySecret?: string | null
+  /**
+   * Profile properties to forward. A `textures` entry gives the bot a skin, so
+   * several bots are distinguishable on screen. Only used when forwarding is on.
+   */
+  velocityProperties?: VelocityForwardingOptions['properties']
+}
+
+/** Is `host` this machine, and therefore trusted to receive a signed payload? */
+function isLoopbackHost(host: string): boolean {
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]'
 }
 
 export class MineflayerExecutor implements BotExecutor {
@@ -42,6 +75,14 @@ export class MineflayerExecutor implements BotExecutor {
   private readonly version: string
   private readonly connectTimeoutMs: number
   private readonly fabricCompat: boolean
+  /**
+   * Held in a closure rather than a field so the secret is not an enumerable
+   * property: `JSON.stringify(executor)` in a log must not be able to print it.
+   * Returns null when forwarding is off.
+   */
+  private readonly velocitySecret: () => string | null
+  private readonly velocityProperties: VelocityForwardingOptions['properties']
+  private velocityForwardingState: VelocityForwarding | null = null
   /**
    * Registry entries the server reported that a vanilla client would not know —
    * anything outside the `minecraft` namespace. Empty against a vanilla server.
@@ -79,11 +120,42 @@ export class MineflayerExecutor implements BotExecutor {
 
   constructor(opts: MineflayerExecutorOptions = {}) {
     this.host = opts.host ?? 'localhost'
-    this.port = opts.port ?? 25565
+    this.port = opts.port ?? 25566
     this.username = opts.username ?? 'MineBot'
     this.version = opts.version ?? '1.21.10'
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 30_000
     this.fabricCompat = opts.fabricCompat ?? true
+    // An explicit secret is always honoured. An *auto-discovered* one is used
+    // only for a loopback host: signing is an oracle, and pointing the executor
+    // at someone else's server should not hand its operator a replayable
+    // forwarding token for this bot's username. The proxied backend is loopback
+    // by design, so this costs nothing in practice.
+    const secret =
+      opts.velocitySecret === undefined
+        ? isLoopbackHost(this.host)
+          ? resolveForwardingSecret()
+          : null
+        : opts.velocitySecret
+    this.velocitySecret = () => secret
+    this.velocityProperties = opts.velocityProperties
+  }
+
+  /**
+   * UUID the server assigned this bot, or null when not connected. With
+   * forwarding on, this is the identity we asserted — so it is the thing to
+   * assert against, not merely that a connection succeeded.
+   */
+  uuid(): string | null {
+    const raw = (this.bot?._client as { uuid?: string } | undefined)?.uuid
+    return raw ?? null
+  }
+
+  /**
+   * State of the Velocity forwarding exchange for the current connection, or
+   * null when forwarding is disabled or no connection has been made.
+   */
+  velocityForwarding(): VelocityForwarding | null {
+    return this.velocityForwardingState
   }
 
   /**
@@ -168,6 +240,21 @@ export class MineflayerExecutor implements BotExecutor {
     const fabric = this.fabricCompat
       ? installFabricHandshake(bot._client as unknown as ProtocolClientLike)
       : null
+
+    // Must also be installed before any await: the forwarding demand arrives
+    // during the login phase, earlier still than the Fabric exchange.
+    this.velocityForwardingState = null
+    const velocitySecret = this.velocitySecret()
+    if (velocitySecret) {
+      this.velocityForwardingState = installVelocityForwarding(
+        bot._client as unknown as LoginClientLike,
+        {
+          secret: velocitySecret,
+          username: this.username,
+          properties: this.velocityProperties,
+        },
+      )
+    }
 
     return new Promise<Result>((resolve) => {
       let settled = false

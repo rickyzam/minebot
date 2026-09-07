@@ -8,3 +8,7 @@ coverage/
 *.log
 .DS_Store
 .superpowers/
+
+# Never commit a proxy forwarding secret.
+forwarding.secret
+*.secret
