@@ -42,7 +42,12 @@ export async function teleportAndWait(
   opts: { timeoutMs?: number; tolerance?: number } = {},
 ): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 10_000
-  const tolerance = opts.tolerance ?? 0.6
+  // `/tp <player> <x> <y> <z>` with integer coordinates centers the entity on that
+  // block, so the reported position lands at (x + 0.5, y, z + 0.5) — a fixed ~0.707
+  // horizontal offset from the integer target. The default tolerance must clear that
+  // predictable offset with margin, or every teleport to integer coordinates times out
+  // waiting for an exact match that never arrives.
+  const tolerance = opts.tolerance ?? 1.0
 
   sendConsoleCommand(`tp ${username} ${target.x} ${target.y} ${target.z}`)
 
