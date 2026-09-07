@@ -228,9 +228,63 @@ export class MineflayerExecutor implements BotExecutor {
     }
   }
 
-  async moveTo(_target: Vec3, opts?: ActionOptions): Promise<Result> {
+  async moveTo(target: Vec3, opts?: ActionOptions): Promise<Result> {
+    const bot = this.requireBot()
     if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
-    return fail('internal', 'moveTo is implemented in Task 6')
+
+    const timeoutMs = opts?.timeoutMs ?? 30_000
+    const tolerance = 1.5
+
+    return new Promise<Result>((resolve) => {
+      let settled = false
+      const signal = opts?.signal
+
+      const cleanup = (): void => {
+        clearTimeout(timer)
+        bot.removeListener('physicsTick', onTick)
+        signal?.removeEventListener('abort', onAbort)
+        try {
+          bot.clearControlStates()
+        } catch {
+          // disconnected mid-move
+        }
+      }
+      const finish = (result: Result): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve(result)
+      }
+      function onAbort(): void {
+        finish(fail('interrupted', 'aborted mid-move'))
+      }
+      function onTick(): void {
+        const p = bot.entity.position
+        const dx = target.x - p.x
+        const dz = target.z - p.z
+        if (Math.hypot(dx, dz) <= tolerance) {
+          finish(ok(undefined))
+          return
+        }
+        // Minecraft yaw: 0 faces -Z, increasing counter-clockwise.
+        void bot.look(Math.atan2(-dx, -dz), 0, true)
+        bot.setControlState('forward', true)
+        // prismarine-entity's .d.ts doesn't declare isCollidedHorizontally, but
+        // mineflayer's physics plugin sets it on the live entity at runtime
+        // (verified against the dev server) — cast narrowly to read it.
+        const entityWithCollisionFlags = bot.entity as unknown as {
+          isCollidedHorizontally?: boolean
+        }
+        bot.setControlState('jump', entityWithCollisionFlags.isCollidedHorizontally === true)
+      }
+      const timer = setTimeout(
+        () => finish(fail('timeout', `did not reach target within ${timeoutMs}ms`)),
+        timeoutMs,
+      )
+
+      signal?.addEventListener('abort', onAbort, { once: true })
+      bot.on('physicsTick', onTick)
+    })
   }
 
   async followPlayer(_playerName: string, opts?: ActionOptions): Promise<Result> {
