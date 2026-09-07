@@ -1,5 +1,6 @@
 import mineflayer, { type Bot } from 'mineflayer'
 import pathfinderPkg from 'mineflayer-pathfinder'
+import type { goals as PathfinderGoals } from 'mineflayer-pathfinder'
 import {
   ok,
   fail,
@@ -29,6 +30,13 @@ import { resolveForwardingSecret } from './forwarding-secret.js'
 // `default`. Destructuring the default import is the only form that resolves
 // all three.
 const { pathfinder, Movements, goals } = pathfinderPkg
+
+/**
+ * A pathfinder goal. Taken from the plugin's own declarations rather than
+ * widened to `unknown`, so the goal constructors below are argument-checked at
+ * compile time instead of trusted.
+ */
+type PathfinderGoal = PathfinderGoals.Goal
 
 export interface MineflayerExecutorOptions {
   host?: string
@@ -590,49 +598,58 @@ export class MineflayerExecutor implements BotExecutor {
     }
   }
 
+  /**
+   * Run a pathfinder goal under an AbortSignal, mapping the plugin's outcomes
+   * onto the contract's failure reasons.
+   *
+   * VERIFIED 2026-09-07 by reading node_modules/mineflayer-pathfinder/lib/goto.js:
+   * goto() rejects with an Error whose `.name` is one of 'NoPath', 'Timeout',
+   * 'PathStopped' or 'GoalChanged'. That name is the only reliable
+   * discriminator, and the NoPath/PathStopped split is what separates
+   * 'unreachable' (pick a different target) from 'interrupted' (re-plan from
+   * current state) for Track B's retry policy.
+   */
+  private async gotoGoal(
+    bot: Bot,
+    signal: AbortSignal,
+    goal: PathfinderGoal,
+  ): Promise<Result> {
+    const onAbort = (): void => {
+      try {
+        bot.pathfinder.stop()
+        bot.pathfinder.setGoal(null)
+      } catch {
+        // disconnected mid-path
+      }
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    try {
+      await bot.pathfinder.goto(goal)
+      return ok(undefined)
+    } catch (e) {
+      // An aborted run is relabelled by runAction, so returning ok here is
+      // safe and keeps the mapping in one place.
+      if (signal.aborted) return ok(undefined)
+      const name = e instanceof Error ? e.name : ''
+      if (name === 'NoPath') return fail('unreachable', 'no path to the target')
+      if (name === 'Timeout') {
+        return fail('timeout', 'pathfinder could not compute a path in time')
+      }
+      if (name === 'PathStopped' || name === 'GoalChanged') {
+        return fail('interrupted', 'path stopped before completion')
+      }
+      return fail('internal', e instanceof Error ? e.message : String(e))
+    } finally {
+      signal.removeEventListener('abort', onAbort)
+    }
+  }
+
   async moveTo(target: Vec3, opts?: ActionOptions): Promise<Result> {
-    return this.runAction(opts, 30_000, async (bot, signal) => {
-      const tolerance = 1.5
-      return new Promise<Result>((resolve) => {
-        const cleanup = (): void => {
-          bot.removeListener('physicsTick', onTick)
-          signal.removeEventListener('abort', onAbort)
-          try {
-            bot.clearControlStates()
-          } catch {
-            // disconnected mid-move
-          }
-        }
-        const finish = (result: Result): void => {
-          cleanup()
-          resolve(result)
-        }
-        // runAction maps an aborted run to interrupted/timeout; this just
-        // unblocks the promise so it can do so.
-        const onAbort = (): void => finish(ok(undefined))
-        const onTick = (): void => {
-          const p = bot.entity.position
-          const dx = target.x - p.x
-          const dz = target.z - p.z
-          if (Math.hypot(dx, dz) <= tolerance) {
-            finish(ok(undefined))
-            return
-          }
-          // Minecraft yaw: 0 faces -Z, increasing counter-clockwise.
-          void bot.look(Math.atan2(-dx, -dz), 0, true)
-          bot.setControlState('forward', true)
-          // prismarine-entity's .d.ts doesn't declare isCollidedHorizontally,
-          // but mineflayer's physics plugin sets it on the live entity at
-          // runtime (verified against the dev server) — cast narrowly to read it.
-          const entityWithCollisionFlags = bot.entity as unknown as {
-            isCollidedHorizontally?: boolean
-          }
-          bot.setControlState('jump', entityWithCollisionFlags.isCollidedHorizontally === true)
-        }
-        signal.addEventListener('abort', onAbort, { once: true })
-        bot.on('physicsTick', onTick)
-      })
-    })
+    // 60s rather than Phase 1's 30s: a measured 30-block path around a wall
+    // took 6.1s, and Phase 4 will ask for much longer routes.
+    return this.runAction(opts, 60_000, async (bot, signal) =>
+      this.gotoGoal(bot, signal, new goals.GoalNear(target.x, target.y, target.z, 1)),
+    )
   }
 
   async followPlayer(_playerName: string, opts?: ActionOptions): Promise<Result> {
@@ -677,6 +694,16 @@ export class MineflayerExecutor implements BotExecutor {
     const cancel = this.inFlightStop
     this.inFlightStop = null
     cancel?.()
+    // Halt the pathfinder explicitly as well. Cancelling the action aborts its
+    // signal, which gotoGoal reacts to — but stop() is the emergency brake, and
+    // it must also stop a bot left walking by anything not currently tracked as
+    // an in-flight action.
+    try {
+      this.bot?.pathfinder?.stop()
+      this.bot?.pathfinder?.setGoal(null)
+    } catch {
+      // pathfinder not loaded, or disconnected
+    }
     try {
       this.bot?.clearControlStates()
     } catch {
