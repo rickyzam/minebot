@@ -112,11 +112,23 @@ describe('MineflayerExecutor.moveTo', () => {
     await resetToArena(executor, 'ITMoveTimeout')
     const start = executor.getState().self.position
 
+    // Aim along +x only, not diagonally. The arena runway (see ARENA above) is
+    // 60 blocks long in x but only 9 blocks wide in z — a 45° target sends the
+    // bot off the platform's edge within a second or two, and it falls ~130
+    // blocks from y≈199 to real terrain, likely dying and respawning
+    // elsewhere. The test still went green because it only asserted
+    // `reason === 'timeout'`, which a respawned-and-idle bot also satisfies —
+    // passing for the wrong reason instead of exercising an in-bounds,
+    // reachable-forever walk that legitimately never arrives.
     const r = await executor.moveTo(
-      { x: start.x + 5_000, y: start.y, z: start.z + 5_000 },
+      { x: start.x + 5_000, y: start.y, z: start.z },
       { timeoutMs: 6_000 },
     )
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toBe('timeout')
+
+    // Confirm the bot is still on the runway, not fallen off / dead / respawned.
+    const end = executor.getState().self.position
+    expect(Math.abs(end.y - start.y)).toBeLessThanOrEqual(2)
   })
 })
