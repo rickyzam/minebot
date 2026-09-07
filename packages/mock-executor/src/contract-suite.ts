@@ -278,6 +278,28 @@ export function runContractSuite(
         await ctx.executor.connect()
         expect(seen).toBe(atUnsubscribe)
       })
+
+      // Post-review Important 2: emit() must not let one bad subscriber take
+      // down the emitter or the action that triggered it (here, connect()'s
+      // own explicit `emit('spawned', {})`). A throwing handler used to hang
+      // the real executor until connectTimeoutMs and reject the mock's
+      // connect() outright — divergent failure modes for the same bug.
+      it('keeps delivering to other handlers, and resolves connect() ok, when one spawned handler throws', async () => {
+        const offThrower = ctx.executor.on('spawned', () => {
+          throw new Error('deliberately broken subscriber')
+        })
+        let seen = 0
+        const offRecorder = ctx.executor.on('spawned', () => {
+          seen += 1
+        })
+        await ctx.executor.disconnect()
+        const before = seen
+        const r = await ctx.executor.connect()
+        expect(r.ok).toBe(true)
+        expect(seen).toBeGreaterThan(before)
+        offThrower()
+        offRecorder()
+      })
     })
   })
 }

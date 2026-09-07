@@ -154,7 +154,13 @@ export class MockExecutor implements BotExecutor {
   /** Test helper: drive the event stream by hand. */
   emit<K extends keyof BotEvents>(event: K, payload: BotEvents[K]): void {
     for (const h of this.handlers.get(event) ?? []) {
-      ;(h as (p: BotEvents[K]) => void)(payload)
+      try {
+        ;(h as (p: BotEvents[K]) => void)(payload)
+      } catch {
+        // A subscriber's own bug must not take down the emitter or whatever
+        // action (e.g. connect()) triggered this emit — swallow and keep
+        // delivering to the remaining handlers.
+      }
     }
   }
 

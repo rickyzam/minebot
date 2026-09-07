@@ -94,6 +94,44 @@ describe('MineflayerExecutor against the dev server', () => {
     }
   })
 
+  it('delivers disconnected only after the bot is already marked not-connected', async () => {
+    // Regression guard: wireBotEvents' own 'end' listener must not fire before
+    // watchForUnexpectedDisconnect's — otherwise a 'disconnected' handler (the
+    // natural place to react by calling connect() again) would see this.bot
+    // still pointing at the dead bot, and getState()/findBlocks() would
+    // silently operate on it instead of throwing "not connected".
+    executor = new MineflayerExecutor({ username: 'ITOrder' })
+    const other = new MineflayerExecutor({ username: 'ITOrder' })
+    try {
+      await executor.connect()
+      let sawDisconnected = false
+      let threwOnGetState = false
+      const off = executor.on('disconnected', () => {
+        sawDisconnected = true
+        try {
+          executor!.getState()
+        } catch {
+          threwOnGetState = true
+        }
+      })
+
+      // Force an unexpected drop the same way the test above does: a second
+      // bot with the same username kicks this one via duplicate_login.
+      await other.connect()
+
+      const deadline = Date.now() + 5_000
+      while (Date.now() < deadline && !sawDisconnected) {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+
+      off()
+      expect(sawDisconnected).toBe(true)
+      expect(threwOnGetState).toBe(true)
+    } finally {
+      await other.disconnect()
+    }
+  })
+
   it('reports disconnected when the server refuses the connection', async () => {
     executor = new MineflayerExecutor({ username: 'ITBadPort', port: 25599, connectTimeoutMs: 8_000 })
     const r = await executor.connect()

@@ -100,8 +100,16 @@ export class MineflayerExecutor implements BotExecutor {
       }
       const onSpawn = (): void => {
         this.bot = bot
-        this.wireBotEvents(bot)
+        // Order matters: watchForUnexpectedDisconnect's 'end' listener must be
+        // registered before wireBotEvents' 'end' listener, so that on an
+        // unexpected drop it runs first and clears this.bot/unwires before any
+        // subscriber's 'disconnected' handler sees the event. Node's emit()
+        // dispatches listeners in registration order but iterates a clone of
+        // the array, so wireBotEvents' handler still fires even though the
+        // watch handler unregisters everything mid-dispatch — the same
+        // semantics the explicit spawned emit below already relies on.
         this.watchForUnexpectedDisconnect(bot)
+        this.wireBotEvents(bot)
         // The 'spawn' listener added by wireBotEvents was attached during this
         // very 'spawn' dispatch, so it does not see the event that is firing
         // now. Emit it explicitly, or a handler registered before connect()
@@ -211,11 +219,21 @@ export class MineflayerExecutor implements BotExecutor {
 
   private emit<K extends keyof BotEvents>(event: K, payload: BotEvents[K]): void {
     for (const h of this.handlers.get(event) ?? []) {
-      ;(h as (p: BotEvents[K]) => void)(payload)
+      try {
+        ;(h as (p: BotEvents[K]) => void)(payload)
+      } catch {
+        // A subscriber's own bug must not take down the emitter or whatever
+        // action (e.g. connect()) triggered this emit — swallow and keep
+        // delivering to the remaining handlers.
+      }
     }
   }
 
-  /** Wire one Bot's events into the long-lived emitter. Idempotent per bot. */
+  /**
+   * Wire one Bot's events into the long-lived emitter. NOT idempotent: calling
+   * this twice with the same bot double-registers every listener. Callers
+   * must only invoke it once per bot (currently: once, from onSpawn).
+   */
   private wireBotEvents(bot: Bot): void {
     const add = <A extends unknown[]>(
       mineflayerEvent: string,
