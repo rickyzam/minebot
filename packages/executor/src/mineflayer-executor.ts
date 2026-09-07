@@ -80,6 +80,7 @@ export class MineflayerExecutor implements BotExecutor {
       }
       const onSpawn = (): void => {
         this.bot = bot
+        this.watchForUnexpectedDisconnect(bot)
         // VERIFIED 2026-09-07: bot.health is `undefined` at the 'spawn' event and
         // only populates when the server's first health packet lands, ~100ms later.
         // Resolving on 'spawn' alone would hand callers a snapshot reporting health 0.
@@ -276,5 +277,25 @@ export class MineflayerExecutor implements BotExecutor {
   private requireBot(): Bot {
     if (!this.bot) throw new Error('MineflayerExecutor is not connected')
     return this.bot
+  }
+
+  /**
+   * FIX (post-review): once connect() has handed a bot to a caller, nothing was
+   * watching for that connection dying on its own (kicked, network drop, server
+   * restart). this.bot would stay a stale non-null reference forever, making a
+   * later connect() short-circuit via the `if (this.bot) return ok(undefined)`
+   * guard, and getState()/findBlocks()/on() silently operate on a dead bot
+   * instead of throwing "not connected" as the contract promises.
+   *
+   * The identity check (`this.bot === bot`) makes this idempotent and safe to
+   * layer under disconnect(): disconnect() already sets `this.bot = null` before
+   * awaiting 'end', so by the time this fires there, the check is false and it
+   * no-ops rather than double-clearing (which could otherwise wipe out a newer
+   * connection established by a fresh connect() in between).
+   */
+  private watchForUnexpectedDisconnect(bot: Bot): void {
+    bot.once('end', () => {
+      if (this.bot === bot) this.bot = null
+    })
   }
 }

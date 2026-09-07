@@ -64,6 +64,36 @@ describe('MineflayerExecutor against the dev server', () => {
     expect(calls).toBeGreaterThanOrEqual(0)
   })
 
+  it('resets to not-connected when the server kicks the bot unexpectedly', async () => {
+    // Regression guard: nothing watches the live connection after connect()
+    // settles except our own 'end' listener. Force an unexpected drop (not via
+    // executor.disconnect()) by connecting a second bot with the same username —
+    // this offline-mode server kicks the older session with
+    // "multiplayer.disconnect.duplicate_login" and fires 'end' on it. getState()
+    // must then throw "not connected" instead of silently serving stale state.
+    executor = new MineflayerExecutor({ username: 'ITDupe' })
+    const other = new MineflayerExecutor({ username: 'ITDupe' })
+    try {
+      await executor.connect()
+      await other.connect()
+
+      // Wait for the kick to propagate to executor's bot's 'end' event.
+      const deadline = Date.now() + 5_000
+      while (Date.now() < deadline) {
+        try {
+          executor.getState()
+        } catch {
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+
+      expect(() => executor!.getState()).toThrow(/not connected/i)
+    } finally {
+      await other.disconnect()
+    }
+  })
+
   it('reports disconnected when the server refuses the connection', async () => {
     executor = new MineflayerExecutor({ username: 'ITBadPort', port: 25599, connectTimeoutMs: 8_000 })
     const r = await executor.connect()
