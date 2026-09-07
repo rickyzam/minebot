@@ -189,6 +189,23 @@ export async function buildArena(bounds: ArenaBounds): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 500))
   sendConsoleCommand(`fill ${x0} ${floorY + 1} ${z0} ${x1} ${floorY + clearance} ${z1} air`)
   sendConsoleCommand(`fill ${x0} ${floorY} ${z0} ${x1} ${floorY} ${z1} stone`)
+
+  // VERIFIED 2026-09-07, the hard way: a coal drop left in the arena by an
+  // earlier run was silently picked up by a later one, so a case that should
+  // have shown "mined but collected nothing" reported a successful collection
+  // instead. Mined drops are shared world state that outlives the run that
+  // created them, and the arena is reused. Despawn them with the rest of the
+  // reset, or every collection assertion is suspect.
+  //
+  // Note the air fill above does NOT do this: /fill replaces blocks, and a
+  // dropped item is an entity, not a block. It survives being filled over.
+  //
+  // Scoped to the arena volume rather than `kill @e[type=item]` globally, so a
+  // concurrently running test elsewhere in the world is not disturbed.
+  const cx = Math.floor((x0 + x1) / 2)
+  const cz = Math.floor((z0 + z1) / 2)
+  const radius = Math.ceil(Math.hypot(x1 - x0, clearance, z1 - z0) / 2) + 4
+  sendConsoleCommand(`kill @e[type=item,x=${cx},y=${floorY},z=${cz},distance=..${radius}]`)
 }
 
 /**
