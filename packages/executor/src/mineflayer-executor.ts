@@ -1,4 +1,5 @@
 import mineflayer, { type Bot } from 'mineflayer'
+import pathfinderPkg from 'mineflayer-pathfinder'
 import {
   ok,
   fail,
@@ -22,6 +23,12 @@ import {
   type VelocityForwardingOptions,
 } from './velocity-handshake.js'
 import { resolveForwardingSecret } from './forwarding-secret.js'
+
+// VERIFIED 2026-09-07: `goals` is not an ESM named export of this CJS package
+// — Node's named-export detection finds only `Movements`, `pathfinder` and
+// `default`. Destructuring the default import is the only form that resolves
+// all three.
+const { pathfinder, Movements, goals } = pathfinderPkg
 
 export interface MineflayerExecutorOptions {
   host?: string
@@ -178,6 +185,11 @@ export class MineflayerExecutor implements BotExecutor {
     return this.fabricModdedEntries
   }
 
+  /** Integration-test accessor: is the pathfinder plugin live on this bot? */
+  hasPathfinder(): boolean {
+    return typeof this.bot?.pathfinder?.goto === 'function'
+  }
+
   async connect(): Promise<Result> {
     // `pendingConnect` must be checked BEFORE `this.bot`. `this.bot` is
     // assigned in onSpawn, but openConnection() doesn't resolve until the
@@ -306,6 +318,15 @@ export class MineflayerExecutor implements BotExecutor {
         // semantics the explicit spawned emit below already relies on.
         this.watchForUnexpectedDisconnect(bot)
         this.wireBotEvents(bot)
+        // Movement is non-destructive by design: canDig false means the
+        // pathfinder never tunnels. The only blocks this executor breaks are
+        // the ones mineBlock was explicitly asked to break — a pathfinder
+        // allowed to dig would quietly rewrite the terrain the integration
+        // tests depend on.
+        bot.loadPlugin(pathfinder)
+        const movements = new Movements(bot)
+        movements.canDig = false
+        bot.pathfinder.setMovements(movements)
         // By 'spawn' the configuration phase is over, so the handshake has
         // either completed or the server never asked for one.
         this.fabricModdedEntries = fabric?.moddedEntries ?? []
