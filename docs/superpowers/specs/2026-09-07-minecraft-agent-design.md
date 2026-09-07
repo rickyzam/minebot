@@ -26,7 +26,7 @@ get their own implementation plans.
 |---|---|
 | Host | 16-core/32-thread desktop CPU, 32GB RAM, 16GB consumer GPU, headless Linux |
 | Dev server | Fabric **1.21.10**, local, `localhost:25565` |
-| Dev world | seed `minebot`, survival + peaceful, `online-mode=false`, `allow-flight=true` |
+| Dev world | seed `openfield`, survival + peaceful, `online-mode=false`, `allow-flight=true` |
 | LLM | Ollama on `:11434` — `qwen3:14b` (9.3GB, tools) is the default target |
 | Node | v24.18.0, npm 11.16.0 |
 
