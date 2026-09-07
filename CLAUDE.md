@@ -4,15 +4,16 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 
 ## Read first
 
-- [Design spec](docs/superpowers/specs/2026-09-07-minecraft-agent-design.md) — the binding authority. §3 explains why `BotExecutor` is shaped as it is; **§9 lists contract changes that are agreed-pending and must not be applied unilaterally**.
+- [Design spec](docs/superpowers/specs/2026-09-07-minecraft-agent-design.md) — the binding authority. §3 explains why `BotExecutor` is shaped as it is; §9 records the four contract changes that were agreed with Track B and **applied** at the start of Phase 2. There are no outstanding agreed-pending changes — but the rule that produced that list still stands: see "The one rule that matters" below.
+- [Phase 2 design](docs/superpowers/specs/2026-09-07-phase-2-pathfinding-and-mining-design.md) — pathfinding and mining. Its §2 table is measurements against the live server, and three of them contradict the obvious assumption.
 - [Phase 1 plan](docs/superpowers/plans/2026-09-07-phase-1-track-a.md) — its "Verified environment facts" block is measurements, not assumptions.
 
 ## Commands
 
 ```bash
-npm test                  # 50 unit tests. No network. Fast. Run these constantly.
+npm test                  # 77 unit tests. No network. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
-npm run test:integration  # 37 tests. Requires the live dev server.
+npm run test:integration  # 47 tests. Requires the live dev server.
 npm run smoke             # Minimal "can a bot connect at all" check.
 npm run demo              # Connect, print snapshot, walk. The Phase 1 deliverable.
 ```

@@ -135,6 +135,10 @@ export function runContractSuite(
       { name: 'followPlayer', run: (e, opts) => e.followPlayer('nonexistent-player', opts) },
       { name: 'mineBlock', run: (e, opts) => e.mineBlock('stone', 16, opts) },
       {
+        name: 'mineBlock(Vec3)',
+        run: (e, opts) => e.mineBlock({ x: 0, y: 64, z: 0 }, 16, opts),
+      },
+      {
         name: 'placeBlock',
         run: (e, opts) => e.placeBlock('dirt', { x: 0, y: 64, z: 0 }, opts),
       },
@@ -231,6 +235,127 @@ export function runContractSuite(
         }).not.toThrow()
         expect(typeof off).toBe('function')
         expect(() => off?.()).not.toThrow()
+      })
+    })
+
+    // Design spec §9.1: the reflex layer subscribes once at startup and expects
+    // to keep hearing about damage for the session's lifetime. Handlers bound
+    // to a single Bot instance silently stopped firing after any reconnect.
+    describe('subscription lifetime', () => {
+      it('delivers events to a handler registered while not connected', async () => {
+        await ctx.executor.disconnect()
+        let seen = 0
+        const off = ctx.executor.on('spawned', () => {
+          seen += 1
+        })
+        const r = await ctx.executor.connect()
+        expect(r.ok).toBe(true)
+        expect(seen).toBeGreaterThan(0)
+        off()
+      })
+
+      it('keeps a subscription alive across a disconnect/reconnect cycle', async () => {
+        let seen = 0
+        const off = ctx.executor.on('spawned', () => {
+          seen += 1
+        })
+        await ctx.executor.disconnect()
+        const before = seen
+        const r = await ctx.executor.connect()
+        expect(r.ok).toBe(true)
+        expect(seen).toBeGreaterThan(before)
+        off()
+      })
+
+      it('stops delivering after unsubscribe, even across a reconnect', async () => {
+        let seen = 0
+        const off = ctx.executor.on('spawned', () => {
+          seen += 1
+        })
+        off()
+        const atUnsubscribe = seen
+        await ctx.executor.disconnect()
+        await ctx.executor.connect()
+        expect(seen).toBe(atUnsubscribe)
+      })
+
+      // Post-review Important 2: emit() must not let one bad subscriber take
+      // down the emitter or the action that triggered it (here, connect()'s
+      // own explicit `emit('spawned', {})`). A throwing handler used to hang
+      // the real executor until connectTimeoutMs and reject the mock's
+      // connect() outright — divergent failure modes for the same bug.
+      it('keeps delivering to other handlers, and resolves connect() ok, when one spawned handler throws', async () => {
+        const offThrower = ctx.executor.on('spawned', () => {
+          throw new Error('deliberately broken subscriber')
+        })
+        let seen = 0
+        const offRecorder = ctx.executor.on('spawned', () => {
+          seen += 1
+        })
+        await ctx.executor.disconnect()
+        const before = seen
+        const r = await ctx.executor.connect()
+        expect(r.ok).toBe(true)
+        expect(seen).toBeGreaterThan(before)
+        offThrower()
+        offRecorder()
+      })
+    })
+
+    // Design spec §9.4: this.bot was set only on spawn, so a second connect()
+    // before the first resolved built a *second* bot — which on an offline-mode
+    // server duplicate-logins and kicks the first. Pairs with disconnect()
+    // during an in-flight connect() being a silent no-op.
+    describe('connect() reentrancy', () => {
+      // Discriminating via ok/getState() alone is not enough: a
+      // not-actually-shared second attempt costs a mock nothing observable
+      // (it just also succeeds), so a naive "both ok" assertion passes even
+      // with the sharing guard deleted. 'spawned' firing exactly once is the
+      // signal that only one underlying connection attempt ran — two
+      // independent attempts would each emit it.
+      it('shares one connection attempt between concurrent connect() calls', async () => {
+        await ctx.executor.disconnect()
+        let spawnCount = 0
+        const off = ctx.executor.on('spawned', () => {
+          spawnCount += 1
+        })
+        const [a, b] = await Promise.all([ctx.executor.connect(), ctx.executor.connect()])
+        off()
+        expect(a.ok).toBe(true)
+        expect(b.ok).toBe(true)
+        expect(spawnCount).toBe(1)
+        // Still usable afterwards — a duplicate login would have kicked one off.
+        expect(() => ctx.executor.getState()).not.toThrow()
+      })
+
+      it('is idempotent when already connected', async () => {
+        const r = await ctx.executor.connect()
+        expect(r.ok).toBe(true)
+        expect(() => ctx.executor.getState()).not.toThrow()
+      })
+
+      // Post-review Important 1 + 2: the disconnect-honouring check (and the
+      // clearing of the pending-attempt slot) must live *inside* the shared
+      // promise, not in a per-caller wrapper around it — otherwise (a)
+      // disconnect() can return before teardown has actually finished, and
+      // (b) only the caller that owns the wrapper sees the corrected
+      // `interrupted` result while a caller merely sharing the pending
+      // attempt gets back the pre-correction `ok: true`. Racing a disconnect()
+      // against *two* concurrent connect() callers, and pinning both results,
+      // catches both: (a) via the disconnected getState() below, (b) via `b`
+      // (the sharer) being asserted equal to `a` (the owner) rather than
+      // left unchecked.
+      it('leaves the executor disconnected when disconnect() races a pending connect()', async () => {
+        await ctx.executor.disconnect()
+        const connectingA = ctx.executor.connect()
+        const connectingB = ctx.executor.connect()
+        await ctx.executor.disconnect()
+        const [a, b] = await Promise.all([connectingA, connectingB])
+        expect(a.ok).toBe(false)
+        if (!a.ok) expect(a.reason).toBe('interrupted')
+        expect(b.ok).toBe(false)
+        if (!b.ok) expect(b.reason).toBe('interrupted')
+        expect(() => ctx.executor.getState()).toThrow()
       })
     })
   })

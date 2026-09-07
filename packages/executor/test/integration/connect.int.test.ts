@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
+import type { Result } from '@minebot/contract'
 import { MineflayerExecutor } from '../../src/index.js'
 
 describe('MineflayerExecutor against the dev server', () => {
@@ -92,6 +93,105 @@ describe('MineflayerExecutor against the dev server', () => {
     } finally {
       await other.disconnect()
     }
+  })
+
+  it('delivers disconnected only after the bot is already marked not-connected', async () => {
+    // Regression guard: wireBotEvents' own 'end' listener must not fire before
+    // watchForUnexpectedDisconnect's — otherwise a 'disconnected' handler (the
+    // natural place to react by calling connect() again) would see this.bot
+    // still pointing at the dead bot, and getState()/findBlocks() would
+    // silently operate on it instead of throwing "not connected".
+    executor = new MineflayerExecutor({ username: 'ITOrder' })
+    const other = new MineflayerExecutor({ username: 'ITOrder' })
+    try {
+      await executor.connect()
+      let sawDisconnected = false
+      let threwOnGetState = false
+      const off = executor.on('disconnected', () => {
+        sawDisconnected = true
+        try {
+          executor!.getState()
+        } catch {
+          threwOnGetState = true
+        }
+      })
+
+      // Force an unexpected drop the same way the test above does: a second
+      // bot with the same username kicks this one via duplicate_login.
+      await other.connect()
+
+      const deadline = Date.now() + 5_000
+      while (Date.now() < deadline && !sawDisconnected) {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+
+      off()
+      expect(sawDisconnected).toBe(true)
+      expect(threwOnGetState).toBe(true)
+    } finally {
+      await other.disconnect()
+    }
+  })
+
+  it('shares the in-flight attempt when connect() is re-entered from the spawned handler', async () => {
+    // Regression guard for connect()'s guard ordering: this.bot is assigned
+    // in onSpawn, but openConnection() doesn't resolve until well after —
+    // it still has to wait for the first health packet and (best-effort) for
+    // chunks to load, ~550ms total. If `if (this.bot) return ok(undefined)`
+    // were checked before the `pendingConnect` guard, a second connect()
+    // fired from inside the 'spawned' handler would see a non-null this.bot
+    // and resolve `ok` immediately — before health has populated — instead
+    // of sharing the in-flight attempt. This window only exists against the
+    // real bot; MockExecutor flips `connected` inside its IIFE only once the
+    // attempt completes, so this cannot be expressed as a unit/mock test.
+    executor = new MineflayerExecutor({ username: 'ITReentrant' })
+
+    // Discriminator: does `second` settle only once the *whole* first attempt
+    // (openConnection(), including its chunk-load wait) has settled, or does
+    // it resolve on its own via a fast path? Measuring this by reading
+    // `bot.health` at the moment `second` resolves turned out to be
+    // unreliable in practice — the real 'health' packet can arrive close
+    // enough behind 'spawn' that it lands within the same synchronous
+    // packet-processing batch, populating health before even a same-tick
+    // fast-path resolution's microtask runs. Promise identity/ordering is
+    // immune to that: under the fix, `second` IS `this.pendingConnect`, the
+    // exact same promise the outer `firstPromise` below holds, so a `.then()`
+    // attached to `firstPromise` before `second` is ever created is
+    // guaranteed (same-promise `.then()` callbacks fire in attachment order)
+    // to run first. Under the bug, `second` resolves on its own via a fresh,
+    // near-instant microtask — well before `firstPromise` (which additionally
+    // awaits the best-effort chunk-load wait) can settle.
+    let firstSettled = false
+    const firstPromise = executor.connect()
+    void firstPromise.then(() => {
+      firstSettled = true
+    })
+
+    let second: Promise<Result> | null = null
+    let firstSettledBeforeSecond = false
+    const off = executor.on('spawned', () => {
+      // Fired synchronously from inside onSpawn, before openConnection() has
+      // resolved: this.bot is already non-null here, so a buggy guard order
+      // would let this call take the `if (this.bot) return ok(undefined)`
+      // fast path instead of sharing the in-flight attempt.
+      second = executor!.connect()
+      void second.then(() => {
+        firstSettledBeforeSecond = firstSettled
+      })
+    })
+
+    const first = await firstPromise
+    off()
+
+    expect(first.ok).toBe(true)
+    expect(second).not.toBeNull()
+    const secondResult = await second!
+    expect(secondResult.ok).toBe(true)
+    // The discriminating assertion: `second` must not settle before `first`
+    // — i.e. it genuinely shared the in-flight attempt rather than
+    // short-circuiting on a spawned-but-not-ready bot.
+    expect(firstSettledBeforeSecond).toBe(true)
+    expect(executor.getState().self.health).toBeGreaterThan(0)
   })
 
   it('reports disconnected when the server refuses the connection', async () => {

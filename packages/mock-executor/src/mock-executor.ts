@@ -7,12 +7,28 @@ import {
   type BotEvents,
   type BotExecutor,
   type EntityInfo,
+  type FailureReason,
   type ItemStack,
   type Result,
   type Unsubscribe,
   type Vec3,
   type WorldSnapshot,
 } from '@minebot/contract'
+
+const describeVec = (v: Vec3): string => `(${v.x}, ${v.y}, ${v.z})`
+
+export type MockActionName =
+  | 'moveTo'
+  | 'followPlayer'
+  | 'mineBlock'
+  | 'placeBlock'
+  | 'attack'
+  | 'flee'
+
+export interface InjectedFailure {
+  reason: FailureReason
+  detail?: string
+}
 
 export interface MockOptions {
   position?: Vec3
@@ -23,6 +39,12 @@ export interface MockOptions {
   blocks?: BlockInfo[]
   /** Simulated duration of each action, so cancellation can be exercised. */
   actionDelayMs?: number
+  /**
+   * Force an action to fail with a chosen reason. Exists because the mock can
+   * otherwise only produce 3 of 9 FailureReason values, leaving Track B unable
+   * to test the retry policy the contract's closed reason set exists for.
+   */
+  failures?: Partial<Record<MockActionName, InjectedFailure>>
 }
 
 export interface RecordedCall {
@@ -51,6 +73,9 @@ export class MockExecutor implements BotExecutor {
    * against both implementations.
    */
   private inFlightStop: (() => void) | null = null
+  private readonly failures = new Map<MockActionName, InjectedFailure>()
+  private pendingConnect: Promise<Result> | null = null
+  private disconnectRequested = false
 
   constructor(opts: MockOptions = {}) {
     this.position = opts.position ?? { x: 0, y: 64, z: 0 }
@@ -60,16 +85,37 @@ export class MockExecutor implements BotExecutor {
     this.entities = opts.entities ?? []
     this.blocks = opts.blocks ?? []
     this.delayMs = opts.actionDelayMs ?? 0
+    for (const [action, failure] of Object.entries(opts.failures ?? {})) {
+      if (failure) this.failures.set(action as MockActionName, failure)
+    }
   }
 
   async connect(): Promise<Result> {
     this.record('connect')
-    this.connected = true
-    return ok(undefined)
+    if (this.connected) return ok(undefined)
+    if (this.pendingConnect) return this.pendingConnect
+
+    this.disconnectRequested = false
+    this.pendingConnect = (async (): Promise<Result> => {
+      if (this.delayMs > 0) await new Promise((r) => setTimeout(r, this.delayMs))
+      if (this.disconnectRequested) return fail('interrupted', 'disconnect() during connect()')
+      this.connected = true
+      this.emit('spawned', {})
+      return ok(undefined)
+    })()
+
+    try {
+      return await this.pendingConnect
+    } finally {
+      this.pendingConnect = null
+    }
   }
 
   async disconnect(): Promise<void> {
     this.record('disconnect')
+    this.disconnectRequested = true
+    const pending = this.pendingConnect
+    if (pending) await pending.catch(() => undefined)
     this.connected = false
   }
 
@@ -112,10 +158,9 @@ export class MockExecutor implements BotExecutor {
     event: K,
     handler: (payload: BotEvents[K]) => void,
   ): Unsubscribe {
-    // Agrees with MineflayerExecutor: a safe no-op while disconnected — never
-    // throws, registers nothing, and returns a callable but inert
-    // unsubscribe. See the contract's on() doc comment.
-    if (!this.connected) return () => {}
+    // Design spec §9.1: the executor owns a long-lived handler registry, so a
+    // subscription taken before connect() — or held across a reconnect — keeps
+    // working. Registering while disconnected is legal and is NOT a no-op.
     const set = this.handlers.get(event) ?? new Set<Handler>()
     set.add(handler as Handler)
     this.handlers.set(event, set)
@@ -127,13 +172,19 @@ export class MockExecutor implements BotExecutor {
   /** Test helper: drive the event stream by hand. */
   emit<K extends keyof BotEvents>(event: K, payload: BotEvents[K]): void {
     for (const h of this.handlers.get(event) ?? []) {
-      ;(h as (p: BotEvents[K]) => void)(payload)
+      try {
+        ;(h as (p: BotEvents[K]) => void)(payload)
+      } catch {
+        // A subscriber's own bug must not take down the emitter or whatever
+        // action (e.g. connect()) triggered this emit — swallow and keep
+        // delivering to the remaining handlers.
+      }
     }
   }
 
   async moveTo(target: Vec3, opts?: ActionOptions): Promise<Result> {
     this.record('moveTo', target)
-    const r = await this.simulate(opts)
+    const r = await this.simulate('moveTo', opts)
     if (!r.ok) return r
     this.position = { ...target }
     return ok(undefined)
@@ -141,37 +192,50 @@ export class MockExecutor implements BotExecutor {
 
   async followPlayer(playerName: string, opts?: ActionOptions): Promise<Result> {
     this.record('followPlayer', playerName)
-    return this.simulate(opts)
+    return this.simulate('followPlayer', opts)
   }
 
   async mineBlock(
-    blockName: string,
+    target: string | Vec3,
     maxDistance: number,
     opts?: ActionOptions,
   ): Promise<Result<{ position: Vec3; collected: boolean }>> {
-    this.record('mineBlock', blockName, maxDistance)
-    const r = await this.simulate(opts)
+    this.record('mineBlock', target, maxDistance)
+    const r = await this.simulate('mineBlock', opts)
     if (!r.ok) return r
-    const match = this.blocks.find(
-      (b) => b.name === blockName && b.distance <= maxDistance,
-    )
-    if (!match) return fail('not_found', `no ${blockName} within ${maxDistance} blocks`)
+
+    const match =
+      typeof target === 'string'
+        ? this.blocks.find((b) => b.name === target && b.distance <= maxDistance)
+        : this.blocks.find(
+            (b) =>
+              b.position.x === target.x &&
+              b.position.y === target.y &&
+              b.position.z === target.z &&
+              b.distance <= maxDistance,
+          )
+
+    if (!match) {
+      const what = typeof target === 'string' ? target : `block at ${describeVec(target)}`
+      return fail('not_found', `no ${what} within ${maxDistance} blocks`)
+    }
+
     this.blocks = this.blocks.filter((b) => b !== match)
     this.inventory = [
       ...this.inventory,
-      { name: blockName, count: 1, slot: this.inventory.length },
+      { name: match.name, count: 1, slot: this.inventory.length },
     ]
     return ok({ position: match.position, collected: true })
   }
 
   async placeBlock(blockName: string, position: Vec3, opts?: ActionOptions): Promise<Result> {
     this.record('placeBlock', blockName, position)
-    return this.simulate(opts)
+    return this.simulate('placeBlock', opts)
   }
 
   async attack(entityId: number, opts?: ActionOptions): Promise<Result> {
     this.record('attack', entityId)
-    const r = await this.simulate(opts)
+    const r = await this.simulate('attack', opts)
     if (!r.ok) return r
     if (!this.entities.some((e) => e.id === entityId)) {
       return fail('not_found', `no entity ${entityId}`)
@@ -181,7 +245,7 @@ export class MockExecutor implements BotExecutor {
 
   async flee(opts?: ActionOptions): Promise<Result> {
     this.record('flee')
-    return this.simulate(opts)
+    return this.simulate('flee', opts)
   }
 
   chat(message: string): void {
@@ -193,6 +257,16 @@ export class MockExecutor implements BotExecutor {
     const cancel = this.inFlightStop
     this.inFlightStop = null
     cancel?.()
+  }
+
+  /**
+   * Change (or clear, with `null`) an injected failure on a live mock, so a
+   * fail-then-succeed retry sequence can be driven without building a second
+   * executor.
+   */
+  setFailure(action: MockActionName, failure: InjectedFailure | null): void {
+    if (failure) this.failures.set(action, failure)
+    else this.failures.delete(action)
   }
 
   private record(name: string, ...args: unknown[]): void {
@@ -207,9 +281,13 @@ export class MockExecutor implements BotExecutor {
    * MineflayerExecutor's per-action checks: already-aborted first, then
    * disconnected.
    */
-  private simulate(opts?: ActionOptions): Promise<Result> {
+  private simulate(action: MockActionName, opts?: ActionOptions): Promise<Result> {
+    // Contract rule first: an already-aborted signal resolves `interrupted`
+    // whatever is injected. Injection must not be able to fake a violation.
     if (opts?.signal?.aborted) return Promise.resolve(fail('interrupted', 'aborted before start'))
     if (!this.connected) return Promise.resolve(fail('disconnected', 'not connected'))
+    const injected = this.failures.get(action)
+    if (injected) return Promise.resolve(fail(injected.reason, injected.detail ?? `injected ${injected.reason}`))
     if (this.delayMs === 0) return Promise.resolve(ok(undefined))
     return new Promise<Result>((resolve) => {
       let settled = false

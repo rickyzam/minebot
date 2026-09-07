@@ -110,6 +110,13 @@ export interface BotEvents {
   entityNearby: { entity: EntityInfo }
   chat: { username: string; message: string }
   death: Record<string, never>
+  /**
+   * Fires only for a connection that drops unexpectedly (kick, network loss,
+   * server restart, …). A deliberate, caller-initiated `disconnect()` emits
+   * nothing at all — both the mock and the real executor agree on this. A
+   * handler written as `on('disconnected', () => reconnect())` therefore
+   * never needs to guard against reacting to its own shutdown.
+   */
   disconnected: { reason: string }
 }
 
@@ -133,11 +140,11 @@ export interface BotExecutor {
   findBlocks(query: BlockQuery): readonly BlockInfo[]
 
   /**
-   * Subscribe to a push event. Registering while not connected is a no-op
-   * that returns a callable (but inert) unsubscribe — there is no live bot to
-   * attach a listener to, and a later `connect()` does not retroactively wire
-   * it up (subscriptions surviving a reconnect is an open contract question,
-   * deferred — see the design spec).
+   * Subscribe to the push event stream. Safe to call before `connect()`, and
+   * the subscription survives disconnect/reconnect cycles — the executor owns
+   * the emitter, not any single underlying connection. The reflex layer
+   * subscribes once at startup and must keep hearing about damage for the
+   * whole session.
    */
   on<K extends keyof BotEvents>(
     event: K,
@@ -149,8 +156,25 @@ export interface BotExecutor {
   // doc comment above.
   moveTo(target: Vec3, opts?: ActionOptions): Promise<Result>
   followPlayer(playerName: string, opts?: ActionOptions): Promise<Result>
+  /**
+   * Mine a block and try to collect its drop.
+   *
+   * `target` is either a block name (mine the nearest match within
+   * `maxDistance`) or an exact position (mine *that* block — the block
+   * `findBlocks` returned and the planner reasoned about). Accepting a
+   * position is what makes the search-choose-approach-mine loop expressible;
+   * a name-only signature re-searches and may pick a different block.
+   *
+   * `maxDistance` bounds the search for a name target, and bounds how far the
+   * bot will travel for a position target. A position further away than
+   * `maxDistance` fails `not_found` rather than walking across the world.
+   *
+   * Resolves `ok` with `collected: false` when the block was mined but its
+   * drop could not be retrieved — mining succeeded, and that fact must not be
+   * lost by reporting a failure.
+   */
   mineBlock(
-    blockName: string,
+    target: string | Vec3,
     maxDistance: number,
     opts?: ActionOptions,
   ): Promise<Result<{ position: Vec3; collected: boolean }>>
