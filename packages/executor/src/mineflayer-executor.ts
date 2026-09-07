@@ -105,13 +105,15 @@ export class MineflayerExecutor implements BotExecutor {
    */
   private fabricModdedEntries: readonly RegistryEntry[] = []
   /**
-   * Settles the currently in-flight cancellable action (currently only
-   * `moveTo`) as `interrupted`, if one is running. `stop()` invokes this
-   * before clearing control states — without it, `stop()` only cleared
-   * control states for a single tick, and `moveTo`'s own `physicsTick`
-   * handler re-asserted `setControlState('forward', true)` on the very next
-   * tick (≤50ms later), so the bot kept walking through the "emergency
-   * brake" Phase 5's reflex layer depends on.
+   * Cancels the currently in-flight action, if one is running, so it settles
+   * as `interrupted`. Owned and cleared by `runAction()`, which sets it for
+   * every action rather than only `moveTo`.
+   *
+   * `stop()` invokes this before clearing control states — without it,
+   * `stop()` only cleared control states for a single tick, and `moveTo`'s own
+   * `physicsTick` handler re-asserted `setControlState('forward', true)` on
+   * the very next tick (≤50ms later), so the bot kept walking through the
+   * "emergency brake" Phase 5's reflex layer depends on.
    */
   private inFlightStop: (() => void) | null = null
   /**
@@ -521,75 +523,122 @@ export class MineflayerExecutor implements BotExecutor {
     this.botWiring = []
   }
 
-  async moveTo(target: Vec3, opts?: ActionOptions): Promise<Result> {
+  /**
+   * The single owner of cancellation bookkeeping for every action.
+   *
+   * Guarantees, in this order:
+   *  - an already-aborted signal resolves `interrupted` before any work;
+   *  - no bot resolves `disconnected`;
+   *  - the caller's signal, `stop()`, and the timeout all abort `signal`,
+   *    which `body` is responsible for reacting to;
+   *  - whatever `body` returns, an aborted run is reported as `interrupted`
+   *    (caller abort or stop()) or `timeout`, never as success.
+   *
+   * It never throws: a body that rejects becomes `internal`, per the contract's
+   * resolve-don't-throw rule.
+   *
+   * Exists because `moveTo` carried ~40 lines of this scaffolding that
+   * `mineBlock`'s four cancellable steps would each have repeated, and every
+   * repetition is a chance to get the resolve-never-throw rule subtly wrong.
+   */
+  private async runAction<T>(
+    opts: ActionOptions | undefined,
+    defaultTimeoutMs: number,
+    body: (bot: Bot, signal: AbortSignal) => Promise<Result<T>>,
+  ): Promise<Result<T>> {
     if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
     const bot = this.bot
     if (!bot) return fail('disconnected', 'not connected')
 
-    const timeoutMs = opts?.timeoutMs ?? 30_000
-    const tolerance = 1.5
+    const controller = new AbortController()
+    let cause: 'abort' | 'stop' | 'timeout' | null = null
 
-    return new Promise<Result>((resolve) => {
-      let settled = false
-      const signal = opts?.signal
+    const onCallerAbort = (): void => {
+      cause ??= 'abort'
+      controller.abort()
+    }
+    const stopThisAction = (): void => {
+      cause ??= 'stop'
+      controller.abort()
+    }
+    const timeoutMs = opts?.timeoutMs ?? defaultTimeoutMs
+    const timer = setTimeout(() => {
+      cause ??= 'timeout'
+      controller.abort()
+    }, timeoutMs)
 
-      const cleanup = (): void => {
-        clearTimeout(timer)
-        bot.removeListener('physicsTick', onTick)
-        signal?.removeEventListener('abort', onAbort)
-        if (this.inFlightStop === stopThisMove) this.inFlightStop = null
-        try {
-          bot.clearControlStates()
-        } catch {
-          // disconnected mid-move
-        }
-      }
-      const finish = (result: Result): void => {
-        if (settled) return
-        settled = true
-        cleanup()
-        resolve(result)
-      }
-      const onAbort = (): void => {
-        finish(fail('interrupted', 'aborted mid-move'))
-      }
-      const stopThisMove = (): void => {
-        finish(fail('interrupted', 'stopped via stop()'))
-      }
-      this.inFlightStop = stopThisMove
-      const onTick = (): void => {
-        const p = bot.entity.position
-        const dx = target.x - p.x
-        const dz = target.z - p.z
-        if (Math.hypot(dx, dz) <= tolerance) {
-          finish(ok(undefined))
-          return
-        }
-        // Minecraft yaw: 0 faces -Z, increasing counter-clockwise.
-        void bot.look(Math.atan2(-dx, -dz), 0, true)
-        bot.setControlState('forward', true)
-        // prismarine-entity's .d.ts doesn't declare isCollidedHorizontally, but
-        // mineflayer's physics plugin sets it on the live entity at runtime
-        // (verified against the dev server) — cast narrowly to read it.
-        const entityWithCollisionFlags = bot.entity as unknown as {
-          isCollidedHorizontally?: boolean
-        }
-        bot.setControlState('jump', entityWithCollisionFlags.isCollidedHorizontally === true)
-      }
-      const timer = setTimeout(
-        () => finish(fail('timeout', `did not reach target within ${timeoutMs}ms`)),
-        timeoutMs,
-      )
+    opts?.signal?.addEventListener('abort', onCallerAbort, { once: true })
+    this.inFlightStop = stopThisAction
 
-      signal?.addEventListener('abort', onAbort, { once: true })
-      bot.on('physicsTick', onTick)
+    /** The single mapping from "this run was aborted" to a failure reason. */
+    const abortedResult = (): Result<T> =>
+      cause === 'timeout'
+        ? fail('timeout', `did not finish within ${timeoutMs}ms`)
+        : fail('interrupted', cause === 'stop' ? 'stopped via stop()' : 'aborted mid-action')
+
+    try {
+      const result = await body(bot, controller.signal)
+      if (controller.signal.aborted) return abortedResult()
+      return result
+    } catch (e) {
+      if (controller.signal.aborted) return abortedResult()
+      return fail('internal', e instanceof Error ? e.message : String(e))
+    } finally {
+      clearTimeout(timer)
+      opts?.signal?.removeEventListener('abort', onCallerAbort)
+      if (this.inFlightStop === stopThisAction) this.inFlightStop = null
+    }
+  }
+
+  async moveTo(target: Vec3, opts?: ActionOptions): Promise<Result> {
+    return this.runAction(opts, 30_000, async (bot, signal) => {
+      const tolerance = 1.5
+      return new Promise<Result>((resolve) => {
+        const cleanup = (): void => {
+          bot.removeListener('physicsTick', onTick)
+          signal.removeEventListener('abort', onAbort)
+          try {
+            bot.clearControlStates()
+          } catch {
+            // disconnected mid-move
+          }
+        }
+        const finish = (result: Result): void => {
+          cleanup()
+          resolve(result)
+        }
+        // runAction maps an aborted run to interrupted/timeout; this just
+        // unblocks the promise so it can do so.
+        const onAbort = (): void => finish(ok(undefined))
+        const onTick = (): void => {
+          const p = bot.entity.position
+          const dx = target.x - p.x
+          const dz = target.z - p.z
+          if (Math.hypot(dx, dz) <= tolerance) {
+            finish(ok(undefined))
+            return
+          }
+          // Minecraft yaw: 0 faces -Z, increasing counter-clockwise.
+          void bot.look(Math.atan2(-dx, -dz), 0, true)
+          bot.setControlState('forward', true)
+          // prismarine-entity's .d.ts doesn't declare isCollidedHorizontally,
+          // but mineflayer's physics plugin sets it on the live entity at
+          // runtime (verified against the dev server) — cast narrowly to read it.
+          const entityWithCollisionFlags = bot.entity as unknown as {
+            isCollidedHorizontally?: boolean
+          }
+          bot.setControlState('jump', entityWithCollisionFlags.isCollidedHorizontally === true)
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+        bot.on('physicsTick', onTick)
+      })
     })
   }
 
   async followPlayer(_playerName: string, opts?: ActionOptions): Promise<Result> {
-    if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
-    if (!this.bot) return fail('disconnected', 'not connected')
-    return fail('internal', 'followPlayer arrives in Phase 5')
+    return this.runAction(opts, 30_000, async () =>
+      fail('internal', 'followPlayer arrives in Phase 5'),
+    )
   }
 
   async mineBlock(
@@ -603,21 +652,17 @@ export class MineflayerExecutor implements BotExecutor {
   }
 
   async placeBlock(_blockName: string, _position: Vec3, opts?: ActionOptions): Promise<Result> {
-    if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
-    if (!this.bot) return fail('disconnected', 'not connected')
-    return fail('internal', 'placeBlock arrives in Phase 5')
+    return this.runAction(opts, 30_000, async () =>
+      fail('internal', 'placeBlock arrives in Phase 5'),
+    )
   }
 
   async attack(_entityId: number, opts?: ActionOptions): Promise<Result> {
-    if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
-    if (!this.bot) return fail('disconnected', 'not connected')
-    return fail('internal', 'attack arrives in Phase 5')
+    return this.runAction(opts, 30_000, async () => fail('internal', 'attack arrives in Phase 5'))
   }
 
   async flee(opts?: ActionOptions): Promise<Result> {
-    if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
-    if (!this.bot) return fail('disconnected', 'not connected')
-    return fail('internal', 'flee arrives in Phase 5')
+    return this.runAction(opts, 30_000, async () => fail('internal', 'flee arrives in Phase 5'))
   }
 
   chat(message: string): void {
