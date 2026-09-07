@@ -1103,7 +1103,7 @@ npm test
 npm run typecheck
 ```
 
-Expected: 14 new tests PASS.
+Expected: 13 new tests PASS (5 for `classifyEntity`, 8 for `toSnapshot`).
 
 - [ ] **Step 6: Commit**
 
