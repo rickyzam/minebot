@@ -5,18 +5,21 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 ## Read first
 
 - [Design spec](docs/superpowers/specs/2026-09-07-minecraft-agent-design.md) — the binding authority. §3 explains why `BotExecutor` is shaped as it is; §9 records the four contract changes that were agreed with Track B and **applied** at the start of Phase 2. There are no outstanding agreed-pending changes — but the rule that produced that list still stands: see "The one rule that matters" below.
+- [Track B design](docs/superpowers/specs/2026-09-07-track-b-planning-loop-design.md) — the planning loop. §4 explains why the action menu is not a mirror of `BotExecutor`, §2.1–2.2 record what the real model actually does, and §12 lists what is still unmeasured.
 - [Phase 2 design](docs/superpowers/specs/2026-09-07-phase-2-pathfinding-and-mining-design.md) — pathfinding and mining. Its §2 table is measurements against the live server, and three of them contradict the obvious assumption.
 - [Phase 1 plan](docs/superpowers/plans/2026-09-07-phase-1-track-a.md) — its "Verified environment facts" block is measurements, not assumptions.
 
 ## Commands
 
 ```bash
-npm test                  # 179 unit tests. No network. Fast. Run these constantly.
+npm test                  # 260 unit tests. No network, no model. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
 npm run test:integration  # 79 tests. Requires the live dev server.
 npm run smoke             # Minimal "can a bot connect at all" check.
 npm run demo              # Connect, print snapshot, walk. The Phase 1 deliverable.
 npm run demo:phase2       # Connect, path around a wall, mine coal. The Phase 2 deliverable.
+npm run agent:demo        # The planning loop against a fake model and a mock world. No server.
+npm run agent:probe       # Ask a real model for one action, five scenarios. Needs OLLAMA_HOST.
 ```
 
 When an integration test fails, run `npm run smoke` first. It separates "my code is broken" from "the server is unreachable," and that distinction saves a lot of wasted debugging.
@@ -99,6 +102,9 @@ Three layers, and they are not interchangeable:
 1. **Pure unit tests** — `snapshot.ts`, the mock, contract helpers. No network. Most test value lives here because the logic is pure and the tests are instant.
 2. **The contract suite** — runs against every `BotExecutor` implementation. Add to it when you add a behavioural guarantee to the contract.
 3. **Integration tests** — the real executor against the live server, under `packages/*/test/integration/`. Configured `fileParallelism: false`; concurrent bots fight each other. Every test connects with a distinct username and **must** disconnect in `afterEach` or it leaks a bot onto the server.
+4. **The agent's fakes** — `packages/agent` tests run between `FakeLlmClient` and `MockExecutor`. Neither the network nor a model is involved. If a test there needs a real model, it belongs in `probe.ts` instead — model behaviour is reported as numbers, never asserted, because at temperature 0 a 5/5 result is consistency rather than robustness.
+
+**Prompt text is behavioural code that no test covers.** Changing `ACTION_MENU` or the system rules in `prompt.ts` changes what the bot does, and `npm test` will stay green regardless. Re-run `npm run agent:probe` after any such edit. Measured example: sharpening a menu entry did nothing (5/5 unchanged), while near-identical wording in the system-rules block flipped the answer completely (5/5). Guidance about *when* to choose an action belongs in the rules, not the menu.
 
 ### Two traps this repo has already fallen into
 
@@ -117,7 +123,7 @@ When you add a guard, prove it can fire. A safety check nobody has seen trigger 
 Deliberately unimplemented — do not "helpfully" fill these in:
 
 - `placeBlock`, `followPlayer`, `attack` and `flee` are stubs returning `fail('internal', '… arrives in Phase 5')`. They **do** still check `opts?.signal?.aborted` first and return `interrupted` — the contract suite asserts this for all six actions. `runAction()` now gives them that check for free; do not re-add it by hand.
-- `packages/agent/` does not exist. It is the other track's package and must never depend on `mineflayer`.
+- `packages/agent/` is the planning loop. It must never depend on `mineflayer` — `check-invariants.mjs` enforces it, and now reports 2 of 2. It codes **no per-`FailureReason` retry policy**; that is Phase 4's, and the loop feeds failures back to the model instead. Do not "helpfully" add branching there.
 
 ## Conventions
 
