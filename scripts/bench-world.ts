@@ -13,6 +13,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { MineflayerExecutor } from '@minebot/executor'
 
 /**
@@ -138,14 +139,14 @@ const SCAN_LIMIT = 60_000
 
 const TMUX_SESSION = 'mc'
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 /**
  * Send one line to the server console. Fails loudly rather than silently
  * no-opping — a qualification that quietly skipped its own biome check would
  * report a verdict it never actually measured.
  */
-function mc(command: string): void {
+export function mc(command: string): void {
   try {
     execFileSync('tmux', ['has-session', '-t', TMUX_SESSION], { stdio: 'ignore' })
   } catch {
@@ -217,7 +218,7 @@ async function biomeOrReason(x: number, y: number, z: number): Promise<string> {
   return actual === null ? 'REJECTED/unknown' : `REJECTED/${actual.replace('minecraft:', '')}`
 }
 
-interface Region {
+export interface Region {
   x: number
   z: number
   radius: number
@@ -374,7 +375,7 @@ interface Criterion {
 }
 
 /** The forceload rectangle covering a region, as `x0 z0 x1 z1`. */
-const forceloadArgs = (region: Region): string =>
+export const forceloadArgs = (region: Region): string =>
   `${region.x - region.radius} ${region.z - region.radius} ` +
   `${region.x + region.radius} ${region.z + region.radius}`
 
@@ -679,6 +680,10 @@ interface OreSpec {
   y: number
   z: number
   block: string
+  /** Human label for reports — which direction from the start this ore lies. */
+  bearing?: string
+  /** The column's measured surface height when the fixture was written. */
+  surfaceY?: number
 }
 
 export interface BenchFixture {
@@ -693,10 +698,10 @@ export interface BenchFixture {
 
 const FIXTURE_PATH = new URL('./bench-world.fixture.json', import.meta.url)
 
-const readFixture = (): BenchFixture =>
+export const readFixture = (): BenchFixture =>
   JSON.parse(readFileSync(FIXTURE_PATH, 'utf8')) as BenchFixture
 
-const fixtureRegion = (f: BenchFixture): Region => ({
+export const fixtureRegion = (f: BenchFixture): Region => ({
   x: f.start.x,
   z: f.start.z,
   radius: f.radius,
@@ -961,7 +966,11 @@ async function main(): Promise<void> {
   await qualify(regions)
 }
 
-main().catch((e: unknown) => {
-  console.error(e instanceof Error ? e.message : String(e))
-  process.exit(1)
-})
+// Only when run as a command. bench-explore.ts imports the fixture helpers
+// above, and an unguarded main() would make that import execute a CLI.
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((e: unknown) => {
+    console.error(e instanceof Error ? e.message : String(e))
+    process.exit(1)
+  })
+}

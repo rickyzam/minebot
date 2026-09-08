@@ -19,6 +19,7 @@
     "bots": "tsx scripts/spawn-bots.ts",
     "arena:map": "tsx scripts/arena-map.ts",
     "bench:world": "tsx scripts/bench-world.ts",
+    "bench:explore": "tsx scripts/bench-explore.ts",
     "agent:probe": "tsx packages/agent/src/probe.ts",
     "agent:demo": "tsx packages/agent/src/demo.ts"
   },

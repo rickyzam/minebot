@@ -1,6 +1,6 @@
 {
   "verifiedOn": "2026-09-08",
-  "note": "Region proposed by a human standing in it and confirmed by `bench:world qualify`. Every number is measured, not assumed - re-check with `npm run bench:world -- verify`. Ore sits ONE BLOCK ABOVE its column's measured surface rather than replacing it: replacing the grass block removes the very marker the surface profile is measured from, which made setup's own reachability check flag correctly-placed ore, and made each setup run shift the terrain profile verify compares against.",
+  "note": "Region proposed by a human standing in it and confirmed by `bench:world qualify`. Every number is measured, not assumed - re-check with `npm run bench:world -- verify`. Targets sit ONE BLOCK ABOVE their column's measured surface rather than replacing it: replacing the grass block removes the very marker the surface profile is measured from. The target is emerald_block, NOT coal_ore, and that is load-bearing: findBlocks queries the client's world model with no line-of-sight, so it returns blocks encased in solid stone. Measured here: 3219 natural coal_ore within 64 blocks of the start, every one of them buried. A coal_ore target is therefore found at the origin without the bot moving, and the benchmark would score perception rather than search. emerald_block does not occur in worldgen at all, so a hit is unambiguously the block we placed.",
   "biome": "minecraft:plains",
   "radius": 64,
   "start": {
@@ -26,7 +26,7 @@
       "x": 2391,
       "y": 67,
       "z": 2625,
-      "block": "coal_ore",
+      "block": "emerald_block",
       "bearing": "east",
       "distance": 48.0,
       "surfaceY": 66
@@ -35,7 +35,7 @@
       "x": 2319,
       "y": 70,
       "z": 2667,
-      "block": "coal_ore",
+      "block": "emerald_block",
       "bearing": "north-west",
       "distance": 48.4,
       "surfaceY": 69
@@ -44,7 +44,7 @@
       "x": 2319,
       "y": 72,
       "z": 2583,
-      "block": "coal_ore",
+      "block": "emerald_block",
       "bearing": "south-west",
       "distance": 48.4,
       "surfaceY": 71
