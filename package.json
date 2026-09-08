@@ -15,7 +15,8 @@
     "smoke": "tsx scripts/smoke-connect.ts",
     "demo": "tsx packages/executor/src/cli.ts",
     "demo:phase2": "tsx packages/executor/src/phase2-demo.ts",
-    "bots": "tsx scripts/spawn-bots.ts"
+    "bots": "tsx scripts/spawn-bots.ts",
+    "agent:probe": "tsx packages/agent/src/probe.ts"
   },
   "devDependencies": {
     "@types/node": "26.4.1",
