@@ -252,3 +252,40 @@ export function clearInventory(username: string): void {
 export function placeInSlot(username: string, slot: string, item: string, count = 1): void {
   sendConsoleCommand(`item replace entity ${username} ${slot} with ${item} ${count}`)
 }
+
+/**
+ * Builds a platform too large for a single `/fill`, in chunked slices.
+ *
+ * `/fill` caps at 32768 blocks and silently refuses unloaded chunks, so a big
+ * arena needs both a forceload and slicing. Search tests need a platform much
+ * larger than the perception radius, or the bot sees everything from its start
+ * and the test measures nothing.
+ *
+ * SIZE THE PLATFORM AGAINST THE SEARCH, not against the distance to the
+ * target. A spiral with `maxDistance` R proposes waypoints up to R blocks from
+ * the search origin in EVERY direction, so a platform that only extends
+ * towards the hidden block walks the bot off the edge — and at y=199 that is a
+ * 130-block fall onto whatever terrain happens to be underneath.
+ *
+ * Returns without verifying — call `waitForOnGround` with the expected height
+ * before trusting it, exactly as the smaller `buildArena` requires.
+ */
+export async function buildLargePlatform(bounds: ArenaBounds): Promise<void> {
+  const { x0, x1, z0, z1, floorY } = bounds
+  const clearance = bounds.clearance ?? 6
+  sendConsoleCommand(`forceload add ${x0} ${z0} ${x1} ${z1}`)
+  await new Promise((resolve) => setTimeout(resolve, 1_500))
+  for (let x = x0; x <= x1; x += 16) {
+    const xEnd = Math.min(x + 15, x1)
+    sendConsoleCommand(`fill ${x} ${floorY + 1} ${z0} ${xEnd} ${floorY + clearance} ${z1} air`)
+    sendConsoleCommand(`fill ${x} ${floorY} ${z0} ${xEnd} ${floorY} ${z1} stone`)
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  // Same reasoning as buildArena: a drop left by an earlier run is an entity,
+  // not a block, so the air fill above does not remove it.
+  const cx = Math.floor((x0 + x1) / 2)
+  const cz = Math.floor((z0 + z1) / 2)
+  const radius = Math.ceil(Math.hypot(x1 - x0, clearance, z1 - z0) / 2) + 4
+  sendConsoleCommand(`kill @e[type=item,x=${cx},y=${floorY},z=${cz},distance=..${radius}]`)
+  await new Promise((resolve) => setTimeout(resolve, 800))
+}
