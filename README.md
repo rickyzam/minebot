@@ -105,9 +105,10 @@ Then:
 
 ```bash
 npm run smoke            # Does a bot connect at all?
-npm run test:integration # 79 tests against the live server
+npm run test:integration # 82 tests against the live server
 npm run demo             # Connect, print a snapshot, walk to a coordinate
 npm run demo:phase2      # Path around a wall, mine coal ore, collect the drop
+npm run demo:phase3      # The whole loop: real state, real model, real action
 ```
 
 **Biome no longer matters much.** Phase 1's movement was deliberately naive — look at the target, walk forward, jump when blocked — and had no answer to a tree. Phase 2 replaced it with `mineflayer-pathfinder`, which routes around obstacles, so a jungle spawn is now workable rather than a dead stop. Movement is non-destructive by design (`canDig` is off), so terrain the bot cannot climb or walk around still reports `unreachable`.
@@ -122,6 +123,7 @@ npm run demo:phase2      # Path around a wall, mine coal ore, collect the drop
 | `npm run smoke` | Minimal connect check | Yes |
 | `npm run demo` | Phase 1 deliverable | Yes |
 | `npm run demo:phase2` | Phase 2 deliverable | Yes |
+| `npm run demo:phase3` | Phase 3 deliverable | Yes — server **and** Ollama |
 | `npm run agent:demo` | Track B deliverable: the loop against a fake model and a mock world | No |
 | `npm run agent:probe` | Ask a real model for one action across five scenarios; report what it chose | No (needs Ollama) |
 
@@ -131,8 +133,8 @@ npm run demo:phase2      # Path around a wall, mine coal ore, collect the drop
 |---|---|---|
 | 1 | Connect, read state, walk to a coordinate | **Done** |
 | 2 | Pathfinding + mining a known block | **Done** |
-| 3 | Close the LLM loop once, end to end | Next |
-| 4 | Reliable "find and mine coal" — search, retry, recovery | The bulk of the work |
+| 3 | Close the LLM loop once, end to end | **Done** |
+| 4 | Reliable "find and mine coal" — search, retry, recovery | Next — the bulk of the work |
 | 5 | Full toolbox: building, follow, chat, reflex combat | |
 | 6 | Multi-bot scaling against one shared model | |
 

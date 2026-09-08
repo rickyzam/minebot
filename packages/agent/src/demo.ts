@@ -5,9 +5,11 @@
  *
  *   npm run agent:demo
  *
- * Swap FakeLlmClient for OllamaClient to drive it with a real model, and swap
- * MockExecutor for MineflayerExecutor to drive it against a real server — that
- * second swap is Phase 3, and it changes this file only.
+ * Swap FakeLlmClient for OllamaClient to drive it with a real model. Driving it
+ * against a real server does NOT happen here: packages/agent must not depend on
+ * @minebot/executor, or Mineflayer lands in the planning track transitively
+ * (design spec §4, enforced by scripts/check-invariants.mjs). That composition
+ * lives in packages/bot — see `npm run demo:phase3`.
  */
 import { MockExecutor } from '@minebot/mock-executor'
 import { FakeLlmClient } from './fake-llm.js'
