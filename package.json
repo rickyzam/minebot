@@ -15,6 +15,7 @@
     "smoke": "tsx scripts/smoke-connect.ts",
     "demo": "tsx packages/executor/src/cli.ts",
     "demo:phase2": "tsx packages/executor/src/phase2-demo.ts",
+    "demo:phase3": "tsx packages/bot/src/phase3-demo.ts",
     "bots": "tsx scripts/spawn-bots.ts",
     "agent:probe": "tsx packages/agent/src/probe.ts",
     "agent:demo": "tsx packages/agent/src/demo.ts"
