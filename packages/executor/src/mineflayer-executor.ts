@@ -70,6 +70,12 @@ const ARRIVAL_TOLERANCE = 2.5
  */
 const DIG_REACH = 5
 
+/**
+ * A* detour budget, in path cost. See the measurement table at the call site
+ * in `openConnection`, and issue #15 for why it must not be left unbounded.
+ */
+const PATHFINDER_SEARCH_RADIUS = 128
+
 /** Straight-line distance from the bot to a point, in blocks. */
 const distanceFrom = (bot: Bot, p: { x: number; y: number; z: number }): number => {
   const o = bot.entity.position
@@ -375,6 +381,38 @@ export class MineflayerExecutor implements BotExecutor {
         const movements = new Movements(bot)
         movements.canDig = false
         bot.pathfinder.setMovements(movements)
+        // Issue #15. Left unbounded (-1), A* explores until it exhausts the
+        // whole 5s thinkTimeout and reports `timeout` for a target that is
+        // simply unreachable — telling the planner "retry" when the truth is
+        // "pick a different target".
+        //
+        // This is a DETOUR budget, not a distance: maxCost = h(start) +
+        // searchRadius (lib/astar.js), so it scales with how far the target is
+        // and bounds only how much longer than the direct line a path may be.
+        //
+        // Measured against a full-width 5-block chasm, unreachable by
+        // construction, with a reachable target as the control:
+        //
+        //   searchRadius | unreachable target   | reachable target
+        //   -1 (default) | timeout      5.0s    | ok  0.5s
+        //   32           | unreachable  0.0s    | ok  0.8s
+        //   128          | unreachable  0.1s    | ok  0.8s
+        //   512          | timeout      5.0s    | ok  0.5s
+        //
+        // Note the tension: too LARGE a budget degrades back to `timeout`,
+        // because the bounded set grows too big to exhaust inside thinkTimeout.
+        // 128 answers instantly while still allowing a path up to 128 cost
+        // longer than the straight line. If Phase 4 finds a legitimate detour
+        // being called unreachable, this is the number to raise — and the table
+        // above is the trade-off to re-measure.
+        //
+        // `searchRadius` is set on the pathfinder at runtime (the plugin's own
+        // index.js:41 initialises it to -1) but is declared only as a per-call
+        // option in its .d.ts, never as a property — and `goto()` takes no
+        // options object, so the property is the only way in. Cast narrowly to
+        // reach it, as this class already does for `isCollidedHorizontally`.
+        ;(bot.pathfinder as unknown as { searchRadius: number }).searchRadius =
+          PATHFINDER_SEARCH_RADIUS
         // By 'spawn' the configuration phase is over, so the handshake has
         // either completed or the server never asked for one.
         this.fabricModdedEntries = fabric?.moddedEntries ?? []

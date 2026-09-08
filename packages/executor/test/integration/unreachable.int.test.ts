@@ -101,6 +101,11 @@ describe('a bot that cannot move', () => {
 
     // The heart of the bug: this returned `ok` while the bot stood still.
     expect(r.ok).toBe(false)
+    // Issue #15: and the reason must be the useful one. `unreachable` tells the
+    // planner to choose a different target; `timeout` tells it to retry
+    // something that can never work. Bounding searchRadius is what makes A*
+    // conclude noPath instead of exhausting its think budget.
+    if (!r.ok) expect(r.reason).toBe('unreachable')
 
     // And it must not have moved, whatever it reported.
     const after = executor.getState().self.position
@@ -113,6 +118,7 @@ describe('a bot that cannot move', () => {
     const r = await executor.mineBlock(ORE, 32, { timeoutMs: 20_000 })
 
     expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('unreachable')
 
     // Verified from a SECOND connection, because the digging bot's own world
     // model is precisely what cannot be trusted here — after an optimistic dig
