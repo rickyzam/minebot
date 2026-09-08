@@ -12,15 +12,16 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 ## Commands
 
 ```bash
-npm test                  # 260 unit tests. No network, no model. Fast. Run these constantly.
+npm test                  # 263 unit tests. No network, no model. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
-npm run test:integration  # 82 tests. Requires the live dev server.
+npm run test:integration  # 85 tests. Requires the live dev server.
 npm run smoke             # Minimal "can a bot connect at all" check.
 npm run demo              # Connect, print snapshot, walk. The Phase 1 deliverable.
 npm run demo:phase2       # Connect, path around a wall, mine coal. The Phase 2 deliverable.
 npm run demo:phase3       # Real state, real model, real action. The Phase 3 deliverable.
 npm run agent:demo        # The planning loop against a fake model and a mock world. No server.
 npm run agent:probe       # Ask a real model for one action, five scenarios. Needs OLLAMA_HOST.
+npm run arena:map         # Print an arena layer by layer, floor holes included. Diagnostic.
 ```
 
 When an integration test fails, run `npm run smoke` first. It separates "my code is broken" from "the server is unreachable," and that distinction saves a lot of wasted debugging.
@@ -73,6 +74,11 @@ These cost real debugging time to discover. Treat them as settled.
 | `SchemaDecider` spends **two** model calls on an undecodable reply — the reply plus one repair | A scripted `FakeLlmClient` needs 2 replies per undecodable step, or it exhausts mid-repair and the loop exits `llm_error` instead |
 | Minecraft usernames are capped at **16 characters** | A longer one is rejected at login, and `connect()` returning `disconnected` reads as a broken fixture rather than a naming mistake |
 | Arenas must be separated by more than the largest radius anything might **search**, not merely their own width | The Phase 3 demo at x1150 found the integration arena's ore at x1126 through the model's own 32-block `find_blocks`, and chased it until the step budget ran out |
+| **`goto()` resolves as SUCCESS on a zero-length path** — `lib/goto.js` checks `results.path.length === 0` before its `noPath` and `timeout` branches | A resolved promise is **not** evidence of arrival. `gotoGoal` verifies the world afterwards; without that, `moveTo` reported ok from 8.6 blocks away and `mineBlock` reported ok for an ore it never touched |
+| `bot.dig()` applies the break to Mineflayer's **local** world model optimistically | A dig that the server ignored still leaves the bot reporting `not_found` for a block that is still standing. Never treat the digging bot's own view as verification — check from a second connection |
+| Parkour reach is **4 blocks displacement = 3 air blocks**, regardless of elevation | Measured across five arenas. Elevation does not extend it: a 1-block **drop** keeps full reach, a 1-block **rise** loses one (fails at 4, works at 3). Cardinal directions only — diagonal jumps are never generated |
+| A player's sprint-jump clears **4 air blocks**; the bot manages **3** | The bot's reach is strictly one block shorter than a human's. Terrain designed by walking it yourself will not necessarily be traversable by the bot — this cost a session to discover |
+| `bot.pathfinder.searchRadius` defaults to `-1` (unlimited) | A genuinely unreachable target burns the whole `thinkTimeout` (5s) and reports `timeout` rather than `noPath`, so the planner is told "retry" when the truth is "pick another target". See issue on bounding it |
 
 ## The dev server
 
