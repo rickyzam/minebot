@@ -1299,13 +1299,36 @@ wording by intuition is what the probe exists to prevent, and prompt text is his
 package. What he has to work with: a reproducible regression, a baseline to
 return to, and a draft that is measured NOT to work.
 
+### Step 1b: ANSWERED 2026-09-08 — and the regression is now *wrong*, not merely unverified
+
+Ricky answered every §7.1 gate item on 2026-09-08: **Option A** for the cost
+budget, the contract doc wording as drafted, prompt edits 1 and 2 as drafted, and
+**`explore_for` is the intended answer to a dead position**.
+
+That last one is what changes this step's status. Until it was answered, the
+branch's `move_to` ×5 was an unverified deviation from a `hoped` list that
+allowed two answers. Now the intended answer is known, and `move_to` is neither
+of them — nor is it defensible on its own terms, since the rules forbid it two
+lines earlier. **The accepted edits stay and do not fix it.**
+
+The remaining hypothesis is **order, not wording**, and it is drafted as a
+candidate in [spec §7.1](../specs/2026-09-08-perception-line-of-sight-design.md)
+under "The regression, and the candidate fix": state the terminal condition
+before the permission that competes with it. It is **deliberately unapplied** —
+the branch holds the reproducible regression and a known-good baseline, and
+committing an unprobed guess would destroy both.
+
+**Blocked on the probe, not on a decision.** `OLLAMA_HOST` was unset and the
+model box at `192.168.1.21:11434` did not answer, so no measurement could be
+taken. One run settles it.
+
 ➡ **The decision lives in the line-of-sight spec's
 [§7.1](../specs/2026-09-08-perception-line-of-sight-design.md), which is the
 single index of everything open for Ricky.** It repeats this table, so §7.1 can
 be answered without reading this plan. Recorded here too because this is where
 Task 7 will be executed once the wording is settled.
 
-- [ ] **Step 2: Add the action to the schema and menu**
+- [x] **Step 2: Add the action to the schema and menu** — done in commit `abe2adf`.
 
 In `actions.ts`, add `explore_for` to `ACTION_NAMES`, its variant to `ACTION_SCHEMA` (`names: string[]`, `maxDistance: number`), and a menu entry:
 
@@ -1315,7 +1338,7 @@ explore_for         {"action":"explore_for","names":["coal_ore"],"maxDistance":6
                     Slow — it moves the bot and takes time.
 ```
 
-- [ ] **Step 3: Dispatch it**
+- [x] **Step 3: Dispatch it** — done in commit `abe2adf`, with the `ExplorationReport` rendering below.
 
 ```ts
     case 'explore_for':
@@ -1327,7 +1350,12 @@ explore_for         {"action":"explore_for","names":["coal_ore"],"maxDistance":6
 
 `StepOutcome`'s `result` case already carries `Result<unknown>`, so no new outcome kind is needed — but give the report a readable rendering in `renderOutcome` (found count, `searchedTo`, `exhausted`) rather than letting an object stringify into the prompt.
 
-- [ ] **Step 4: Rewrite the find/explore rules TOGETHER**
+- [x] **Step 4: Rewrite the find/explore rules TOGETHER** — SUPERSEDED. The draft below was written before the perception fix and one of its clauses, *"it is instant and free"*, is now measurably false (§5.3.1: a scarce target costs ~73ms even without line-of-sight, ~330ms with it). What shipped instead is §7.1's **edit 1**, accepted as drafted by Ricky on 2026-09-08 and on the branch in commit `abe2adf`. Kept below only as the record of what this plan originally proposed.
+
+⚠ **Rewriting them together was the right instinct and it was not enough.** The
+pair that actually conflicts is not `find_blocks`/`explore_for` — it is the
+drop-collection permission and the finished-position prohibition, which this
+plan did not anticipate. See Step 1b.
 
 Not as two adjacent descriptions. The rules block is order-sensitive, and a conflicting earlier rule beats a correct later one — measured while fixing the `not_found` oscillation, where *adding* a rule changed nothing and *merging* fixed it outright.
 
@@ -1341,7 +1369,7 @@ Replace the existing `find_blocks` rule with one paired instruction:
   use it only after find_blocks has come up empty.
 ```
 
-- [ ] **Step 5: Add a probe scenario and measure**
+- [ ] **Step 5: Add a probe scenario and measure** — scenario ADDED 2026-09-08, measurement PENDING (no reachable model; see Step 1b). `probe.ts` now carries seven scenarios; the new one is below, with a comment recording *why* an empty `find_blocks` stopped being a dead end.
 
 ```ts
   {

@@ -390,31 +390,37 @@ surface is a new agreement, not a detail — stop and ask rather than adjusting
 the contract to fit the code. In particular, if §5.3's cost measurement forces
 `findBlocks` to stop being synchronous-and-free, that is a new agreement.
 
-## 7.1 SECOND GATE — OPEN. **Everything waiting on Ricky is in this section.**
+## 7.1 SECOND GATE — ANSWERED 2026-09-08, except the regression.
 
-> **This is the single index of open decisions.** Nothing else needs reading to
-> answer them; where a number came from somewhere else it is repeated here.
-> Entry point is [PR #20](https://github.com/rickyzam/minebot/pull/20).
+> **Ricky's answers, 2026-09-08.** Recorded here because this section was the
+> single index of what was open. Entry point is
+> [PR #20](https://github.com/rickyzam/minebot/pull/20).
 >
-> | # | Decision | Where |
+> | # | Decision | Answer |
 > |---|---|---|
-> | 1 | The cost budget, and that perception was never free | §7.1 below |
-> | 2 | The contract doc wording | §7.1 below |
-> | 3 | Option A / B / C / D | §7.1 below |
-> | 4 | Prompt edit 1 — the paired `find_blocks`/`explore_for` rule | §7.1 below |
-> | 5 | Prompt edit 2 — the `not_found` tail | §7.1 below |
-> | 6 | Is `explore_for` the right answer to a dead position? | §7.1 below |
+> | 1 | The cost budget, and that perception was never free | **Accepted** |
+> | 2 | The contract doc wording | **Accepted as drafted** — already on the branch |
+> | 3 | Option A / B / C / D | **A** — ship it, document the cost |
+> | 4 | Prompt edit 1 — the paired `find_blocks`/`explore_for` rule | **Accepted as drafted** |
+> | 5 | Prompt edit 2 — the `not_found` tail | **Accepted as drafted** |
+> | 6 | Is `explore_for` the right answer to a dead position? | **Yes** |
 >
-> **4, 5 and 6 are the urgent ones** — a measured regression is sitting on the
-> branch because of them. See "What happened when the drafts were measured".
+> **One thing is still open, and it is not a wording preference.** Answer 6 makes
+> the branch's measured behaviour wrong rather than merely unverified: the
+> `not_found already` scenario answers `move_to` ×5, which is neither
+> `explore_for` nor `give_up` and is forbidden by the rules two lines earlier.
+> Edits 1 and 2 are accepted and stay, but they do not fix it. A candidate fix is
+> drafted below under "The regression, and the candidate fix" — **unapplied and
+> unmeasured**, because the probe is the only thing that can judge it.
 
-**Status: the code has landed; this gate has not.** The clause above fired —
+**Status: code landed, gate answered, Option A confirmed.** The clause above fired —
 §5.3's measurement puts honest perception at **339ms** for coal at r=64, against a
 contract that called `findBlocks` "synchronous and free" and a planner that calls
 it on that basis. It was implemented anyway on Dorel's instruction, under option
 A, because it changes no signature, guarantee or behaviour: only whether a doc
-comment tells the truth about a cost that already existed. If Ricky prefers B, C
-or D, the change is a revert of one doc comment plus the option's own work.
+comment tells the truth about a cost that already existed. **Ricky confirmed A on
+2026-09-08**, so the doc comment already on the branch is the whole of A's
+implementation and no revert is needed.
 
 Nothing here reopens §4, §6.3 or §6.4. The rule, the guarantees and the mock
 surface are all unchanged.
@@ -543,23 +549,64 @@ that is what the probe exists to prevent, and this is Track B's package.
 Reverting it would have left nothing to reproduce. Commit 1 (perception) is
 independent and can merge without it.
 
-### Checklist — the whole of what Ricky owes an answer on
+### Checklist — ANSWERED 2026-09-08
 
-- [ ] Perception is not free, and already was not (§5.3.1).
-- [ ] The cost budget in point 2 above is acceptable for the planning loop.
-- [ ] The replacement doc wording, or a redraft of it.
-- [ ] Option A over B/C/D.
-- [ ] The §3 correction is noted — 60 exposed rather than 1, **0 visible** — and
-      does not change the agreement already given.
-- [ ] Prompt edit 1 (the paired `find_blocks`/`explore_for` rule) — as drafted,
-      redrafted, or dropped. **As drafted it does not work.**
-- [ ] Prompt edit 2 (the `not_found` tail) — same.
-- [ ] Whether `explore_for` rather than `give_up` is the intended answer to a
-      dead position. The probe scenario's `hoped` already assumes yes; say if not.
-- [ ] **The regression itself**: `not_found already` answers `move_to` ×5, an
-      action the rules forbid. It is on the branch and unfixed. Either a wording
-      that restores sensible behaviour, or a decision to revert commit 2 of
-      PR #20 and land `explore_for` later.
+- [x] Perception is not free, and already was not (§5.3.1). **Accepted.**
+- [x] The cost budget in point 2 above is acceptable for the planning loop.
+      **Accepted** — ~2ms visible and abundant, ~75ms at r=32, 140–330ms at r=64.
+- [x] The replacement doc wording. **Accepted as drafted**; it is already in
+      `packages/contract/src/index.ts` on this branch.
+- [x] Option A over B/C/D. **A.**
+- [x] The §3 correction is noted — 60 exposed rather than 1, **0 visible** — and
+      does not change the agreement already given. **Noted; agreement stands.**
+- [x] Prompt edit 1 (the paired `find_blocks`/`explore_for` rule).
+      **Accepted as drafted**, and stays on the branch. It does not fix the
+      regression; that is now tracked separately below.
+- [x] Prompt edit 2 (the `not_found` tail). **Accepted as drafted**, same.
+- [x] Whether `explore_for` rather than `give_up` is the intended answer to a
+      dead position. **Yes — `explore_for`.** `probe.ts` already encodes this as
+      `hoped: ['explore_for', 'give_up']`; `give_up` stays acceptable only
+      because a goal can be genuinely unachievable, not because standing still
+      is a defensible answer to a dead position.
+- [ ] **The regression itself** — STILL OPEN, and answer 6 sharpens it from
+      "unverified" to "wrong". `not_found already` answers `move_to` ×5, an
+      action the rules forbid and which the accepted edits do not correct.
+      See below.
+
+### The regression, and the candidate fix — UNAPPLIED, UNMEASURED
+
+The accepted edits are on the branch and the regression survives them. The
+remaining hypothesis is **rule order**, not rule wording: the permission
+
+> `- "OK (drop collected: false)" means … Use move_to that position ONCE to walk
+>    over the item and pick it up.`
+
+sits immediately **above** the prohibition that forbids exactly that move once
+the position is finished. Nothing in either bullet is false; the model is
+reaching past the later prohibition to the earlier permission. Adding
+`explore_for` to the menu is what tipped it — the regression appeared with the
+menu entry **alone**, before either edit was applied.
+
+Candidate: state the terminal condition **first** and qualify the permission, so
+the two bullets stop competing. Swaps order, changes no fact:
+
+```
+- A position is FINISHED once you have already moved to it and the item is still
+  not in your inventory, or once mining it returns not_found. Do NOT move to or
+  mine a finished position again — it cannot help. Go looking somewhere new with
+  explore_for, or give_up.
+- "OK (drop collected: false)" means the block IS broken and its item is lying on
+  the ground at that position. Mining it again will fail — there is nothing left
+  to mine. If you have NOT already tried, use move_to that position ONCE to walk
+  over the item and pick it up.
+```
+
+**This is not on the branch and must not be committed unmeasured.** The branch
+deliberately holds the reproducible regression and a known-good baseline;
+replacing it with an unprobed guess would destroy both. One
+`OLLAMA_HOST=… npm run agent:probe` run decides it, and the bar is the
+`not_found already` row answering `explore_for` while the other five scenarios
+stay unmoved.
 
 ## 8. Impact on Track B
 

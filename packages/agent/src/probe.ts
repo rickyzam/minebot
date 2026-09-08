@@ -78,6 +78,24 @@ const SCENARIOS: readonly Scenario[] = [
     hoped: ['mine_block_at'],
   },
   {
+    // The decision the whole action exists to enable. Before explore_for this
+    // position had no right answer: nothing in the menu could help, so give_up
+    // was correct. Now that perception is line-of-sight limited, an empty
+    // find_blocks is the NORMAL result for buried ore and means "not visible
+    // from here", not "not present" — so going to look is the move.
+    name: 'find_blocks found nothing',
+    goal: 'get me some coal',
+    inventory: [PICKAXE],
+    history: [
+      step(
+        1,
+        { action: 'find_blocks', names: ['coal_ore'], maxDistance: 32, limit: 5 },
+        { kind: 'blocks', blocks: [] },
+      ),
+    ],
+    hoped: ['explore_for'],
+  },
+  {
     name: 'after missing_tool, inventory empty',
     goal: 'get me some coal',
     inventory: [],
