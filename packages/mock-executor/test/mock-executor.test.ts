@@ -185,3 +185,97 @@ describe('MockExecutor failure injection', () => {
     if (!r.ok) expect(r.reason).toBe('disconnected')
   })
 })
+
+describe('MockExecutor.exploreFor', () => {
+  const near = { name: 'coal_ore', position: { x: 5, y: 64, z: 0 }, distance: 5 }
+  const far = { name: 'coal_ore', position: { x: 90, y: 64, z: 0 }, distance: 90 }
+
+  it('finds blocks within maxDistance and reports the cost', async () => {
+    const m = new MockExecutor({ blocks: [near, far] })
+    await m.connect()
+    const r = await m.exploreFor(['coal_ore'], 32)
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.value.found.map((b) => b.position)).toEqual([near.position])
+      expect(r.value.travelled).toBeGreaterThanOrEqual(0)
+    }
+  })
+
+  it('resolves ok with an empty result when nothing is there', async () => {
+    // "I looked and there was nothing" is a successful search, not a failure.
+    // Reporting not_found here would make the reason meaningless for mineBlock.
+    const m = new MockExecutor({ blocks: [far] })
+    await m.connect()
+    const r = await m.exploreFor(['coal_ore'], 32)
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.value.found).toEqual([])
+      expect(r.value.exhausted).toBe(true)
+    }
+  })
+
+  it('does not re-report ground already covered by an earlier call', async () => {
+    const m = new MockExecutor({ blocks: [far] })
+    await m.connect()
+    const first = await m.exploreFor(['coal_ore'], 128)
+    const second = await m.exploreFor(['coal_ore'], 128)
+    expect(first.ok && second.ok).toBe(true)
+    if (first.ok && second.ok) {
+      expect(second.value.searchedTo).toBeGreaterThanOrEqual(first.value.searchedTo)
+      // Design §3.4: the point of tracking searchedTo is that a resumed search
+      // makes *progress*. Equal-and-unmoved would satisfy the >= above while
+      // re-walking the same ground forever, which is exactly what this forbids.
+      expect(second.value.searchedTo).toBeGreaterThan(first.value.searchedTo)
+      // Once exhausted, staying exhausted is the guarantee that lets a caller
+      // stop asking rather than looping forever.
+      if (first.value.exhausted) expect(second.value.exhausted).toBe(true)
+    }
+  })
+
+  it('restarts when the search changes', async () => {
+    const m = new MockExecutor({ blocks: [near] })
+    await m.connect()
+    // Advance an unrelated search well past the origin first — otherwise a mock
+    // that ignored the key entirely would still report 0 here and the test
+    // would pass without discriminating anything.
+    await m.exploreFor(['iron_ore'], 128)
+    const advanced = await m.exploreFor(['iron_ore'], 128)
+    expect(advanced.ok && advanced.value.searchedTo > 0).toBe(true)
+
+    const other = await m.exploreFor(['coal_ore'], 128)
+    expect(other.ok).toBe(true)
+    if (other.ok) expect(other.value.searchedTo).toBe(0)
+  })
+
+  it('honours injection, but never above the abort rule', async () => {
+    const m = new MockExecutor({ failures: { exploreFor: { reason: 'internal' } } })
+    await m.connect()
+    const injected = await m.exploreFor(['coal_ore'], 32)
+    expect(injected.ok).toBe(false)
+    if (!injected.ok) expect(injected.reason).toBe('internal')
+
+    const aborted = await m.exploreFor(['coal_ore'], 32, { signal: AbortSignal.abort() })
+    expect(aborted.ok).toBe(false)
+    if (!aborted.ok) expect(aborted.reason).toBe('interrupted')
+  })
+
+  it('fails disconnected when not connected', async () => {
+    const m = new MockExecutor()
+    const r = await m.exploreFor(['coal_ore'], 32)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('disconnected')
+  })
+
+  it('takes exploreDelayMs to search, and stays cancellable while it does', async () => {
+    // §3.4 asks for a slow search Track B can exercise. A delay that ignored
+    // the signal would turn every "abort mid-search" test into a timeout.
+    const m = new MockExecutor({ exploreDelayMs: 5_000 })
+    await m.connect()
+    const controller = new AbortController()
+    const pending = m.exploreFor(['coal_ore'], 32, { signal: controller.signal })
+    controller.abort()
+    const r = await pending
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('interrupted')
+  })
+})

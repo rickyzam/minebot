@@ -7,6 +7,8 @@ import {
   type BotEvents,
   type BotExecutor,
   type EntityInfo,
+  type ExplorationReport,
+  type ExploreOptions,
   type FailureReason,
   type ItemStack,
   type Result,
@@ -24,6 +26,15 @@ export type MockActionName =
   | 'placeBlock'
   | 'attack'
   | 'flee'
+  | 'exploreFor'
+
+/**
+ * How far the mock pretends perception reaches from a waypoint, and therefore
+ * how far outward one `exploreFor` call advances. Mirrors the real executor's
+ * DEFAULT_PERCEPTION_RADIUS — deliberately duplicated rather than imported,
+ * because `@minebot/mock-executor` must not depend on `@minebot/executor`.
+ */
+const MOCK_PERCEPTION_RADIUS = 32
 
 export interface InjectedFailure {
   reason: FailureReason
@@ -39,6 +50,12 @@ export interface MockOptions {
   blocks?: BlockInfo[]
   /** Simulated duration of each action, so cancellation can be exercised. */
   actionDelayMs?: number
+  /**
+   * Wall-clock a single `exploreFor` call should appear to take. Default 0.
+   * Separate from `actionDelayMs` because exploration is slow by nature and
+   * Track B needs a slow search without every other action becoming slow too.
+   */
+  exploreDelayMs?: number
   /**
    * Force an action to fail with a chosen reason. Exists because the mock can
    * otherwise only produce 3 of 9 FailureReason values, leaving Track B unable
@@ -65,6 +82,15 @@ export class MockExecutor implements BotExecutor {
   private entities: EntityInfo[]
   private blocks: BlockInfo[]
   private readonly delayMs: number
+  private readonly exploreDelayMs: number
+  /**
+   * The in-progress search. `searchedTo` is the radius the NEXT call will
+   * stand at, which is 0 for a fresh search because the first waypoint is the
+   * origin the bot is already on — the same shape the real executor reports.
+   * Keyed on the search itself: different names or radius is a different
+   * search and starts from zero.
+   */
+  private exploreSearch: { key: string; searchedTo: number } | null = null
   private readonly handlers = new Map<string, Set<Handler>>()
   /**
    * Settles the currently in-flight simulated action as `interrupted`, if
@@ -85,6 +111,7 @@ export class MockExecutor implements BotExecutor {
     this.entities = opts.entities ?? []
     this.blocks = opts.blocks ?? []
     this.delayMs = opts.actionDelayMs ?? 0
+    this.exploreDelayMs = opts.exploreDelayMs ?? 0
     for (const [action, failure] of Object.entries(opts.failures ?? {})) {
       if (failure) this.failures.set(action as MockActionName, failure)
     }
@@ -248,6 +275,59 @@ export class MockExecutor implements BotExecutor {
     return this.simulate('flee', opts)
   }
 
+  /**
+   * Walk outward one perception-radius step per call, reporting what came into
+   * view. Incremental rather than one-shot on purpose: design §3.4 requires
+   * resumability to be testable *without a server*, and a mock that searched
+   * everything in a single call would make `searchedTo` and the resume path
+   * unobservable — a second call would re-report the first call's ground.
+   */
+  async exploreFor(
+    names: readonly string[],
+    maxDistance: number,
+    opts?: ExploreOptions,
+  ): Promise<Result<ExplorationReport>> {
+    this.record('exploreFor', names, maxDistance)
+    const r = await this.simulate('exploreFor', opts)
+    if (!r.ok) return r
+
+    // Resumability is keyed on the search, not the caller: a different target
+    // or radius is a different search and starts from zero.
+    const key = `${[...names].sort().join(',')}|${maxDistance}`
+    if (this.exploreSearch?.key !== key) this.exploreSearch = { key, searchedTo: 0 }
+    const search = this.exploreSearch
+
+    if (this.exploreDelayMs > 0) {
+      const delayed = await this.wait(this.exploreDelayMs, opts)
+      if (!delayed.ok) return delayed
+    }
+
+    // Where this call stands, and how far it can see from there.
+    const at = search.searchedTo
+    const covered = at + MOCK_PERCEPTION_RADIUS
+    const wanted = new Set(names)
+    const found = this.blocks
+      .filter((b) => wanted.has(b.name) && b.distance <= covered)
+      .sort((a, b) => a.distance - b.distance)
+      .map((b) => Object.freeze({ name: b.name, position: b.position, distance: b.distance }))
+
+    // Nowhere further to look: perception from here already reaches the edge.
+    const exhausted = found.length === 0 && covered >= maxDistance
+    // Advance only when this call neither found anything nor ran out of ground,
+    // so `exhausted` stays sticky and a fruitful call does not skip past its
+    // own waypoint.
+    if (found.length === 0 && !exhausted) search.searchedTo = covered
+
+    return ok({
+      found: Object.freeze(found),
+      exhausted,
+      searchedTo: at,
+      // The step taken to reach this call's waypoint. A fresh search starts on
+      // the origin, so its first call costs nothing.
+      travelled: at === 0 ? 0 : MOCK_PERCEPTION_RADIUS,
+    })
+  }
+
   chat(message: string): void {
     this.record('chat', message)
   }
@@ -289,6 +369,21 @@ export class MockExecutor implements BotExecutor {
     const injected = this.failures.get(action)
     if (injected) return Promise.resolve(fail(injected.reason, injected.detail ?? `injected ${injected.reason}`))
     if (this.delayMs === 0) return Promise.resolve(ok(undefined))
+    return this.wait(this.delayMs, opts)
+  }
+
+  /**
+   * Sleep for `ms`, but stay cancellable while doing it — by `signal` and by
+   * `stop()`, exactly as a real in-flight action would be. A delay that
+   * ignored both would turn every mid-action cancellation test into a wait
+   * for the full duration.
+   */
+  private wait(ms: number, opts?: ActionOptions): Promise<Result> {
+    // Re-check rather than trusting the caller's earlier check: exploreFor
+    // awaits simulate() before getting here, and a signal aborted during that
+    // await would otherwise be seen only by an 'abort' listener that can never
+    // fire again — the wait would run to completion and report success.
+    if (opts?.signal?.aborted) return Promise.resolve(fail('interrupted', 'aborted mid-action'))
     return new Promise<Result>((resolve) => {
       let settled = false
       const signal = opts?.signal
@@ -303,7 +398,7 @@ export class MockExecutor implements BotExecutor {
       const onAbort = (): void => finish(fail('interrupted', 'aborted mid-action'))
       const stopThisAction = (): void => finish(fail('interrupted', 'stopped via stop()'))
       this.inFlightStop = stopThisAction
-      const timer = setTimeout(() => finish(ok(undefined)), this.delayMs)
+      const timer = setTimeout(() => finish(ok(undefined)), ms)
       signal?.addEventListener('abort', onAbort, { once: true })
     })
   }

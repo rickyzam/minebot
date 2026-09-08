@@ -77,6 +77,29 @@ export interface BlockQuery {
   readonly limit: number
 }
 
+export interface ExploreOptions extends ActionOptions {
+  /**
+   * How long to spend looking before reporting back. Defaults to 20_000.
+   * Bounding this keeps a step observable and the planner's step budget
+   * meaningful; an unbounded search would swallow a whole run.
+   */
+  readonly budgetMs?: number
+}
+
+export interface ExplorationReport {
+  /** Matches found, nearest first. Empty means "looked, found nothing". */
+  readonly found: readonly BlockInfo[]
+  /**
+   * True when there is nowhere left to look within `maxDistance`. This is the
+   * difference between "spend more time" and "spending more time cannot help".
+   */
+  readonly exhausted: boolean
+  /** How far from the search origin the search has reached, in blocks. */
+  readonly searchedTo: number
+  /** Blocks travelled during this call — the cost of the search, reported. */
+  readonly travelled: number
+}
+
 export interface SelfState {
   readonly position: Vec3
   readonly health: number
@@ -180,6 +203,26 @@ export interface BotExecutor {
   ): Promise<Result<{ position: Vec3; collected: boolean }>>
   placeBlock(blockName: string, position: Vec3, opts?: ActionOptions): Promise<Result>
   attack(entityId: number, opts?: ActionOptions): Promise<Result>
+  /**
+   * Go and look for blocks that are not currently visible.
+   *
+   * Unlike `findBlocks`, which is free perception over already-loaded chunks,
+   * this is an *action*: it moves the bot, consumes real time, and can fail.
+   *
+   * Returns as soon as it finds anything matching, when `budgetMs` is spent, or
+   * when there is nowhere left to look within `maxDistance` — whichever comes
+   * first. Finding nothing is `ok` with an empty `found`, NOT a failure:
+   * `not_found` stays reserved for "that specific thing is not there".
+   *
+   * Resumable: calling it again continues outward from where the last call
+   * stopped rather than starting over, so a caller can spend effort
+   * incrementally. Changing `names` or `maxDistance` starts a fresh search.
+   */
+  exploreFor(
+    names: readonly string[],
+    maxDistance: number,
+    opts?: ExploreOptions,
+  ): Promise<Result<ExplorationReport>>
   flee(opts?: ActionOptions): Promise<Result>
 
   chat(message: string): void
