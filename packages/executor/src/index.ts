@@ -42,3 +42,5 @@ export {
 } from './forwarding-secret.js'
 export { canHarvest, bestHarvestTool } from './harvest.js'
 export type { HarvestableBlock, ToolItem } from './harvest.js'
+export { nextWaypoint, searchedRadius, DEFAULT_PERCEPTION_RADIUS } from './explore.js'
+export type { SearchState } from './explore.js'
