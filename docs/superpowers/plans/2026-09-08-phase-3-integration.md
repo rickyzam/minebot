@@ -141,9 +141,14 @@ describe('runBotGoal', () => {
 
   it('disconnects even when the goal ends badly', async () => {
     const executor = new MockExecutor()
+    // Six junk replies for three undecodable steps, not three: SchemaDecider
+    // spends TWO model calls on a step it cannot decode — the initial reply
+    // plus exactly one repair attempt. A three-reply script exhausts the fake
+    // mid-repair and surfaces as llm_error instead, which is a different exit
+    // path and would not prove what this test is about.
     const outcome = await runBotGoal('impossible', {
       executor,
-      decider: decider('not json at all', 'still not json', 'nope'),
+      decider: decider('junk 1', 'junk 2', 'junk 3', 'junk 4', 'junk 5', 'junk 6'),
     })
 
     expect(outcome.status).toBe('undecodable')
