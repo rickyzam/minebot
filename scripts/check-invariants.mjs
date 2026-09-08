@@ -41,14 +41,39 @@ if (agent) {
     ...(agent.devDependencies ?? {}),
     ...(agent.peerDependencies ?? {}),
   }
-  const gameLibs = Object.keys(all).filter(
-    (d) => d === 'mineflayer' || d.startsWith('mineflayer-') || d.startsWith('prismarine-'),
-  )
+  const isGameLib = (d) =>
+    d === 'mineflayer' || d.startsWith('mineflayer-') || d.startsWith('prismarine-')
+
+  const gameLibs = Object.keys(all).filter(isGameLib)
   if (gameLibs.length > 0) {
     failures.push(
       `packages/agent must not depend on game libraries, found: ${gameLibs.join(', ')}. ` +
         'It talks to @minebot/contract and is tested against @minebot/mock-executor.',
     )
+  }
+
+  // Name matching alone is not enough. A workspace dependency whose own
+  // manifest pulls in Mineflayer puts it in the planning track's dependency
+  // graph just as surely, while passing the check above clean —
+  // @minebot/executor is exactly such a package, and Phase 3 is when someone
+  // would reach for it. Resolve one level into the workspace rather than
+  // trusting names.
+  for (const dep of Object.keys(all)) {
+    if (!dep.startsWith('@minebot/')) continue
+    const depManifest = manifest(dep.slice('@minebot/'.length))
+    if (!depManifest) continue
+    const depDeps = Object.keys({
+      ...(depManifest.dependencies ?? {}),
+      ...(depManifest.peerDependencies ?? {}),
+    })
+    const leaked = depDeps.filter(isGameLib)
+    if (leaked.length > 0) {
+      failures.push(
+        `packages/agent depends on ${dep}, which depends on ${leaked.join(', ')} — ` +
+          'that puts a game library in the planning track transitively. The ' +
+          'composition root is packages/bot; put code needing both there.',
+      )
+    }
   }
 }
 

@@ -14,10 +14,11 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 ```bash
 npm test                  # 260 unit tests. No network, no model. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
-npm run test:integration  # 79 tests. Requires the live dev server.
+npm run test:integration  # 82 tests. Requires the live dev server.
 npm run smoke             # Minimal "can a bot connect at all" check.
 npm run demo              # Connect, print snapshot, walk. The Phase 1 deliverable.
 npm run demo:phase2       # Connect, path around a wall, mine coal. The Phase 2 deliverable.
+npm run demo:phase3       # Real state, real model, real action. The Phase 3 deliverable.
 npm run agent:demo        # The planning loop against a fake model and a mock world. No server.
 npm run agent:probe       # Ask a real model for one action, five scenarios. Needs OLLAMA_HOST.
 ```
@@ -66,6 +67,12 @@ These cost real debugging time to discover. Treat them as settled.
 | `goto()` rejects with `.name` of `NoPath` / `Timeout` / `PathStopped` / `GoalChanged` | That name is the only discriminator between `unreachable` and `interrupted` |
 | Mined item drops persist in the world across runs | The arena reset despawns them (`/fill` does not — a drop is an entity, not a block), or collection assertions report false greens |
 | A player's selected hotbar slot persists in player data, survives `/clear`, and is moved by `bot.equip()` | `/give` alone cannot put an item "in the inventory but not in the hand" — use `placeInSlot()`. A test that equips changes what its own next run starts holding |
+| The composition root is `packages/bot/` — the only package depending on both `@minebot/agent` and `@minebot/executor` | Code needing both goes there. Putting it in `agent` pulls Mineflayer into the planning track transitively; `check-invariants.mjs` now catches that |
+| Integration tests never require Ollama; only `demo:phase3` and `agent:probe` do | A red demo with green tests means the model chose badly, not that the wiring broke |
+| `runGoal` returns `interrupted` only on an **outer** abort | An `interrupted` result without one means the reflex layer preempted — Phase 5, so unreachable today |
+| `SchemaDecider` spends **two** model calls on an undecodable reply — the reply plus one repair | A scripted `FakeLlmClient` needs 2 replies per undecodable step, or it exhausts mid-repair and the loop exits `llm_error` instead |
+| Minecraft usernames are capped at **16 characters** | A longer one is rejected at login, and `connect()` returning `disconnected` reads as a broken fixture rather than a naming mistake |
+| Arenas must be separated by more than the largest radius anything might **search**, not merely their own width | The Phase 3 demo at x1150 found the integration arena's ore at x1126 through the model's own 32-block `find_blocks`, and chased it until the step budget ran out |
 
 ## The dev server
 
@@ -123,7 +130,8 @@ When you add a guard, prove it can fire. A safety check nobody has seen trigger 
 Deliberately unimplemented — do not "helpfully" fill these in:
 
 - `placeBlock`, `followPlayer`, `attack` and `flee` are stubs returning `fail('internal', '… arrives in Phase 5')`. They **do** still check `opts?.signal?.aborted` first and return `interrupted` — the contract suite asserts this for all six actions. `runAction()` now gives them that check for free; do not re-add it by hand.
-- `packages/agent/` is the planning loop. It must never depend on `mineflayer` — `check-invariants.mjs` enforces it, and now reports 2 of 2. It codes **no per-`FailureReason` retry policy**; that is Phase 4's, and the loop feeds failures back to the model instead. Do not "helpfully" add branching there.
+- `packages/agent/` is the planning loop. It must never depend on `mineflayer` **or `@minebot/executor`** — `check-invariants.mjs` enforces both, including the transitive case, and reports 2 of 2. Anything needing both tracks belongs in `packages/bot/`. It codes **no per-`FailureReason` retry policy**; that is Phase 4's, and the loop feeds failures back to the model instead. Do not "helpfully" add branching there.
+- `packages/bot/` is only the composition root — `runBotGoal()` plus the demo. Planning logic belongs in `agent`, game logic in `executor`; code landing here that is really one or the other is in the wrong package.
 
 ## Conventions
 
