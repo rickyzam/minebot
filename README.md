@@ -135,7 +135,7 @@ npm run demo:phase3      # The whole loop: real state, real model, real action
 | 2 | Pathfinding + mining a known block | **Done** |
 | 3 | Close the LLM loop once, end to end | **Done** |
 | 4 | Reliable "find and mine coal" — search, retry, recovery | In progress — the bulk of the work |
-| 4.5 | [Line-of-sight perception](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — stop `findBlocks` seeing through rock | Proposed, awaiting Track B agreement |
+| 4.5 | [Line-of-sight perception](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — stop `findBlocks` seeing through rock | Agreed with Track B; not yet implemented |
 | 5 | Full toolbox: building, follow, chat, reflex combat | |
 | 6 | Multi-bot scaling against one shared model | |
 | 7 | [Memory and recall](docs/notes/Memory%20and%20Recall.md) — short-term spatial memory, durable landmarks | Roadmap only; depends on 4.5 |

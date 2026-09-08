@@ -1,7 +1,7 @@
 # Perception: line of sight — Design and Contract Change
 
 **Date:** 2026-09-08
-**Status:** PROPOSED. Needs Track B agreement before anything lands — see §7.
+**Status:** AGREED. Track B (Ricky) agreed §4, §6.3 and §6.4 in full on 2026-09-08. Not yet implemented.
 **Affects:** `packages/contract/` (doc guarantee), `packages/mock-executor/` (suite + mock), `packages/executor/` (implementation)
 **Supersedes nothing.** This restores a guarantee the design already claims.
 
@@ -139,13 +139,25 @@ existing Track B tests are unaffected and new ones can exercise both paths. This
 is additive and backwards-compatible; it is listed here because `MockOptions` is
 shared surface and additive changes still need agreement (spec §9 precedent).
 
-## 7. GATE — what Track B needs to agree
+## 7. GATE — what Track B needs to agree — SATISFIED
 
-- [ ] The rule in §4, including that facing direction is ignored.
-- [ ] The four contract-suite guarantees in §6.3.
-- [ ] The `MockOptions.visible` addition in §6.4.
-- [ ] That `findBlocks` returning **fewer** results is the intended outcome and
+- [x] The rule in §4, including that facing direction is ignored.
+- [x] The four contract-suite guarantees in §6.3.
+- [x] The `MockOptions.visible` addition in §6.4.
+- [x] That `findBlocks` returning **fewer** results is the intended outcome and
       not a regression, including where it returns none at all.
+
+**Agreed by Ricky on 2026-09-08.**
+
+The gate stays in this document rather than being deleted, for the same reason
+the Phase 4 gate does: the record of *when and by whom* a change to the shared
+surface was agreed is the thing main-spec §9 exists to preserve.
+
+**This agreement covers §4, §6.3 and §6.4 as written.** Anything discovered
+during implementation that changes the rule, the guarantees, or the mock's
+surface is a new agreement, not a detail — stop and ask rather than adjusting
+the contract to fit the code. In particular, if §5.3's cost measurement forces
+`findBlocks` to stop being synchronous-and-free, that is a new agreement.
 
 ## 8. Impact on Track B
 
