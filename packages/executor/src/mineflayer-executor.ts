@@ -88,6 +88,25 @@ const PATHFINDER_SEARCH_RADIUS = 128
 const DEFAULT_EXPLORE_BUDGET_MS = 20_000
 
 /**
+ * How close the bot must get to a waypoint before its search counts.
+ *
+ * MEASURED, the hard way: this was originally the perception radius, on the
+ * reasoning that arriving "close enough to see what the waypoint was meant to
+ * see" was the honest bar. But waypoints are spaced one perception radius
+ * apart, so a bot that had not moved at ALL was already within tolerance of
+ * the next waypoint — the check passed vacuously, waypoints were marked
+ * visited without being reached, and the search punched exactly the coverage
+ * holes explore.test.ts exists to forbid. A human watching the benchmark spotted
+ * it: the bot kept walking past the nearest target and reporting a further one.
+ *
+ * The tolerance must be small RELATIVE TO SPACING for arrival to mean
+ * anything. `GoalNear(..., 2)` is satisfied within 2 blocks, so a genuine
+ * arrival lands under ~3; this leaves margin for that without ever being
+ * satisfiable from the previous waypoint.
+ */
+const WAYPOINT_ARRIVAL_TOLERANCE = 4
+
+/**
  * Headroom between the search budget and runAction's own timeout.
  *
  * The action must outlast the search, or the timeout fires first and the
@@ -1054,13 +1073,20 @@ export class MineflayerExecutor implements BotExecutor {
           const arrival = await this.gotoGoal(
             bot,
             signal,
-            new goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, 2),
-            // NOT ARRIVAL_TOLERANCE. The waypoint only has to be reached
-            // closely enough that looking around from there covers what it was
-            // meant to cover, so the perception radius is the honest bar:
-            // stopping 3 blocks short is fine, stopping 40 short is a hole in
-            // the search that nothing else would catch.
-            () => distanceFrom(bot, waypoint) <= DEFAULT_PERCEPTION_RADIUS,
+            // XZ, not GoalNear. The spiral is horizontal, so a waypoint carries
+            // the ORIGIN's elevation — which on real terrain is usually not the
+            // elevation of the ground there. GoalNear(x, origin.y, z, 2) then
+            // asks the bot to stand within 2 blocks of a point hanging in the
+            // air (or buried), which is unreachable, so the waypoint was
+            // skipped. Over the benchmark region's 19-block height range that
+            // silently discarded most of the search: the bot walked past the
+            // nearest target and reported a further one it happened to see.
+            new goals.GoalNearXZ(waypoint.x, waypoint.z, 2),
+            // Horizontal for the same reason, and small relative to the
+            // waypoint spacing — see WAYPOINT_ARRIVAL_TOLERANCE.
+            () =>
+              Math.hypot(bot.entity.position.x - waypoint.x, bot.entity.position.z - waypoint.z) <=
+              WAYPOINT_ARRIVAL_TOLERANCE,
           )
           travelled += bot.entity.position.distanceTo(before)
 

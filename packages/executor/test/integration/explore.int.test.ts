@@ -3,6 +3,7 @@ import { MineflayerExecutor } from '../../src/index.js'
 import {
   buildLargePlatform,
   placeArenaBlock,
+  sendConsoleCommand,
   teleportAndWait,
   waitForOnGround,
   type ArenaBounds,
@@ -21,7 +22,7 @@ import {
  * Clear of every other arena (500-1330) by more than the 32-block perception
  * radius, per the plan's arena-separation rule.
  */
-const ARENA: ArenaBounds = { x0: 1600, x1: 1760, z0: -48, z1: 48, floorY: 199, clearance: 6 }
+const ARENA: ArenaBounds = { x0: 1600, x1: 1760, z0: -48, z1: 48, floorY: 199, clearance: 10 }
 const START = { x: 1650, y: ARENA.floorY + 1, z: 0 }
 /**
  * 50 blocks east of START: beyond the 32-block perception radius, so genuinely
@@ -29,6 +30,10 @@ const START = { x: 1650, y: ARENA.floorY + 1, z: 0 }
  * the spiral proposes at (1682, 0). Found by exploring, never by looking.
  */
 const HIDDEN_ORE = { x: 1700, y: ARENA.floorY + 1, z: 0 }
+/** First of four 1-block risers, so the east waypoint sits 4 blocks up. */
+const STEP_START = 1666
+/** On top of the raised ground, past the staircase. */
+const RAISED_ORE = { x: 1700, y: ARENA.floorY + 5, z: 0 }
 
 describe('exploreFor against the live server', () => {
   let executor: MineflayerExecutor | null = null
@@ -106,6 +111,37 @@ describe('exploreFor against the live server', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toBe('interrupted')
   }, 150_000)
+
+  it('crosses a step in the terrain to find an ore beyond it', async () => {
+    // REGRESSION, found by a human watching the benchmark. The spiral is
+    // horizontal, so a waypoint carries the ORIGIN's elevation — and the goal
+    // used to be GoalNear(x, origin.y, z, 2), which on any ground that is not
+    // at the origin's level asks the bot to stand inside a point hanging in
+    // mid-air. Those waypoints came back `unreachable` and were skipped, so
+    // most of a real search was silently discarded.
+    //
+    // A FLAT arena cannot catch this — every waypoint is at the origin's
+    // elevation there, which is exactly why five green integration tests and
+    // 291 unit tests all missed it. This one puts the target up a staircase.
+    executor = await arenaBot('ITExploreStep', false)
+    for (let i = 0; i < 4; i++) {
+      const x = STEP_START + i * 2
+      sendConsoleCommand(
+        `fill ${x} ${ARENA.floorY + 1} ${ARENA.z0} ${ARENA.x1} ${ARENA.floorY + 1 + i} ${ARENA.z1} stone`,
+      )
+    }
+    await new Promise((r) => setTimeout(r, 2_000))
+    placeArenaBlock(RAISED_ORE, 'coal_ore')
+    await new Promise((r) => setTimeout(r, 1_000))
+
+    // Still invisible from the start, so this measures the search and not
+    // perception, exactly as the flat case does.
+    expect(executor.findBlocks({ names: ['coal_ore'], maxDistance: 32, limit: 5 })).toHaveLength(0)
+
+    const r = await executor.exploreFor(['coal_ore'], 32, { budgetMs: 90_000 })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.value.found.map((b) => b.position)).toContainEqual(RAISED_ORE)
+  }, 180_000)
 
   it('fails invalid_target for a block the registry does not know', async () => {
     // Checked before the bot moves: an unknown name must not read as "looked,
