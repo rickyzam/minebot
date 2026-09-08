@@ -6,6 +6,8 @@
 
 **Architecture:** Eight small modules, six of them pure functions over plain data. The LLM sits behind an `LlmClient` interface with a scripted fake as the only implementation any test uses, so `npm test` never opens a socket. The action menu is defined once as a TypeScript union plus a JSON Schema; `SchemaDecider` uses Ollama's constrained-output `format` field to get it back. Failures are fed to the model as history rather than branched on in code — Phase 4 owns policy.
 
+**Task order is measurement-first.** The Ollama client and probe land at Task 5, before dispatch and the loop, and Task 6 is a gate that measures the model and tunes the menu against what it actually does. Spec §2.1 found a terse menu rewrite changing one turn's answer in 5 of 5 samples: prompt text is behavioural code, and hardening it after building three modules on top would be the expensive order.
+
 **Tech Stack:** TypeScript 7, Node 24 (ESM), npm workspaces, Vitest 5. No new runtime dependencies — `fetch` is built in.
 
 **Spec:** [`docs/superpowers/specs/2026-09-07-track-b-planning-loop-design.md`](../specs/2026-09-07-track-b-planning-loop-design.md)
@@ -25,7 +27,24 @@
 
 ## Verified repository facts
 
-Checked against the tree on 2026-09-07. These are measurements, not assumptions.
+Re-checked against the tree **after Phase 2 landed (PR #11)**. These are measurements, not
+assumptions.
+
+- **The shared surface is untouched by all of Phase 2.** `git diff --stat 707163c origin/main
+  -- packages/contract packages/mock-executor` is empty across 26 commits. Everything this plan
+  assumes about `MockExecutor` still holds.
+- **Phase 2 is complete.** `moveTo` runs on `mineflayer-pathfinder`; `mineBlock` resolves a
+  target, checks harvestability via `harvest.ts`, digs, and walks onto the drop. The stubs are
+  now only `placeBlock`, `followPlayer`, `attack`, `flee` — which is exactly the set §4.3 keeps
+  out of the action menu.
+- **Baselines moved: 179 unit tests, 79 integration tests.** Use whatever `npm test` prints
+  rather than these numbers when updating docs.
+- **The dev server moved behind a Velocity proxy.** People connect on 25565; the Fabric backend
+  is loopback-only on 25566, and `MineflayerExecutor` now defaults to 25566. Irrelevant to
+  `packages/agent/`, which never constructs an executor — but it is why the README grew a proxy
+  section.
+- **The model is reachable**: Ollama 0.33.3 at `192.168.1.21:11434`, holding `qwen3:14b`. Set
+  `OLLAMA_HOST=http://192.168.1.21:11434`. `npm test` must still never use it.
 
 - `scripts/check-invariants.mjs` currently prints `agent package not yet created` and checks 1 of 2 invariants. Creating `packages/agent/package.json` activates the second.
 - `vitest.config.ts` needs **no change**: the `unit` project glob is `packages/*/test/**/*.test.ts` and excludes only `packages/*/test/integration/**`.
@@ -41,7 +60,7 @@ Checked against the tree on 2026-09-07. These are measurements, not assumptions.
 |---|---|
 | `packages/agent/package.json` | **Create.** Manifest. Deps: `@minebot/contract`. DevDeps: `@minebot/mock-executor` |
 | `packages/agent/src/actions.ts` | **Create.** `ActionRequest` union, its JSON Schema, the menu text shown to the model |
-| `packages/agent/src/llm.ts` | **Create.** `LlmClient`, `ChatMessage`, `ChatRequest`, `ChatReply`. Pure types, no logic |
+| `packages/agent/src/llm.ts` | **Create.** `LlmClient`, `ChatMessage`, `ChatRequest`, `abortError`. Pure types plus one helper |
 | `packages/agent/src/fake-llm.ts` | **Create.** `FakeLlmClient` — scripted replies, records requests, fails loudly when exhausted |
 | `packages/agent/src/decide.ts` | **Create.** `DecodeError`, `decode()`, `Decider`, `SchemaDecider` |
 | `packages/agent/src/step.ts` | **Create.** `Step`, `StepOutcome`, `GoalOutcome` — the shared vocabulary of a run |
@@ -60,6 +79,7 @@ Checked against the tree on 2026-09-07. These are measurements, not assumptions.
 
 ## Task 1: Package skeleton and the action menu
 
+
 The menu is the contract between the model and the code, so it lands first — every later task imports from it.
 
 **Files:**
@@ -69,7 +89,7 @@ The menu is the contract between the model and the code, so it lands first — e
 
 **Interfaces:**
 - Consumes: `Vec3` from `@minebot/contract` (type only).
-- Produces: `ActionRequest` union, `ActionName`, `ACTION_NAMES`, `ACTION_SCHEMA`, `ACTION_MENU`, `positionOf(a: {x,y,z}): Vec3`. Tasks 3, 4, 5, 6 all import from here; Task 5 uses `positionOf`.
+- Produces: `ActionRequest` union, `ActionName`, `ACTION_NAMES`, `ACTION_SCHEMA`, `ACTION_MENU`, `positionOf(a: {x,y,z}): Vec3`. Tasks 3, 4, 5, 7 and 8 all import from here; Task 7 uses `positionOf`.
 
 - [ ] **Step 1: Create the manifest**
 
@@ -121,6 +141,7 @@ describe('action menu', () => {
       'mine_block_at',
       'chat',
       'done',
+      'give_up',
     ])
   })
 
@@ -213,6 +234,14 @@ export type ActionRequest =
     }
   | { readonly action: 'chat'; readonly message: string }
   | { readonly action: 'done'; readonly summary: string }
+  /**
+   * The model's way of saying the goal cannot be reached. Probing showed it
+   * otherwise chatting "I need a pickaxe" and then grinding to the step
+   * budget, an outcome indistinguishable from the loop malfunctioning
+   * (design §4.0). Kept separate from `done` rather than folded in with a
+   * flag: `done` is chosen reliably, and muddying it risks that.
+   */
+  | { readonly action: 'give_up'; readonly reason: string }
 
 export type ActionName = ActionRequest['action']
 
@@ -223,6 +252,7 @@ export const ACTION_NAMES = [
   'mine_block_at',
   'chat',
   'done',
+  'give_up',
 ] as const satisfies readonly ActionName[]
 
 export const positionOf = (a: {
@@ -290,6 +320,12 @@ export const ACTION_SCHEMA = {
       required: ['action', 'summary'],
       additionalProperties: false,
     },
+    {
+      type: 'object',
+      properties: { action: named('give_up'), reason: { type: 'string' } },
+      required: ['action', 'reason'],
+      additionalProperties: false,
+    },
   ],
 } as const
 
@@ -308,6 +344,8 @@ export const ACTION_MENU = [
   '                    Say something in game chat.',
   'done                {"action":"done","summary":"mined one coal ore"}',
   '                    The goal is achieved. This ends the run.',
+  'give_up             {"action":"give_up","reason":"no pickaxe and no way to get one"}',
+  '                    The goal cannot be reached. Say why. This ends the run.',
 ].join('\n')
 ```
 
@@ -344,6 +382,7 @@ which was reporting 'agent package not yet created' until now."
 
 ## Task 2: The LLM seam and a fake that fails loudly
 
+
 **Files:**
 - Create: `packages/agent/src/llm.ts`
 - Create: `packages/agent/src/fake-llm.ts`
@@ -351,7 +390,7 @@ which was reporting 'agent package not yet created' until now."
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `ChatMessage`, `ChatRequest`, `ChatReply`, `ToolCall`, `LlmClient`, `FakeLlmClient`, `FakeLlmOptions`, `abortError(): Error`, `isAbortError(e: unknown): boolean`. Tasks 3, 6, 7 depend on these; Task 6 uses `isAbortError`.
+- Produces: `ChatMessage`, `ChatRequest`, `LlmClient` (whose `chat` resolves a `string`), `FakeLlmClient`, `FakeLlmOptions`, `abortError(): Error`, `isAbortError(e: unknown): boolean`. Tasks 3, 5 and 8 depend on these; Task 8 uses `isAbortError`.
 
 - [ ] **Step 1: Write `llm.ts`**
 
@@ -364,23 +403,6 @@ export interface ChatMessage {
   readonly content: string
 }
 
-/** Present only once a tool-calling Decider exists (design §5). */
-export interface ToolCall {
-  readonly name: string
-  readonly arguments: unknown
-}
-
-/**
- * The model's reply. An object rather than a bare string on purpose: a
- * tool-calling reply is not text, and `Promise<string>` would have made that
- * swap a signature change across every implementation instead of an added
- * field.
- */
-export interface ChatReply {
-  readonly content: string
-  readonly toolCalls?: readonly ToolCall[]
-}
-
 export interface ChatRequest {
   readonly messages: readonly ChatMessage[]
   /** JSON Schema the reply must satisfy. Ollama's `format` field. */
@@ -388,8 +410,14 @@ export interface ChatRequest {
   readonly signal?: AbortSignal
 }
 
+/**
+ * Returns the reply text. A bare string, because design §5 resolved the
+ * mechanism question by measurement — schema-constrained output beat native
+ * tool-calling 25/25 to 20/25 — so there is no structured tool-call payload
+ * to carry, and no reason to shape the type around one.
+ */
 export interface LlmClient {
-  chat(req: ChatRequest): Promise<ChatReply>
+  chat(req: ChatRequest): Promise<string>
 }
 
 /**
@@ -423,8 +451,8 @@ const msg = (content: string) => [{ role: 'user' as const, content }]
 describe('FakeLlmClient', () => {
   it('returns queued replies in order', async () => {
     const llm = new FakeLlmClient(['first', 'second'])
-    expect((await llm.chat({ messages: msg('a') })).content).toBe('first')
-    expect((await llm.chat({ messages: msg('b') })).content).toBe('second')
+    expect(await llm.chat({ messages: msg('a') })).toBe('first')
+    expect(await llm.chat({ messages: msg('b') })).toBe('second')
   })
 
   it('records every request it received', async () => {
@@ -448,7 +476,7 @@ describe('FakeLlmClient', () => {
   it('repeats the last reply forever when asked, for budget and stuck tests', async () => {
     const llm = new FakeLlmClient(['again'], { repeatLast: true })
     for (let i = 0; i < 5; i++) {
-      expect((await llm.chat({ messages: msg('a') })).content).toBe('again')
+      expect(await llm.chat({ messages: msg('a') })).toBe('again')
     }
   })
 
@@ -471,7 +499,7 @@ Expected: FAIL — `Failed to resolve import "../src/fake-llm.js"`.
 - [ ] **Step 4: Write `fake-llm.ts`**
 
 ```ts
-import { abortError, type ChatRequest, type ChatReply, type LlmClient } from './llm.js'
+import { abortError, type ChatRequest, type LlmClient } from './llm.js'
 
 export interface FakeLlmOptions {
   /**
@@ -498,16 +526,16 @@ export class FakeLlmClient implements LlmClient {
     this.repeatLast = opts.repeatLast ?? false
   }
 
-  async chat(req: ChatRequest): Promise<ChatReply> {
+  async chat(req: ChatRequest): Promise<string> {
     this.requests.push(req)
     if (req.signal?.aborted) throw abortError()
 
     const next = this.queue.shift()
     if (next !== undefined) {
       this.last = next
-      return { content: next }
+      return next
     }
-    if (this.repeatLast && this.last !== null) return { content: this.last }
+    if (this.repeatLast && this.last !== null) return this.last
 
     // Loud on purpose — see the test.
     throw new Error(
@@ -539,13 +567,17 @@ Expected: all green, 10 tests in the package.
 git add packages/agent
 git commit -m "Add the LlmClient seam and a fake that fails loudly
 
-No model endpoint is reachable from this machine, so the transport goes
-behind an interface from the first commit and every test uses the fake.
-That buys a property worth keeping permanently: npm test opens no sockets.
+The model lives on another machine, so the transport goes behind an
+interface and every test uses the fake. npm test opens no sockets — forced
+at first, now a deliberate discipline, and the more worth keeping for being
+optional: a reachable box is a standing temptation to write tests that
+depend on a machine being up.
 
-ChatReply is an object rather than a string because a tool-calling reply
-is not text — if Phase 3's measurements favour native tool-calling, that
-becomes an added field rather than a signature change everywhere.
+chat() resolves a plain string. An earlier draft returned an object so a
+tool-calling reply could be carried, but measurement closed that question:
+schema-constrained output decoded 25/25 against tool-calling's 20/25, and
+every one of those failures was the terminal `done` action. An abstraction
+for a settled question is just weight.
 
 The fake throws when its script runs out instead of returning ''. An empty
 reply is a legitimate decode case, so a quiet fake would turn an exhausted
@@ -557,13 +589,14 @@ arena fixture that silently no-opped."
 
 ## Task 3: Decode and validate the model's reply
 
+
 **Files:**
 - Create: `packages/agent/src/decide.ts`
 - Test: `packages/agent/test/decide.test.ts`
 
 **Interfaces:**
 - Consumes: `ACTION_NAMES`, `ACTION_SCHEMA`, `ActionRequest`, `ActionName` (Task 1); `LlmClient`, `ChatMessage` (Task 2).
-- Produces: `DecodeError`, `DecodeResult`, `decode(raw: string): DecodeResult`, `Decider`, `DecideResult`, `SchemaDecider`. Task 6 depends on `Decider`, `DecideResult` and `DecodeError`; Task 4 depends on `DecodeError`.
+- Produces: `DecodeError`, `DecodeResult`, `decode(raw: string): DecodeResult`, `Decider`, `DecideResult`, `SchemaDecider`. Task 8 depends on `Decider`, `DecideResult` and `DecodeError`; Task 4 depends on `DecodeError`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -608,6 +641,9 @@ describe('decode — accepted replies', () => {
     })
     expect(expectOk('{"action":"done","summary":"got the coal"}')).toEqual({
       action: 'done', summary: 'got the coal',
+    })
+    expect(expectOk('{"action":"give_up","reason":"no pickaxe available"}')).toEqual({
+      action: 'give_up', reason: 'no pickaxe available',
     })
   })
 
@@ -672,6 +708,7 @@ describe('decode — rejected replies', () => {
     ['y below the world', '{"action":"move_to","x":0,"y":-500,"z":0}'],
     ['non-finite coordinate', '{"action":"move_to","x":0,"y":null,"z":0}'],
     ['empty summary', '{"action":"done","summary":""}'],
+    ['empty give_up reason', '{"action":"give_up","reason":"  "}'],
   ])('rejects %s', (_label, raw) => {
     expect(expectBad(raw).kind).toBe('bad_arguments')
   })
@@ -905,6 +942,12 @@ export function decode(raw: string): DecodeResult {
       if (summary === null) return bad('bad_arguments', 'summary must be a non-empty string')
       return { ok: true, action: { action: 'done', summary } }
     }
+
+    case 'give_up': {
+      const reason = text(o['reason'], MAX_SUMMARY)
+      if (reason === null) return bad('bad_arguments', 'reason must be a non-empty string')
+      return { ok: true, action: { action: 'give_up', reason } }
+    }
   }
 }
 
@@ -916,10 +959,10 @@ export type DecideResult =
 
 /**
  * How one action is obtained from the model. `SchemaDecider` is the only
- * implementation today; a `ToolCallDecider` reading `ChatReply.toolCalls`
- * would reuse `decode`, `actions.ts` and `prompt.ts` unchanged, which is what
- * lets Phase 3 choose between the two mechanisms on measurements rather than
- * on a guess made before any model was reachable (design §5).
+ * implementation, and design §5 records the measurement that closed the
+ * alternative. This stays an interface because `runGoal` needs something
+ * injectable — the `llm_error` test hands it a decider that throws, which a
+ * concrete class cannot express.
  */
 export interface Decider {
   decide(messages: readonly ChatMessage[], signal?: AbortSignal): Promise<DecideResult>
@@ -934,8 +977,8 @@ export class SchemaDecider implements Decider {
 
   async decide(messages: readonly ChatMessage[], signal?: AbortSignal): Promise<DecideResult> {
     const first = await this.llm.chat({ messages, schema: ACTION_SCHEMA, signal })
-    const decoded = decode(first.content)
-    if (decoded.ok) return { ok: true, action: decoded.action, raw: first.content }
+    const decoded = decode(first)
+    if (decoded.ok) return { ok: true, action: decoded.action, raw: first }
 
     // Exactly one repair. The two extra messages are scoped to this retry and
     // discarded with it — the next turn rebuilds the prompt from a fresh
@@ -943,7 +986,7 @@ export class SchemaDecider implements Decider {
     const repaired = await this.llm.chat({
       messages: [
         ...messages,
-        { role: 'assistant', content: first.content },
+        { role: 'assistant', content: first },
         {
           role: 'user',
           content:
@@ -954,10 +997,10 @@ export class SchemaDecider implements Decider {
       schema: ACTION_SCHEMA,
       signal,
     })
-    const second = decode(repaired.content)
+    const second = decode(repaired)
     return second.ok
-      ? { ok: true, action: second.action, raw: repaired.content }
-      : { ok: false, error: second.error, raw: repaired.content }
+      ? { ok: true, action: second.action, raw: repaired }
+      : { ok: false, error: second.error, raw: repaired }
   }
 }
 ```
@@ -999,6 +1042,7 @@ back in after an interruption."
 
 ## Task 4: The run vocabulary and prompt rendering
 
+
 **Files:**
 - Create: `packages/agent/src/step.ts`
 - Create: `packages/agent/src/prompt.ts`
@@ -1006,9 +1050,9 @@ back in after an interruption."
 
 **Interfaces:**
 - Consumes: `ActionRequest` (Task 1); `DecodeError` (Task 3); `WorldSnapshot`, `BlockInfo`, `Result`, `Vec3` from `@minebot/contract`.
-- Produces: `Step`, `StepOutcome`, `GoalOutcome`, `GoalStatus` from `step.ts`; `HISTORY_WINDOW`, `renderAction`, `renderOutcome`, `renderStep`, `renderSnapshot`, `renderPrompt` from `prompt.ts`. Tasks 5 and 6 depend on `StepOutcome`; Task 6 depends on all of it.
+- Produces: `Step`, `StepOutcome`, `GoalOutcome`, `GoalStatus` from `step.ts`; `HISTORY_WINDOW`, `renderAction`, `renderOutcome`, `renderStep`, `renderSnapshot`, `renderPrompt` from `prompt.ts`. Tasks 7 and 8 depend on `StepOutcome`; Task 8 depends on all of it.
 
-**Note on `llm_error`:** the spec's §7.2 table lists six goal statuses and does not cover the model itself being unreachable — a real case once `OllamaClient` exists, and one that must not violate the spec's own "failure is a returned value, never a thrown error" rule. A seventh status, `llm_error`, is added here. Update the spec's §7.2 table in the same commit so the two do not drift.
+**Note on the two non-obvious statuses.** `gave_up` is the outcome of the model choosing `give_up`, and carries its stated reason as `detail` — see spec §4.0 for why an impossible goal needs to be sayable. `llm_error` covers the model being unreachable, without which an unreachable endpoint would be the one failure that had to throw, breaking the spec's own "failure is a returned value" rule. Both are already in spec §7.2; no spec edit is needed here.
 
 - [ ] **Step 1: Write `step.ts`**
 
@@ -1030,6 +1074,7 @@ export type StepOutcome =
   | { readonly kind: 'result'; readonly result: Result<unknown> }
   | { readonly kind: 'undecodable' }
   | { readonly kind: 'done' }
+  | { readonly kind: 'gave_up' }
 
 export interface Step {
   readonly n: number
@@ -1041,6 +1086,7 @@ export interface Step {
 
 export type GoalStatus =
   | 'done'
+  | 'gave_up'
   | 'budget_exhausted'
   | 'stuck'
   | 'undecodable'
@@ -1110,6 +1156,7 @@ describe('renderAction', () => {
       .toBe('mine_block_at(18, 60, -34)')
     expect(renderAction({ action: 'chat', message: 'hi' })).toBe('chat("hi")')
     expect(renderAction({ action: 'done', summary: 'got it' })).toBe('done("got it")')
+    expect(renderAction({ action: 'give_up', reason: 'no pickaxe' })).toBe('give_up("no pickaxe")')
   })
 })
 
@@ -1247,6 +1294,8 @@ export const renderAction = (a: ActionRequest): string => {
       return `chat(${JSON.stringify(a.message)})`
     case 'done':
       return `done(${JSON.stringify(a.summary)})`
+    case 'give_up':
+      return `give_up(${JSON.stringify(a.reason)})`
   }
 }
 
@@ -1277,6 +1326,8 @@ export const renderOutcome = (o: StepOutcome): string => {
       return 'your reply could not be used'
     case 'done':
       return 'goal declared complete'
+    case 'gave_up':
+      return 'goal declared unreachable'
   }
 }
 
@@ -1347,11 +1398,7 @@ export const renderPrompt = (
 }
 ```
 
-- [ ] **Step 5: Update the spec's status table**
-
-In `docs/superpowers/specs/2026-09-07-track-b-planning-loop-design.md` §7.2, add `llm_error` to the `GoalOutcome` union's second branch and to the status table, with the cause: *"The model could not be reached or returned an error. Keeps the never-throws property true for an unreachable endpoint."*
-
-- [ ] **Step 6: Run tests and typecheck**
+- [ ] **Step 5: Run tests and typecheck**
 
 ```bash
 npx vitest run --project unit packages/agent
@@ -1360,10 +1407,10 @@ npm run typecheck
 
 Expected: all green.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add packages/agent docs/superpowers/specs/2026-09-07-track-b-planning-loop-design.md
+git add packages/agent
 git commit -m "Add the run vocabulary and prompt rendering
 
 The prompt is rebuilt from scratch each turn rather than appended to a
@@ -1378,15 +1425,395 @@ The contract deliberately reports that as ok rather than a failure, so the
 model has to see the distinction or it cannot tell 'mined and got it' from
 'mined and lost it'.
 
-Also adds a seventh goal status, llm_error, and updates spec §7.2 to match.
-The table listed six and none covered an unreachable model — which would
-have forced a throw and broken the spec's own 'failure is a returned value'
-rule the first time Ollama was down."
+Two statuses carry their weight quietly. gave_up is how an impossible goal
+ends with the model's own reason attached, rather than grinding to the step
+budget where 'impossible' and 'the loop malfunctioned' look identical. And
+llm_error is what keeps 'failure is a returned value' true when the endpoint
+is down — without it an unreachable model is the one thing that has to throw."
 ```
 
 ---
 
-## Task 5: Dispatch an action to the executor
+## Task 5: The real Ollama client and a live probe
+
+
+Nothing here is exercised by `npm test` beyond its request shape. That is the point: no test opens a socket.
+
+**Files:**
+- Create: `packages/agent/src/ollama.ts`
+- Create: `packages/agent/src/probe.ts`
+- Test: `packages/agent/test/ollama.test.ts`
+
+**Interfaces:**
+- Consumes: `ChatRequest`, `LlmClient` (Task 2); `ACTION_SCHEMA` (Task 1); `decode` (Task 3); `renderPrompt` (Task 4).
+- Produces: `OllamaClient`, `OllamaOptions`, `DEFAULT_HOST`, `DEFAULT_MODEL`. Tasks 6 and 9 depend on `OllamaClient`.
+
+- [ ] **Step 1: Write the failing tests**
+
+`packages/agent/test/ollama.test.ts`:
+
+```ts
+import { describe, it, expect } from 'vitest'
+import { OllamaClient } from '../src/ollama.js'
+import { ACTION_SCHEMA } from '../src/actions.js'
+
+const messages = [{ role: 'user' as const, content: 'hello' }]
+
+const recordingFetch = (body: unknown, status = 200) => {
+  const seen: { url: string; init: RequestInit }[] = []
+  const impl = (async (url: unknown, init: unknown) => {
+    seen.push({ url: String(url), init: init as RequestInit })
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      statusText: 'Test',
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+    }
+  }) as unknown as typeof fetch
+  return { impl, seen }
+}
+
+const parseBody = (init: RequestInit): Record<string, unknown> =>
+  JSON.parse(String(init.body)) as Record<string, unknown>
+
+describe('OllamaClient request shape', () => {
+  it('posts to /api/chat on the configured host', async () => {
+    const { impl, seen } = recordingFetch({ message: { content: '{}' } })
+    await new OllamaClient({ host: 'http://box:11434/', fetchImpl: impl }).chat({ messages })
+    expect(seen[0]?.url).toBe('http://box:11434/api/chat')
+    expect(seen[0]?.init.method).toBe('POST')
+  })
+
+  // Design §5.1 and design spec §8.1: qwen3 advertises a thinking mode whose
+  // traces inflate latency and wrap JSON in prose. Temperature 0 because this
+  // is classification over a fixed menu, not generation.
+  it('disables thinking, streaming and sampling', async () => {
+    const { impl, seen } = recordingFetch({ message: { content: '{}' } })
+    await new OllamaClient({ model: 'qwen3:14b', fetchImpl: impl }).chat({ messages })
+    const body = parseBody(seen[0]!.init)
+    expect(body['model']).toBe('qwen3:14b')
+    expect(body['stream']).toBe(false)
+    expect(body['think']).toBe(false)
+    expect(body['options']).toEqual({ temperature: 0 })
+  })
+
+  it('sends the schema as `format` when one is given, and omits it otherwise', async () => {
+    const withSchema = recordingFetch({ message: { content: '{}' } })
+    await new OllamaClient({ fetchImpl: withSchema.impl }).chat({ messages, schema: ACTION_SCHEMA })
+    expect(parseBody(withSchema.seen[0]!.init)['format']).toEqual(ACTION_SCHEMA)
+
+    const without = recordingFetch({ message: { content: '{}' } })
+    await new OllamaClient({ fetchImpl: without.impl }).chat({ messages })
+    expect(parseBody(without.seen[0]!.init)).not.toHaveProperty('format')
+  })
+
+  it('forwards the abort signal to fetch', async () => {
+    const { impl, seen } = recordingFetch({ message: { content: '{}' } })
+    const ac = new AbortController()
+    await new OllamaClient({ fetchImpl: impl }).chat({ messages, signal: ac.signal })
+    expect(seen[0]?.init.signal).toBe(ac.signal)
+  })
+
+  it('returns the reply content', async () => {
+    const { impl } = recordingFetch({ message: { content: '{"action":"done","summary":"ok"}' } })
+    expect(await new OllamaClient({ fetchImpl: impl }).chat({ messages })).toBe(
+      '{"action":"done","summary":"ok"}',
+    )
+  })
+
+  it('returns an empty string when the server sends no content', async () => {
+    const { impl } = recordingFetch({ message: {} })
+    expect(await new OllamaClient({ fetchImpl: impl }).chat({ messages })).toBe('')
+  })
+
+  it('throws with the status and body on a non-2xx response', async () => {
+    const { impl } = recordingFetch({ error: 'model not found' }, 404)
+    await expect(new OllamaClient({ fetchImpl: impl }).chat({ messages })).rejects.toThrow(
+      /404.*model not found/s,
+    )
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `npx vitest run --project unit packages/agent/test/ollama.test.ts`
+Expected: FAIL — `Failed to resolve import "../src/ollama.js"`.
+
+- [ ] **Step 3: Write `ollama.ts`**
+
+```ts
+import type { ChatRequest, LlmClient } from './llm.js'
+
+export const DEFAULT_HOST = 'http://127.0.0.1:11434'
+export const DEFAULT_MODEL = 'qwen3:14b'
+
+export interface OllamaOptions {
+  /** Defaults to `$OLLAMA_HOST`, then {@link DEFAULT_HOST}. */
+  readonly host?: string
+  /** Defaults to `$MINEBOT_MODEL`, then {@link DEFAULT_MODEL}. */
+  readonly model?: string
+  readonly temperature?: number
+  readonly think?: boolean
+  /** Injected so the request shape can be asserted without a socket. */
+  readonly fetchImpl?: typeof fetch
+}
+
+interface OllamaChatResponse {
+  message?: { content?: string }
+}
+
+/**
+ * The only module in this package that opens a socket, and the only one no
+ * test exercises end to end — there is no reachable endpoint (design §2).
+ * `probe.ts` is where it meets a real model.
+ */
+export class OllamaClient implements LlmClient {
+  readonly host: string
+  readonly model: string
+
+  private readonly temperature: number
+  private readonly think: boolean
+  private readonly fetchImpl: typeof fetch
+
+  constructor(opts: OllamaOptions = {}) {
+    this.host = (opts.host ?? process.env['OLLAMA_HOST'] ?? DEFAULT_HOST).replace(/\/+$/, '')
+    this.model = opts.model ?? process.env['MINEBOT_MODEL'] ?? DEFAULT_MODEL
+    this.temperature = opts.temperature ?? 0
+    // Thinking off: its traces inflate latency and wrap JSON in prose, which
+    // fights constrained output. Design spec §8.1 recommends starting here.
+    this.think = opts.think ?? false
+    this.fetchImpl = opts.fetchImpl ?? fetch
+  }
+
+  buildBody(req: ChatRequest): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+      stream: false,
+      think: this.think,
+      options: { temperature: this.temperature },
+    }
+    if (req.schema !== undefined) body['format'] = req.schema
+    return body
+  }
+
+  async chat(req: ChatRequest): Promise<string> {
+    const res = await this.fetchImpl(`${this.host}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(this.buildBody(req)),
+      signal: req.signal,
+    })
+
+    if (!res.ok) {
+      const detail = (await res.text()).slice(0, 300)
+      throw new Error(`Ollama ${res.status} ${res.statusText}: ${detail}`)
+    }
+
+    const parsed = (await res.json()) as OllamaChatResponse
+    return parsed.message?.content ?? ''
+  }
+}
+```
+
+- [ ] **Step 4: Write `probe.ts`**
+
+This is the script that answers spec §12's first open question when an endpoint exists.
+
+```ts
+/**
+ * Ask a real model for one action, N times, and report how often the reply
+ * decoded. Run by hand — never part of `npm test`:
+ *
+ *   OLLAMA_HOST=http://box:11434 npm run agent:probe -- 10
+ *
+ * Spec §12 question 1 ("does qwen3:14b actually hold the format?") is answered
+ * here and nowhere else.
+ */
+import type { WorldSnapshot } from '@minebot/contract'
+import { decode } from './decide.js'
+import { OllamaClient } from './ollama.js'
+import { renderPrompt } from './prompt.js'
+import { ACTION_SCHEMA } from './actions.js'
+
+const SNAPSHOT: WorldSnapshot = Object.freeze({
+  takenAt: Date.now(),
+  self: {
+    position: { x: 12, y: 64, z: -30 },
+    health: 20,
+    food: 18,
+    dimension: 'overworld',
+    onGround: true,
+    inventory: [{ name: 'stone_pickaxe', count: 1, slot: 0 }],
+    heldItem: { name: 'stone_pickaxe', count: 1, slot: 0 },
+  },
+  nearbyEntities: [],
+})
+
+const attempts = Number(process.argv[2] ?? '5')
+
+const main = async (): Promise<void> => {
+  const client = new OllamaClient()
+  console.log(`Probing ${client.host} with ${client.model}, ${attempts} attempt(s)\n`)
+
+  const messages = renderPrompt('get me some coal', SNAPSHOT, [])
+  let decoded = 0
+  const latencies: number[] = []
+
+  for (let i = 1; i <= attempts; i++) {
+    const started = Date.now()
+    try {
+      const reply = await client.chat({ messages, schema: ACTION_SCHEMA })
+      const elapsed = Date.now() - started
+      latencies.push(elapsed)
+      const result = decode(reply)
+      if (result.ok) decoded += 1
+      console.log(
+        `${i}. ${elapsed}ms  ${result.ok ? 'OK  ' + JSON.stringify(result.action) : 'REJECTED (' + result.error.kind + ') ' + result.error.detail}`,
+      )
+      if (!result.ok) console.log(`   raw: ${reply.slice(0, 200)}`)
+    } catch (e) {
+      console.log(`${i}. ERROR ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  const median =
+    latencies.length === 0
+      ? 0
+      : [...latencies].sort((a, b) => a - b)[Math.floor(latencies.length / 2)] ?? 0
+  console.log(`\nDecoded ${decoded}/${attempts}. Median latency ${median}ms.`)
+  if (decoded < attempts) {
+    console.log('Record the failures in spec §12 — that is what the question is for.')
+  }
+}
+
+await main()
+```
+
+- [ ] **Step 5: Add the script and run everything**
+
+In root `package.json` scripts, add:
+
+```json
+"agent:probe": "tsx packages/agent/src/probe.ts"
+```
+
+```bash
+npx vitest run --project unit packages/agent
+npm run typecheck
+OLLAMA_HOST=http://192.168.1.21:11434 npm run agent:probe -- 10
+```
+
+Expected: unit tests green, clean typecheck, and a probe reporting **10/10 decoded at roughly 350–450ms median**. Those are the numbers spec §2.1 measured; a materially worse result means the prompt or the schema drifted from what was measured, and that is worth chasing before building the loop on top of it.
+
+The first request will be slower — around 2.9s — while the model loads. That is expected and is why the probe reports a median.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/agent package.json
+git commit -m "Add the Ollama client and a live probe script
+
+Tests assert the request shape and nothing else — fetch is injected, no
+socket opens. That is deliberate rather than a shortcut: there is no
+reachable endpoint, and a test that pretends otherwise would be the kind of
+fixture that passes without doing anything.
+
+think:false and temperature:0 are both deliberate. Design spec §8.1 flags
+qwen3's thinking traces as inflating latency and wrapping JSON in prose,
+which fights constrained output; choosing from a fixed menu is
+classification, not generation.
+
+probe.ts is where spec §12's first open question — does qwen3:14b actually
+hold the format — gets answered, and it is the only place. It reports a
+decode rate and median latency rather than a pass/fail, because the useful
+answer is a number."
+```
+
+---
+
+## Task 6: Measure the model before building on the prompt
+
+
+`probe.ts` now exists and the endpoint is reachable, so the prompt and menu stop being guesses here rather than at the end. Spec §2.1 measured a terse menu changing one turn's answer in 5 of 5 samples — prompt text is behavioural code, and every task after this one is built on top of it.
+
+**Files:**
+- Modify (only if the measurements demand it): `packages/agent/src/actions.ts`, `packages/agent/src/prompt.ts`
+- Modify: `docs/superpowers/specs/2026-09-07-track-b-planning-loop-design.md`
+
+**Interfaces:**
+- Consumes: `OllamaClient`, `probe.ts` (Task 5); `ACTION_MENU`, `renderPrompt` (Tasks 1, 4).
+- Produces: no code by default. A confirmed baseline, and any menu wording changes the evidence justifies.
+
+- [ ] **Step 1: Reproduce the recorded baseline**
+
+```bash
+OLLAMA_HOST=http://192.168.1.21:11434 npm run agent:probe -- 10
+```
+
+Expected: **10/10 decoded**, median **350–450ms**, and the chosen action is `find_blocks` every time. Spec §2.1 recorded 25/25 at 370ms across five scenarios.
+
+If the decode rate is below 10/10, stop and investigate before continuing. Every later task assumes the model returns usable actions; building the loop on top of a model that does not is how you end up debugging the loop for a prompt bug.
+
+- [ ] **Step 2: Probe the four turns the baseline covered, not just the first**
+
+`probe.ts` as written sends one turn — the empty-history one. Temporarily extend its `SNAPSHOT`/history to cover the other three from spec §2.1, run each 5 times, and record which action came back:
+
+| Scenario | Prompt history | Expected |
+|---|---|---|
+| after a search | `1. find_blocks(coal_ore within 32) -> 1 found: coal_ore at (18, 60, -34), 7.9 away` | `mine_block_at` |
+| after `missing_tool`, inventory empty | that, plus `2. mine_block_at(18, 60, -34) -> FAILED (missing_tool): no pickaxe in inventory` | `give_up` or `chat` |
+| goal met | `2. mine_block_at(18, 60, -34) -> OK (drop collected: true)` and `coal x1` in inventory | `done` |
+
+Revert the temporary edit afterwards. This is a measurement, not a feature.
+
+- [ ] **Step 3: Check whether `give_up` is reachable at all**
+
+The scenario above is the reason `give_up` exists. When spec §2.1 measured it — before `give_up` was in the menu — the model chose `chat("I need a pickaxe to mine coal ore")` 5 of 5. With a better option available it should now take it.
+
+If it still never chooses `give_up`, the menu wording is not carrying its meaning. Try making the menu line explicit that chat does not end the run:
+
+```
+'give_up             {"action":"give_up","reason":"no pickaxe and no way to get one"}',
+'                    The goal cannot be reached and you cannot fix it. Say why.',
+'                    This ends the run. Prefer this over chatting about being stuck.',
+```
+
+Re-probe after any such change. **A menu edit is a behavioural change and is not verified by the unit tests** — they assert the menu documents every action, not that the model reads it the way you intended.
+
+- [ ] **Step 4: Record what you measured**
+
+Update spec §2.1's table and findings with the numbers from this run, and close or sharpen §12's open questions 2 and 3 if the evidence settles them. If a menu change went in, say what it changed and by how much — "5/5 `chat` became 5/5 `give_up`" is the useful form.
+
+Do **not** claim an improvement you did not measure. An unmeasured prompt tweak is a guess wearing evidence's clothes.
+
+- [ ] **Step 5: Confirm nothing regressed**
+
+```bash
+npm test
+npm run typecheck
+```
+
+Expected: green. Menu edits change `ACTION_MENU`, which Task 1's tests assert against — if they fail, the menu no longer documents every action.
+
+- [ ] **Step 6: Commit**
+
+Only if something changed. If the baseline reproduced and no wording moved, there is nothing to commit and that is a good outcome — say so and move on.
+
+```bash
+git add packages/agent docs/superpowers/specs/2026-09-07-track-b-planning-loop-design.md
+git commit -m "Tune the action menu against measured model behaviour
+
+<Say which scenario changed, from what to what, over how many samples.
+A menu edit is a behavioural change that no unit test covers, so the
+measurement is the only evidence it worked.>"
+```
+
+---
+## Task 7: Dispatch an action to the executor
+
 
 **Files:**
 - Create: `packages/agent/src/dispatch.ts`
@@ -1394,7 +1821,7 @@ rule the first time Ollama was down."
 
 **Interfaces:**
 - Consumes: `ActionRequest`, `positionOf` (Task 1); `StepOutcome` (Task 4); `BotExecutor`, `ok` from `@minebot/contract`.
-- Produces: `dispatch(action, executor, signal): Promise<StepOutcome>`. Task 6 depends on it.
+- Produces: `dispatch(action, executor, signal): Promise<StepOutcome>`. Task 8 depends on it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1474,11 +1901,14 @@ describe('dispatch', () => {
     expect(m.calls.at(-1)).toEqual({ name: 'chat', args: ['hello'] })
   })
 
-  it('reports done without touching the executor', async () => {
+  it('reports the two terminal actions without touching the executor', async () => {
     const m = await connected()
     const before = m.calls.length
     expect(await dispatch({ action: 'done', summary: 'finished' }, m, live())).toEqual({
       kind: 'done',
+    })
+    expect(await dispatch({ action: 'give_up', reason: 'no pickaxe' }, m, live())).toEqual({
+      kind: 'gave_up',
     })
     expect(m.calls).toHaveLength(before)
   })
@@ -1565,6 +1995,9 @@ export async function dispatch(
 
     case 'done':
       return { kind: 'done' }
+
+    case 'give_up':
+      return { kind: 'gave_up' }
   }
 }
 ```
@@ -1597,15 +2030,16 @@ contract's findBlocks doc comment exists to prevent."
 
 ---
 
-## Task 6: The goal loop
+## Task 8: The goal loop
+
 
 **Files:**
 - Create: `packages/agent/src/loop.ts`
 - Test: `packages/agent/test/loop.test.ts`
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–5.
-- Produces: `runGoal(goal, opts): Promise<GoalOutcome>`, `RunGoalOptions`, `DEFAULT_MAX_STEPS`, `DEFAULT_STUCK_THRESHOLD`, `DEFAULT_MAX_UNDECODABLE`. Tasks 7 and 8 depend on `runGoal`.
+- Consumes: everything from Tasks 1–4 and 7.
+- Produces: `runGoal(goal, opts): Promise<GoalOutcome>`, `RunGoalOptions`, `DEFAULT_MAX_STEPS`, `DEFAULT_STUCK_THRESHOLD`, `DEFAULT_MAX_UNDECODABLE`. Task 9 depends on `runGoal`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1696,6 +2130,23 @@ describe('runGoal — the guards', () => {
     const m = await connected()
     const out = await run(m, new FakeLlmClient(['junk', 'junk again', DONE]))
     expect(out.status).toBe('done')
+  })
+
+  // Probing showed the model handed an impossible goal chatting about it and
+  // then grinding to the budget, where "impossible" and "the loop
+  // malfunctioned" are the same outcome. give_up separates them and carries
+  // the reason (design §4.0).
+  it('ends on give_up, carrying the model\'s reason, without spending the budget', async () => {
+    const m = await connected({ inventory: [] })
+    const llm = new FakeLlmClient([
+      '{"action":"give_up","reason":"no pickaxe and no way to get one"}',
+    ])
+    const out = await run(m, llm, { maxSteps: 16 })
+
+    expect(out.status).toBe('gave_up')
+    expect(out.status !== 'done' && out.detail).toBe('no pickaxe and no way to get one')
+    expect(out.steps).toHaveLength(1)
+    expect(llm.requests).toHaveLength(1)
   })
 })
 
@@ -1807,6 +2258,8 @@ const outcomeSignature = (o: StepOutcome): string => {
       return 'undecodable'
     case 'done':
       return 'done'
+    case 'gave_up':
+      return 'gave_up'
   }
 }
 
@@ -1901,6 +2354,13 @@ export async function runGoal(goal: string, opts: RunGoalOptions): Promise<GoalO
         return { status: 'done', summary: decided.action.summary, steps }
       }
 
+      // The model's own verdict that the goal is unreachable, carrying its
+      // reason. Distinguishable from budget_exhausted, which is the loop
+      // running out of patience rather than the model reaching a conclusion.
+      if (decided.action.action === 'give_up') {
+        return { status: 'gave_up', detail: decided.action.reason, steps }
+      }
+
       // The caller aborting ends the goal. An `interrupted` result *without* an
       // outer abort is the reflex layer preempting: fall through, re-observe,
       // and decide again from fresh state. Never retry the interrupted action
@@ -1970,316 +2430,8 @@ report disconnected rather than letting an exception escape runGoal."
 
 ---
 
-## Task 7: The real Ollama client and a live probe
+## Task 9: The deliverable script and documentation
 
-Nothing here is exercised by `npm test` beyond its request shape. That is the point: no test opens a socket.
-
-**Files:**
-- Create: `packages/agent/src/ollama.ts`
-- Create: `packages/agent/src/probe.ts`
-- Test: `packages/agent/test/ollama.test.ts`
-
-**Interfaces:**
-- Consumes: `ChatRequest`, `ChatReply`, `LlmClient` (Task 2); `ACTION_SCHEMA` (Task 1); `decode` (Task 3); `renderPrompt` (Task 4).
-- Produces: `OllamaClient`, `OllamaOptions`, `DEFAULT_HOST`, `DEFAULT_MODEL`. Task 8 depends on `OllamaClient`.
-
-- [ ] **Step 1: Write the failing tests**
-
-`packages/agent/test/ollama.test.ts`:
-
-```ts
-import { describe, it, expect } from 'vitest'
-import { OllamaClient } from '../src/ollama.js'
-import { ACTION_SCHEMA } from '../src/actions.js'
-
-const messages = [{ role: 'user' as const, content: 'hello' }]
-
-const recordingFetch = (body: unknown, status = 200) => {
-  const seen: { url: string; init: RequestInit }[] = []
-  const impl = (async (url: unknown, init: unknown) => {
-    seen.push({ url: String(url), init: init as RequestInit })
-    return {
-      ok: status >= 200 && status < 300,
-      status,
-      statusText: 'Test',
-      json: async () => body,
-      text: async () => JSON.stringify(body),
-    }
-  }) as unknown as typeof fetch
-  return { impl, seen }
-}
-
-const parseBody = (init: RequestInit): Record<string, unknown> =>
-  JSON.parse(String(init.body)) as Record<string, unknown>
-
-describe('OllamaClient request shape', () => {
-  it('posts to /api/chat on the configured host', async () => {
-    const { impl, seen } = recordingFetch({ message: { content: '{}' } })
-    await new OllamaClient({ host: 'http://box:11434/', fetchImpl: impl }).chat({ messages })
-    expect(seen[0]?.url).toBe('http://box:11434/api/chat')
-    expect(seen[0]?.init.method).toBe('POST')
-  })
-
-  // Design §5.1 and design spec §8.1: qwen3 advertises a thinking mode whose
-  // traces inflate latency and wrap JSON in prose. Temperature 0 because this
-  // is classification over a fixed menu, not generation.
-  it('disables thinking, streaming and sampling', async () => {
-    const { impl, seen } = recordingFetch({ message: { content: '{}' } })
-    await new OllamaClient({ model: 'qwen3:14b', fetchImpl: impl }).chat({ messages })
-    const body = parseBody(seen[0]!.init)
-    expect(body['model']).toBe('qwen3:14b')
-    expect(body['stream']).toBe(false)
-    expect(body['think']).toBe(false)
-    expect(body['options']).toEqual({ temperature: 0 })
-  })
-
-  it('sends the schema as `format` when one is given, and omits it otherwise', async () => {
-    const withSchema = recordingFetch({ message: { content: '{}' } })
-    await new OllamaClient({ fetchImpl: withSchema.impl }).chat({ messages, schema: ACTION_SCHEMA })
-    expect(parseBody(withSchema.seen[0]!.init)['format']).toEqual(ACTION_SCHEMA)
-
-    const without = recordingFetch({ message: { content: '{}' } })
-    await new OllamaClient({ fetchImpl: without.impl }).chat({ messages })
-    expect(parseBody(without.seen[0]!.init)).not.toHaveProperty('format')
-  })
-
-  it('forwards the abort signal to fetch', async () => {
-    const { impl, seen } = recordingFetch({ message: { content: '{}' } })
-    const ac = new AbortController()
-    await new OllamaClient({ fetchImpl: impl }).chat({ messages, signal: ac.signal })
-    expect(seen[0]?.init.signal).toBe(ac.signal)
-  })
-
-  it('returns the reply content', async () => {
-    const { impl } = recordingFetch({ message: { content: '{"action":"done","summary":"ok"}' } })
-    const reply = await new OllamaClient({ fetchImpl: impl }).chat({ messages })
-    expect(reply.content).toBe('{"action":"done","summary":"ok"}')
-    expect(reply.toolCalls).toBeUndefined()
-  })
-
-  it('surfaces tool calls when the server returns them', async () => {
-    const { impl } = recordingFetch({
-      message: { content: '', tool_calls: [{ function: { name: 'move_to', arguments: { x: 1 } } }] },
-    })
-    const reply = await new OllamaClient({ fetchImpl: impl }).chat({ messages })
-    expect(reply.toolCalls).toEqual([{ name: 'move_to', arguments: { x: 1 } }])
-  })
-
-  it('throws with the status and body on a non-2xx response', async () => {
-    const { impl } = recordingFetch({ error: 'model not found' }, 404)
-    await expect(new OllamaClient({ fetchImpl: impl }).chat({ messages })).rejects.toThrow(
-      /404.*model not found/s,
-    )
-  })
-})
-```
-
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `npx vitest run --project unit packages/agent/test/ollama.test.ts`
-Expected: FAIL — `Failed to resolve import "../src/ollama.js"`.
-
-- [ ] **Step 3: Write `ollama.ts`**
-
-```ts
-import type { ChatReply, ChatRequest, LlmClient } from './llm.js'
-
-export const DEFAULT_HOST = 'http://127.0.0.1:11434'
-export const DEFAULT_MODEL = 'qwen3:14b'
-
-export interface OllamaOptions {
-  /** Defaults to `$OLLAMA_HOST`, then {@link DEFAULT_HOST}. */
-  readonly host?: string
-  /** Defaults to `$MINEBOT_MODEL`, then {@link DEFAULT_MODEL}. */
-  readonly model?: string
-  readonly temperature?: number
-  readonly think?: boolean
-  /** Injected so the request shape can be asserted without a socket. */
-  readonly fetchImpl?: typeof fetch
-}
-
-interface OllamaChatResponse {
-  message?: {
-    content?: string
-    tool_calls?: { function?: { name?: string; arguments?: unknown } }[]
-  }
-}
-
-/**
- * The only module in this package that opens a socket, and the only one no
- * test exercises end to end — there is no reachable endpoint (design §2).
- * `probe.ts` is where it meets a real model.
- */
-export class OllamaClient implements LlmClient {
-  readonly host: string
-  readonly model: string
-
-  private readonly temperature: number
-  private readonly think: boolean
-  private readonly fetchImpl: typeof fetch
-
-  constructor(opts: OllamaOptions = {}) {
-    this.host = (opts.host ?? process.env['OLLAMA_HOST'] ?? DEFAULT_HOST).replace(/\/+$/, '')
-    this.model = opts.model ?? process.env['MINEBOT_MODEL'] ?? DEFAULT_MODEL
-    this.temperature = opts.temperature ?? 0
-    // Thinking off: its traces inflate latency and wrap JSON in prose, which
-    // fights constrained output. Design spec §8.1 recommends starting here.
-    this.think = opts.think ?? false
-    this.fetchImpl = opts.fetchImpl ?? fetch
-  }
-
-  buildBody(req: ChatRequest): Record<string, unknown> {
-    const body: Record<string, unknown> = {
-      model: this.model,
-      messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
-      stream: false,
-      think: this.think,
-      options: { temperature: this.temperature },
-    }
-    if (req.schema !== undefined) body['format'] = req.schema
-    return body
-  }
-
-  async chat(req: ChatRequest): Promise<ChatReply> {
-    const res = await this.fetchImpl(`${this.host}/api/chat`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(this.buildBody(req)),
-      signal: req.signal,
-    })
-
-    if (!res.ok) {
-      const detail = (await res.text()).slice(0, 300)
-      throw new Error(`Ollama ${res.status} ${res.statusText}: ${detail}`)
-    }
-
-    const parsed = (await res.json()) as OllamaChatResponse
-    const toolCalls = parsed.message?.tool_calls?.map((c) => ({
-      name: c.function?.name ?? '',
-      arguments: c.function?.arguments,
-    }))
-
-    return toolCalls && toolCalls.length > 0
-      ? { content: parsed.message?.content ?? '', toolCalls }
-      : { content: parsed.message?.content ?? '' }
-  }
-}
-```
-
-- [ ] **Step 4: Write `probe.ts`**
-
-This is the script that answers spec §12's first open question when an endpoint exists.
-
-```ts
-/**
- * Ask a real model for one action, N times, and report how often the reply
- * decoded. Run by hand — never part of `npm test`:
- *
- *   OLLAMA_HOST=http://box:11434 npm run agent:probe -- 10
- *
- * Spec §12 question 1 ("does qwen3:14b actually hold the format?") is answered
- * here and nowhere else.
- */
-import type { WorldSnapshot } from '@minebot/contract'
-import { decode } from './decide.js'
-import { OllamaClient } from './ollama.js'
-import { renderPrompt } from './prompt.js'
-import { ACTION_SCHEMA } from './actions.js'
-
-const SNAPSHOT: WorldSnapshot = Object.freeze({
-  takenAt: Date.now(),
-  self: {
-    position: { x: 12, y: 64, z: -30 },
-    health: 20,
-    food: 18,
-    dimension: 'overworld',
-    onGround: true,
-    inventory: [{ name: 'stone_pickaxe', count: 1, slot: 0 }],
-    heldItem: { name: 'stone_pickaxe', count: 1, slot: 0 },
-  },
-  nearbyEntities: [],
-})
-
-const attempts = Number(process.argv[2] ?? '5')
-
-const main = async (): Promise<void> => {
-  const client = new OllamaClient()
-  console.log(`Probing ${client.host} with ${client.model}, ${attempts} attempt(s)\n`)
-
-  const messages = renderPrompt('get me some coal', SNAPSHOT, [])
-  let decoded = 0
-  const latencies: number[] = []
-
-  for (let i = 1; i <= attempts; i++) {
-    const started = Date.now()
-    try {
-      const reply = await client.chat({ messages, schema: ACTION_SCHEMA })
-      const elapsed = Date.now() - started
-      latencies.push(elapsed)
-      const result = decode(reply.content)
-      if (result.ok) decoded += 1
-      console.log(
-        `${i}. ${elapsed}ms  ${result.ok ? 'OK  ' + JSON.stringify(result.action) : 'REJECTED (' + result.error.kind + ') ' + result.error.detail}`,
-      )
-      if (!result.ok) console.log(`   raw: ${reply.content.slice(0, 200)}`)
-    } catch (e) {
-      console.log(`${i}. ERROR ${e instanceof Error ? e.message : String(e)}`)
-    }
-  }
-
-  const median =
-    latencies.length === 0
-      ? 0
-      : [...latencies].sort((a, b) => a - b)[Math.floor(latencies.length / 2)] ?? 0
-  console.log(`\nDecoded ${decoded}/${attempts}. Median latency ${median}ms.`)
-  if (decoded < attempts) {
-    console.log('Record the failures in spec §12 — that is what the question is for.')
-  }
-}
-
-await main()
-```
-
-- [ ] **Step 5: Add the script and run everything**
-
-In root `package.json` scripts, add:
-
-```json
-"agent:probe": "tsx packages/agent/src/probe.ts"
-```
-
-```bash
-npx vitest run --project unit packages/agent
-npm run typecheck
-```
-
-Expected: all green. Do **not** run `agent:probe` — there is no endpoint. Its first real run is the moment spec §12 question 1 gets an answer.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add packages/agent package.json
-git commit -m "Add the Ollama client and a live probe script
-
-Tests assert the request shape and nothing else — fetch is injected, no
-socket opens. That is deliberate rather than a shortcut: there is no
-reachable endpoint, and a test that pretends otherwise would be the kind of
-fixture that passes without doing anything.
-
-think:false and temperature:0 are both deliberate. Design spec §8.1 flags
-qwen3's thinking traces as inflating latency and wrapping JSON in prose,
-which fights constrained output; choosing from a fixed menu is
-classification, not generation.
-
-probe.ts is where spec §12's first open question — does qwen3:14b actually
-hold the format — gets answered, and it is the only place. It reports a
-decode rate and median latency rather than a pass/fail, because the useful
-answer is a number."
-```
-
----
-
-## Task 8: The deliverable script and documentation
 
 The phase plan's stated Track B deliverable: *"a script that takes a fake game state and produces a validated action, with zero dependency on a live Minecraft connection."*
 
@@ -2291,7 +2443,7 @@ The phase plan's stated Track B deliverable: *"a script that takes a fake game s
 - Modify: `CLAUDE.md`
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–7.
+- Consumes: everything from Tasks 1–8.
 - Produces: the package's public surface.
 
 - [ ] **Step 1: Write `index.ts`**
@@ -2301,7 +2453,7 @@ export { ACTION_MENU, ACTION_NAMES, ACTION_SCHEMA, positionOf } from './actions.
 export type { ActionName, ActionRequest } from './actions.js'
 
 export { abortError, isAbortError } from './llm.js'
-export type { ChatMessage, ChatReply, ChatRequest, LlmClient, ToolCall } from './llm.js'
+export type { ChatMessage, ChatRequest, LlmClient } from './llm.js'
 
 export { FakeLlmClient } from './fake-llm.js'
 export type { FakeLlmOptions } from './fake-llm.js'
@@ -2407,7 +2559,7 @@ Three edits:
 
 1. In the packages block, change `└── agent/           (not yet built) The LLM planning loop.` to `└── agent/           The LLM planning loop. Deps: contract, mock-executor.`
 2. In the Commands table, add two rows: `npm run agent:demo` — "Track B deliverable: the loop against a fake model and a mock world" — Needs a server? **No**; and `npm run agent:probe` — "Ask a real model for one action, N times; report the decode rate" — Needs a server? **No (needs Ollama)**.
-3. In the Roadmap table, leave the phase rows alone but add a line beneath it: *"Track B's planning loop is built and tested against the mock; Phase 3 is the swap."*
+3. Under the Roadmap table, add: *"Track B's planning loop is built and tested against the mock and measured against the real model. Phase 3 is the swap, and with Phase 2 complete nothing blocks it."* Also update the **Status** line at the top of the README from "Phase 2 complete" to note that the planning loop now exists but has not yet been wired to the real executor — Phase 3 is that step, and it is not done by this PR.
 
 Also add a short section after "The cross-implementation test suite":
 
@@ -2473,7 +2625,8 @@ Vec3 target form was added to prevent."
 
 ---
 
-## Task 9: Open the pull request
+## Task 10: Open the pull request
+
 
 - [ ] **Step 1: Confirm the whole suite is green from a clean state**
 
@@ -2530,11 +2683,24 @@ the transport is behind an `LlmClient` interface with a scripted fake as the
 only implementation any test uses. `npm test` already never talked to Minecraft;
 now it never talks to a model either.
 
-## What this cannot tell you
+## What the model actually does
 
-Whether `qwen3:14b` actually holds the format. There is no endpoint to measure
-against. `npm run agent:probe` answers it in one run when there is one, and spec
-§12 carries the question openly rather than pretending it is settled.
+Measured against `qwen3:14b`, temperature 0, five samples per cell (spec §2.1):
+**25/25 replies decoded at a 370ms median**, against 20/25 and 469ms for native
+tool-calling — which is why there is no tool-calling implementation here. Every
+one of those five failures was the terminal `done` action, so a loop built on
+tool-calling never terminates cleanly.
+
+Thinking mode costs 20× latency and makes decisions worse, settling design spec
+§8.1 as well.
+
+Two caveats stated rather than buried. Temperature 0 makes the model
+near-deterministic, so `5/5` is consistency, not robustness. And the menu wording
+turned out to be load-bearing — a terse rewrite changed one turn's answer in 5 of
+5 samples — so prompt edits need a re-probe, not just a passing test suite.
+
+Spec §12 keeps what is still unknown, including one real defect: given
+`collected: false` the model re-mines the block it just destroyed.
 
 ## Testing
 
@@ -2548,8 +2714,18 @@ dividend of the four design-spec §9 changes that landed at the start of Phase 2
 
 ## Note for Track A
 
-Phase 3's end-to-end run is blocked on Phase 2's executor half: `mineBlock` still
-returns `fail('internal', 'mineBlock arrives in Phase 2')` and
-`mineflayer-pathfinder` is not a dependency yet. The contract changes landed;
-tasks 5–13 of the Phase 2 plan did not.
+Nothing here blocks on you, and nothing here changes anything you own. Phase 2
+landing (#11) means the coal trace is now executable end to end — every action
+this menu exposes is implemented on the real executor — so **Phase 3 is unblocked
+and is the next joint step.** It is deliberately not attempted in this PR.
+
+Two things worth knowing when we do it:
+
+- The model mishandles `collected: false`, re-mining the block it just destroyed
+  rather than walking to the drop (5 of 5 samples). Phase 2 measured that mining
+  genuinely does not collect on its own, so a first real run will probably hit
+  this. It looks like a prompt-wording fix.
+- The reflex layer still does not exist, so this PR's `interrupted` handling is
+  exercised only by injection against the mock. That verifies the loop's half of
+  the §3.5 protocol, not the arbiter's.
 ```
