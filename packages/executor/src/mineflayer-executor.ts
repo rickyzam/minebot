@@ -9,6 +9,8 @@ import {
   type BlockQuery,
   type BotEvents,
   type BotExecutor,
+  type ExplorationReport,
+  type ExploreOptions,
   type Result,
   type Unsubscribe,
   type Vec3,
@@ -25,6 +27,12 @@ import {
 } from './velocity-handshake.js'
 import { resolveForwardingSecret } from './forwarding-secret.js'
 import { canHarvest, bestHarvestTool, type ToolItem } from './harvest.js'
+import {
+  nextWaypoint,
+  searchedRadius,
+  DEFAULT_PERCEPTION_RADIUS,
+  type SearchState,
+} from './explore.js'
 
 // VERIFIED 2026-09-07: `goals` is not an ESM named export of this CJS package
 // — Node's named-export detection finds only `Movements`, `pathfinder` and
@@ -75,6 +83,20 @@ const DIG_REACH = 5
  * in `openConnection`, and issue #15 for why it must not be left unbounded.
  */
 const PATHFINDER_SEARCH_RADIUS = 128
+
+/** Default wall-clock a single exploreFor call may spend. Design §3.2. */
+const DEFAULT_EXPLORE_BUDGET_MS = 20_000
+
+/**
+ * Headroom between the search budget and runAction's own timeout.
+ *
+ * The action must outlast the search, or the timeout fires first and the
+ * caller is told `timeout` instead of getting an honest report of how far the
+ * search actually got — which is the whole point of a bounded search. Sized to
+ * cover one in-flight walk to a waypoint (moveTo's own budget is 60s, but a
+ * single 32-block leg measured ~6s) plus the pathfinder's 5s think time.
+ */
+const EXPLORE_TIMEOUT_HEADROOM_MS = 15_000
 
 /** Straight-line distance from the bot to a point, in blocks. */
 const distanceFrom = (bot: Bot, p: { x: number; y: number; z: number }): number => {
@@ -156,6 +178,14 @@ export class MineflayerExecutor implements BotExecutor {
    * server.
    */
   private fabricModdedEntries: readonly RegistryEntry[] = []
+
+  /**
+   * The in-progress search, so a second exploreFor continues outward instead of
+   * re-walking ground already covered. Keyed on the search itself — different
+   * names or radius is a different search and starts fresh. Cleared on
+   * disconnect, since the origin refers to a session the bot has left.
+   */
+  private exploreState: { key: string; origin: Vec3; visited: Vec3[] } | null = null
   /**
    * Cancels the currently in-flight action, if one is running, so it settles
    * as `interrupted`. Owned and cleared by `runAction()`, which sets it for
@@ -480,6 +510,10 @@ export class MineflayerExecutor implements BotExecutor {
   }
 
   private async teardown(): Promise<void> {
+    // Before the early return: the search origin refers to a session the bot
+    // has left, so it must not survive even a teardown that finds nothing to
+    // tear down.
+    this.exploreState = null
     const bot = this.bot
     if (!bot) return
     this.bot = null
@@ -955,6 +989,105 @@ export class MineflayerExecutor implements BotExecutor {
     return this.runAction(opts, 30_000, async () => fail('internal', 'flee arrives in Phase 5'))
   }
 
+  /**
+   * Walk an expanding spiral of waypoints, looking around at each. Design §4.3.
+   *
+   * A `runAction` body, so cancellation, timeout and the resolve-never-throw
+   * rule come for free — and so an abort is relabelled `interrupted` by
+   * runAction regardless of what this returns.
+   */
+  async exploreFor(
+    names: readonly string[],
+    maxDistance: number,
+    opts?: ExploreOptions,
+  ): Promise<Result<ExplorationReport>> {
+    const budgetMs = opts?.budgetMs ?? DEFAULT_EXPLORE_BUDGET_MS
+    return this.runAction(
+      opts,
+      budgetMs + EXPLORE_TIMEOUT_HEADROOM_MS,
+      async (bot, signal) => {
+        // Checked before moving, so a typo costs nothing. findBlocks would
+        // simply return [] for an unknown name, which reads as "looked, found
+        // nothing" — the one answer that must not be given for a name that
+        // could never have matched anything.
+        for (const name of names) {
+          if (!bot.registry.blocksByName[name]) {
+            return fail('invalid_target', `unknown block name "${name}"`)
+          }
+        }
+
+        const key = `${[...names].sort().join(',')}|${maxDistance}`
+        const here: Vec3 = {
+          x: Math.round(bot.entity.position.x),
+          y: Math.round(bot.entity.position.y),
+          z: Math.round(bot.entity.position.z),
+        }
+        if (this.exploreState?.key !== key) {
+          this.exploreState = { key, origin: here, visited: [] }
+        }
+        const search = this.exploreState
+
+        const state = (): SearchState => ({
+          origin: search.origin,
+          visited: search.visited,
+          maxDistance,
+          spacing: DEFAULT_PERCEPTION_RADIUS,
+        })
+
+        const deadline = Date.now() + budgetMs
+        let travelled = 0
+
+        const report = (
+          found: readonly BlockInfo[],
+          exhausted: boolean,
+        ): Result<ExplorationReport> =>
+          ok({ found, exhausted, searchedTo: searchedRadius(state()), travelled })
+
+        for (;;) {
+          if (signal.aborted) return report([], false)
+          if (Date.now() >= deadline) return report([], false)
+
+          const waypoint = nextWaypoint(state())
+          if (waypoint === null) return report([], true)
+
+          const before = bot.entity.position.clone()
+          const arrival = await this.gotoGoal(
+            bot,
+            signal,
+            new goals.GoalNear(waypoint.x, waypoint.y, waypoint.z, 2),
+            // NOT ARRIVAL_TOLERANCE. The waypoint only has to be reached
+            // closely enough that looking around from there covers what it was
+            // meant to cover, so the perception radius is the honest bar:
+            // stopping 3 blocks short is fine, stopping 40 short is a hole in
+            // the search that nothing else would catch.
+            () => distanceFrom(bot, waypoint) <= DEFAULT_PERCEPTION_RADIUS,
+          )
+          travelled += bot.entity.position.distanceTo(before)
+
+          // A waypoint we cannot reach is a fact about terrain, not a failed
+          // search: mark it seen and carry on. Anything else — disconnected,
+          // internal — is real and ends the call.
+          search.visited.push(waypoint)
+          if (
+            !arrival.ok &&
+            arrival.reason !== 'unreachable' &&
+            arrival.reason !== 'timeout'
+          ) {
+            return arrival
+          }
+          if (signal.aborted) return report([], false)
+
+          const found = this.findBlocks({
+            names: [...names],
+            maxDistance: DEFAULT_PERCEPTION_RADIUS,
+            limit: 8,
+          })
+          if (found.length > 0) return report(found, false)
+        }
+      },
+    )
+  }
+
   chat(message: string): void {
     this.bot?.chat(message)
   }
@@ -1009,6 +1142,10 @@ export class MineflayerExecutor implements BotExecutor {
         this.bot = null
         this.unwireBotEvents()
         this.fabricModdedEntries = []
+        // An unexpected drop never reaches teardown(), so clear the search
+        // here too or a reconnect would resume a spiral around coordinates
+        // from the previous session.
+        this.exploreState = null
       }
     })
   }
