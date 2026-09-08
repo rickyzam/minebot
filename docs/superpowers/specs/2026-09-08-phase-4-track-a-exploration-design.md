@@ -167,7 +167,7 @@ An `unreachable` waypoint is **skipped, not fatal** — a blocked direction is a
 
 The harder half of this design, and the reason to build it before the algorithm. **The floating arena cannot test search.** Its whole virtue is being empty and known; search is about the unknown.
 
-Four tiers, in descending order of value per second spent.
+The requirement is a world that is **reproducible, realistic, and scored** — you cannot improve a search you cannot measure, and a search measured only on a flat slab has not been measured on anything it will meet.
 
 ### 5.1 Pure unit tests over a fake world — most of the value
 
@@ -180,29 +180,48 @@ Four tiers, in descending order of value per second spent.
 
 No Minecraft, no network, instant.
 
-### 5.2 Synthetic arena with known ore — the cost metric
+### 5.2 The benchmark world — reproducible, realistic, scored
 
-A large flat platform, ore placed at coordinates the *test* knows and the *bot* does not. This is not cheating: ground truth for the assertion, unknown to the subject.
+The centrepiece. A **fixed region of real generated terrain**, deliberately chosen to be gentle, with ore at **coordinates we place and therefore know exactly**.
 
-Assert not merely "found it" but **how expensive it was**: blocks travelled and wall-clock to reach a target at a known distance. A pass/fail search cannot be improved; a search with a cost number can.
+That last point is what makes it work. Natural ore cannot be ground truth, because finding out where it is means solving the problem under test. Placing it ourselves gives exact ground truth while keeping real terrain underfoot — and because a setup step re-places the ore before every run, **mining during a run does not rot the fixture**. Unlike a read-only region, this can score the whole find-and-mine loop, not just the looking.
 
-`/fill` caps at 32768 blocks, so a large platform needs chunked fills — and, per CLAUDE.md, a fixture that can silently no-op is worse than none, so the builder must verify its own floor before any test trusts it.
+**Terrain qualification, measured rather than eyeballed.** A candidate region is accepted only if:
 
-### 5.3 Fixed natural terrain, read-only — the reproducibility trick
+| Criterion | Why |
+|---|---|
+| Surface height range within the region is small (target ≤ 8 blocks) | Rules out cliffs and peaks, where the bot's one-block-short parkour reach dominates the result |
+| Biome is on an allowlist — plains, forest, savanna, taiga | Excludes jungle (dense canopy, vines), swamp (water), ocean, and mountain variants |
+| No surface water in the region | Swimming and boats are not this phase's problem |
 
-Real terrain cannot be built, and the shared world cannot be reseeded. But there is a property that makes this work anyway:
+Verified from the console: `/execute if biome` gives a definitive biome check, and a surface-height profile is derivable from a scanning pass. **Both are recorded as a committed fixture**, so the region's qualification is a fact in the repo rather than a claim in a commit message.
 
-> **Search does not modify the world.** It only moves and looks.
+Gentle is not the same as flat. Trees, small rises, and gravel patches stay — they are exactly the conditions the search must survive, and they are why this is not simply a bigger arena.
 
-So a fixed, remote region of the existing world is a *reproducible* natural-terrain fixture, as long as the test only searches and never mines. Terrain is deterministic given the seed, and nothing in the test changes it.
+**Ore placement.** At or near surface level at recorded columns, because the search is horizontal (§4.2). Placing ore where a horizontal spiral could never reach would test nothing but the design's own known limitation.
 
-Assert a bound rather than a path: *coal found within N blocks travelled from a fixed start*. Asserting an exact route would rot the moment anything about pathing changed.
+**Setup is idempotent and re-runnable**: clear previously placed ore, place the fixed set, verify each landed. A fixture that can silently no-op is worse than no fixture, so setup verifies itself and fails loudly.
 
-The standing risk is a human mining there. Document the coordinates as reserved, and treat a sudden failure as "check whether someone dug it up" before assuming a regression.
+### 5.3 The score
 
-### 5.4 Termination on a barren region
+Each benchmark run records:
 
-The failure I would fear most is not a bad search — it is one that never stops. An explicit test on a region with no coal at all, asserting `exhausted: true` within the budget.
+| Metric | Meaning |
+|---|---|
+| `found` | did it locate the ore at all |
+| `travelled` | blocks moved — the search's efficiency |
+| `elapsed` | wall clock — what a user would feel |
+| `searchedTo` | ground covered, which separates "unlucky" from "barely looked" |
+
+Reported per run and aggregated across runs as success rate and medians. **A pass/fail search cannot be improved; a search with a distribution attached can.** Repeated runs also expose variance, which is the thing a single demo run can never show — and this session already demonstrated how misleading a single run is.
+
+The benchmark is a script, not a test in the integration suite: it is slow by nature, and its output is a measurement to compare over time rather than an assertion to gate a merge.
+
+### 5.4 Fast integration tests, on the synthetic arena
+
+The benchmark is too slow to run per-change, so the correctness guarantees stay on a large flat platform where they are quick and deterministic: an ore hidden beyond perception is found; a barren region reports `exhausted` rather than searching forever; an abort resolves `interrupted`; an unknown block name fails `invalid_target`.
+
+These gate merges. The benchmark measures progress.
 
 ### 5.5 What this deliberately does not test
 
