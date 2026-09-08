@@ -390,16 +390,34 @@ surface is a new agreement, not a detail — stop and ask rather than adjusting
 the contract to fit the code. In particular, if §5.3's cost measurement forces
 `findBlocks` to stop being synchronous-and-free, that is a new agreement.
 
-## 7.1 SECOND GATE — cost. OPEN, needs Ricky
+## 7.1 SECOND GATE — OPEN. **Everything waiting on Ricky is in this section.**
 
-The clause above fired. §5.3's measurement puts honest perception at **322ms** for
-coal at r=64, against a contract that calls `findBlocks` "synchronous and free"
-and a planner that calls it on that basis. Implementation is **blocked on this
-gate**, not on the code — the code is understood (§5.2, §5.4).
+> **This is the single index of open decisions.** Nothing else needs reading to
+> answer them; where a number came from somewhere else it is repeated here.
+> Entry point is [PR #20](https://github.com/rickyzam/minebot/pull/20).
+>
+> | # | Decision | Where |
+> |---|---|---|
+> | 1 | The cost budget, and that perception was never free | §7.1 below |
+> | 2 | The contract doc wording | §7.1 below |
+> | 3 | Option A / B / C / D | §7.1 below |
+> | 4 | Prompt edit 1 — the paired `find_blocks`/`explore_for` rule | §7.1 below |
+> | 5 | Prompt edit 2 — the `not_found` tail | §7.1 below |
+> | 6 | Is `explore_for` the right answer to a dead position? | §7.1 below |
+>
+> **4, 5 and 6 are the urgent ones** — a measured regression is sitting on the
+> branch because of them. See "What happened when the drafts were measured".
+
+**Status: the code has landed; this gate has not.** The clause above fired —
+§5.3's measurement puts honest perception at **339ms** for coal at r=64, against a
+contract that called `findBlocks` "synchronous and free" and a planner that calls
+it on that basis. It was implemented anyway on Dorel's instruction, under option
+A, because it changes no signature, guarantee or behaviour: only whether a doc
+comment tells the truth about a cost that already existed. If Ricky prefers B, C
+or D, the change is a revert of one doc comment plus the option's own work.
 
 Nothing here reopens §4, §6.3 or §6.4. The rule, the guarantees and the mock
-surface are all unchanged. This gate is only about **what the contract promises
-about cost**, and it exists because the honest answer changed after Ricky agreed.
+surface are all unchanged.
 
 ### What Ricky is being asked to accept
 
@@ -443,7 +461,12 @@ a tight loop. That belongs in the system rules rather than the action menu, per
 the measured finding in CLAUDE.md that menu wording moves nothing and rules
 wording moves everything.
 
-### Proposed prompt text — a draft for Ricky, not a decision
+### Proposed prompt text — drafted, then MEASURED NOT TO WORK
+
+> **Read this before the drafts below.** They were written as a plausible fix,
+> then applied and measured. **They do not fix the regression they were meant to
+> fix.** They are recorded here as a starting point and a record of what has
+> already been ruled out — not as a recommendation.
 
 The cost wording above is not abstract: it lands as prompt text in Track B's
 package, in Phase 4 Task 7. Drafted here so the ask is one conversation.
@@ -485,7 +508,42 @@ Both edits belong in the **rules block, not the menu entry**: measured earlier i
 this project, sharpening a menu entry moved nothing (5/5 unchanged) while
 near-identical wording in the system rules flipped the answer outright (5/5).
 
-### Checklist
+### What happened when the drafts were measured — decisions 4, 5, 6
+
+`qwen3:14b`, the probe's six scenarios, 5 attempts each, 30/30 decoded in every
+state. Reproduce with `OLLAMA_HOST=... npm run agent:probe`.
+
+| Scenario | baseline (7 actions) | + `explore_for` menu entry | + menu + both drafts |
+|---|---|---|---|
+| no history | `find_blocks` ×5 | = | = |
+| after a search | `mine_block_at` ×5 | = | = |
+| after missing_tool | `give_up` ×5 | = | = |
+| mined but drop lost | `move_to` ×5 | = | = |
+| **not_found already** | **`give_up` ×5** | **`move_to` ×5** | **`move_to` ×5** |
+| goal met | `done` ×5 | = | = |
+
+**Five of six scenarios are unmoved**, so a 14B model handles the larger menu
+fine on size alone — that was the risk Task 7 Step 1 was written to check, and it
+is not the problem.
+
+**The sixth regresses, and into an action the rules forbid.** `move_to` on that
+position is explicitly prohibited two lines earlier ("Do NOT move to or mine that
+position again — it cannot help"). So the model is not picking a defensible
+alternative; the earlier *"use move_to that position ONCE"* rule is beating the
+later prohibition. That is the order-sensitivity Task 7 Step 4 is about, and it is
+why Step 4 says to rewrite the pair **together** rather than adjacently.
+
+**The drafts change nothing.** Still `move_to` ×5. One hypothesis, untested:
+edit 1 grows the rules block from one line to seven and pushes the prohibition
+further from the top, so it may be making things worse rather than merely failing
+to help. Track A stopped here rather than iterating on wording by intuition —
+that is what the probe exists to prevent, and this is Track B's package.
+
+**This regression is on the branch, in commit 2 of PR #20, deliberately.**
+Reverting it would have left nothing to reproduce. Commit 1 (perception) is
+independent and can merge without it.
+
+### Checklist — the whole of what Ricky owes an answer on
 
 - [ ] Perception is not free, and already was not (§5.3.1).
 - [ ] The cost budget in point 2 above is acceptable for the planning loop.
@@ -493,10 +551,15 @@ near-identical wording in the system rules flipped the answer outright (5/5).
 - [ ] Option A over B/C/D.
 - [ ] The §3 correction is noted — 60 exposed rather than 1, **0 visible** — and
       does not change the agreement already given.
-- [ ] Prompt edit 1 (the paired `find_blocks`/`explore_for` rule), or a redraft.
-- [ ] Prompt edit 2 (the `not_found` tail), **and** that `explore_for` rather than
-      `give_up` is the intended answer to a dead position — this changes a probe
-      scenario's expected result.
+- [ ] Prompt edit 1 (the paired `find_blocks`/`explore_for` rule) — as drafted,
+      redrafted, or dropped. **As drafted it does not work.**
+- [ ] Prompt edit 2 (the `not_found` tail) — same.
+- [ ] Whether `explore_for` rather than `give_up` is the intended answer to a
+      dead position. The probe scenario's `hoped` already assumes yes; say if not.
+- [ ] **The regression itself**: `not_found already` answers `move_to` ×5, an
+      action the rules forbid. It is on the branch and unfixed. Either a wording
+      that restores sensible behaviour, or a decision to revert commit 2 of
+      PR #20 and land `explore_for` later.
 
 ## 8. Impact on Track B
 

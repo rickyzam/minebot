@@ -153,13 +153,17 @@ export const ACTION_SCHEMA = {
 /**
  * The human-readable menu, rendered into the system prompt.
  *
- * PROMPT TEXT IS TRACK B's. The `explore_for` entry below is the wording drafted
- * in the Phase 4 plan (Task 7 Step 2), added verbatim so the action is
- * selectable at all — an action absent from the menu can never be chosen. Ricky
- * to confirm or rewrite; see the line-of-sight spec §7.1, which also proposes
- * the two system-RULE edits that carry the actual steering. Measured earlier in
- * this project: menu wording moved nothing (5/5 unchanged) while rules wording
- * flipped the answer outright (5/5), so the rules are where the behaviour lives.
+ * PROMPT TEXT IS TRACK B's, and this entry is UNSETTLED — adding it measurably
+ * regressed one probe scenario into an action the rules forbid, and the drafted
+ * rule edits did not fix it.
+ *
+ * ➡ See the line-of-sight spec §7.1, the single index of what is open for Ricky.
+ *
+ * The wording below is the Phase 4 plan's own draft (Task 7 Step 2), used
+ * verbatim rather than invented here, and present at all only because an action
+ * absent from the menu can never be chosen. Measured earlier in this project:
+ * menu wording moved nothing (5/5 unchanged) while rules wording flipped the
+ * answer outright (5/5), so the rules are where the fix will have to live.
  */
 export const ACTION_MENU = [
   'find_blocks         {"action":"find_blocks","names":["coal_ore","deepslate_coal_ore"],"maxDistance":32,"limit":5}',

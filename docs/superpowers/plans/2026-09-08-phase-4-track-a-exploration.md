@@ -1299,6 +1299,12 @@ wording by intuition is what the probe exists to prevent, and prompt text is his
 package. What he has to work with: a reproducible regression, a baseline to
 return to, and a draft that is measured NOT to work.
 
+➡ **The decision lives in the line-of-sight spec's
+[§7.1](../specs/2026-09-08-perception-line-of-sight-design.md), which is the
+single index of everything open for Ricky.** It repeats this table, so §7.1 can
+be answered without reading this plan. Recorded here too because this is where
+Task 7 will be executed once the wording is settled.
+
 - [ ] **Step 2: Add the action to the schema and menu**
 
 In `actions.ts`, add `explore_for` to `ACTION_NAMES`, its variant to `ACTION_SCHEMA` (`names: string[]`, `maxDistance: number`), and a menu entry:
