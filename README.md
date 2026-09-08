@@ -2,7 +2,7 @@
 
 A tool-calling LLM agent that plays Minecraft as a bot — a "smarter NPC" that can navigate, mine, build from blueprints, fight or flee, and talk to players, all through one shared local model rather than a specialised model per behaviour.
 
-**Status: Phase 2 complete.** The bot connects to a server, reports immutable world state, paths around obstacles to a coordinate, and mines a block with the right tool and collects the drop — all under cancellable control. Building and combat are later phases.
+**Status: Phase 2 complete, and the planning loop is built.** The bot connects to a server, reports immutable world state, paths around obstacles to a coordinate, and mines a block with the right tool and collects the drop — all under cancellable control. Separately, `packages/agent/` turns game state into an LLM decision and back into an action, tested against the mock and measured against a real model. Wiring the two together is Phase 3 and is not done yet. Building and combat are later phases.
 
 ## The core idea
 
@@ -30,7 +30,7 @@ packages/
 │                    BotExecutor, Result<T>, WorldSnapshot, BotEvents.
 ├── mock-executor/   A BotExecutor test double + runContractSuite.
 ├── executor/        The real implementation over Mineflayer.
-└── agent/           (not yet built) The LLM planning loop.
+└── agent/           The LLM planning loop. Deps: contract, mock-executor.
 ```
 
 ### `BotExecutor` — the contract
@@ -40,6 +40,28 @@ Both development tracks build against this one interface. Its three load-bearing
 - **Every action is cancellable.** Actions take an `AbortSignal`. On abort an implementation **resolves** `{ ok: false, reason: 'interrupted' }` — it must never throw. Interruption is an expected outcome, not an error, so callers are forced to handle it explicitly rather than lose it in a `catch`.
 - **Failures are typed.** `Result<T>` is a discriminated union over nine closed reasons. `not_found` (search wider), `unreachable` (pick another target) and `interrupted` (resume later) are three different decisions, and the retry policy cannot be written without telling them apart.
 - **Observation has two channels.** `getState()` returns an immutable, deep-frozen point-in-time snapshot for the planner to reason over; `on(event, handler)` is a push stream for the reflex layer, which needs to be *told* about damage rather than poll for it.
+
+### The planning loop
+
+`packages/agent/` decides what the bot does next. Each turn it takes a
+`WorldSnapshot`, renders it into a prompt with a bounded history of what just
+happened, asks a local model for exactly one action under a JSON Schema
+constraint, validates the reply, and dispatches it through `BotExecutor`.
+
+Three properties are worth knowing:
+
+- **It never opens a socket in tests.** The model sits behind an `LlmClient`
+  interface and every test uses a scripted fake, the same way every test uses
+  `MockExecutor` instead of a Minecraft server.
+- **It codes no retry policy.** Failures — with their `FailureReason` and
+  detail — are rendered into the next prompt and the model decides. The only
+  hardcoded guards are a step budget and a repetition check. Phase 4 writes the
+  real policy against the step logs this produces.
+- **Prompt changes are measured, not assumed.** `npm run agent:probe` runs five
+  scenarios against a real model and reports what it chose. This caught two
+  defects that every unit test passed straight through, and established that the
+  system-rules block outweighs the action menu for guidance about *when* to
+  choose something.
 
 ### The cross-implementation test suite
 
@@ -51,7 +73,7 @@ Both development tracks build against this one interface. Its three load-bearing
 
 ```bash
 npm install
-npm test        # 179 unit tests — no network, no Minecraft needed
+npm test        # 260 unit tests — no network, no Minecraft, no model
 npm run typecheck
 ```
 
@@ -100,6 +122,8 @@ npm run demo:phase2      # Path around a wall, mine coal ore, collect the drop
 | `npm run smoke` | Minimal connect check | Yes |
 | `npm run demo` | Phase 1 deliverable | Yes |
 | `npm run demo:phase2` | Phase 2 deliverable | Yes |
+| `npm run agent:demo` | Track B deliverable: the loop against a fake model and a mock world | No |
+| `npm run agent:probe` | Ask a real model for one action across five scenarios; report what it chose | No (needs Ollama) |
 
 ## Roadmap
 
@@ -111,6 +135,9 @@ npm run demo:phase2      # Path around a wall, mine coal ore, collect the drop
 | 4 | Reliable "find and mine coal" — search, retry, recovery | The bulk of the work |
 | 5 | Full toolbox: building, follow, chat, reflex combat | |
 | 6 | Multi-bot scaling against one shared model | |
+
+Track B's planning loop is built, tested against the mock, and measured against
+`qwen3:14b`. Phase 3 is the swap, and with Phase 2 complete nothing blocks it.
 
 ## Documentation
 

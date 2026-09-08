@@ -1759,7 +1759,7 @@ If the decode rate is below 10/10, stop and investigate before continuing. Every
 
 - [ ] **Step 2: Probe the four turns the baseline covered, not just the first**
 
-`probe.ts` as written sends one turn — the empty-history one. Temporarily extend its `SNAPSHOT`/history to cover the other three from spec §2.1, run each 5 times, and record which action came back:
+`probe.ts` carries all five scenarios of spec §2.1 as data — the plan originally called for temporarily extending a one-scenario probe and reverting it, which is the throwaway-fixture trap CLAUDE.md records twice. Run it and read the per-scenario lines:
 
 | Scenario | Prompt history | Expected |
 |---|---|---|
