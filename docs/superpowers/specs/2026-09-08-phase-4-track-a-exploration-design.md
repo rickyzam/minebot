@@ -1,7 +1,7 @@
 # Phase 4 (Track A) — Exploration Design
 
 **Date:** 2026-09-08
-**Status:** proposed. §3's contract change needs Track B agreement before any of it lands.
+**Status:** agreed. §3's contract change was approved by Track B (Ricky) on 2026-09-08; see the plan's GATE.
 **Blocked by:** nothing. Phase 3 is merged and the loop closes end to end.
 
 ## 1. The problem
@@ -31,7 +31,7 @@ The cost of C is a real contract change: a new method and a new result type.
 
 ## 3. The contract change — GATE
 
-`packages/contract/` and `packages/mock-executor/` are the shared surface. **Nothing in this design may land before Track B agrees §3 in full.** Spec §4 and CLAUDE.md both require it, and spec §9 records the precedent: four changes held back until agreed, then applied as one unit.
+`packages/contract/` and `packages/mock-executor/` are the shared surface. **Nothing in this design may land before Track B agrees §3 in full.** *(Agreed 2026-09-08. Any change discovered during implementation is a new agreement, not a detail.)* Spec §4 and CLAUDE.md both require it, and spec §9 records the precedent: four changes held back until agreed, then applied as one unit.
 
 ### 3.1 The method
 

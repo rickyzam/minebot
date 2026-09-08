@@ -56,13 +56,23 @@ Carried in from earlier phases; these are measurements, not assumptions.
 
 ---
 
-## GATE: Track B agreement (before Task 1)
+## GATE: Track B agreement (before Task 1) — SATISFIED
 
 Spec §3 changes `packages/contract/` and `packages/mock-executor/` — the shared surface. CLAUDE.md and design spec §4 both require mutual agreement.
 
-- [ ] **Confirm Ricky has agreed to design §3 in full** — the method signature, both new types, the "empty search is `ok`" decision, and the five contract-suite guarantees.
+- [x] **Confirm Ricky has agreed to design §3 in full** — the method signature, both new types, the "empty search is `ok`" decision, and the five contract-suite guarantees.
 
-Send him spec §3 and §6. If agreement is not in hand, **stop and report**. Tasks 4–8 all depend on Task 1, so there is no useful work to skip ahead to. Do not soften this into "I'll assume yes."
+**Agreed by Ricky on 2026-09-08**, covering Tasks 1 and 2. Task 1 is the shared
+surface and is what the gate exists for; Task 2 (`explore.ts`) is Track A's own
+package and needed no agreement, but was reviewed alongside it.
+
+The gate stays in this document rather than being deleted, because the record of
+*when and by whom* a contract change was agreed is the thing spec §9 exists to
+preserve — the four Phase 2 changes are still legible for the same reason.
+
+**This agreement covers §3 as written.** Any change to the signature, the types,
+or the five guarantees discovered during implementation is a new agreement, not
+a detail — stop and ask rather than adjusting the contract to fit the code.
 
 ---
 
