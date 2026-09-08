@@ -144,6 +144,7 @@ export function runContractSuite(
       },
       { name: 'attack', run: (e, opts) => e.attack(0, opts) },
       { name: 'flee', run: (e, opts) => e.flee(opts) },
+      { name: 'exploreFor', run: (e, opts) => e.exploreFor(['stone'], 16, opts) },
     ]
 
     it.each(abortableActions)(
@@ -356,6 +357,40 @@ export function runContractSuite(
         expect(b.ok).toBe(false)
         if (!b.ok) expect(b.reason).toBe('interrupted')
         expect(() => ctx.executor.getState()).toThrow()
+      })
+    })
+
+    // Design §3.5: exploration is an ACTION, not perception. These are the
+    // behavioural promises Track B builds retry logic against.
+    //
+    // Every case here uses a radius no larger than one perception step, so
+    // both implementations answer from where they already stand — against the
+    // real executor a wider radius would walk a live bot around the world for
+    // minutes inside what is meant to be a fast shared suite.
+    describe('exploreFor', () => {
+      it('treats finding nothing as success, not failure', async () => {
+        const r = await ctx.executor.exploreFor(['bedrock'], 8)
+        expect(r.ok).toBe(true)
+        if (r.ok) expect(r.value.found).toEqual([])
+      })
+
+      it('never lets searchedTo go backwards within one search', async () => {
+        const first = await ctx.executor.exploreFor(['stone'], 32)
+        const second = await ctx.executor.exploreFor(['stone'], 32)
+        expect(first.ok && second.ok).toBe(true)
+        if (first.ok && second.ok) {
+          expect(second.value.searchedTo).toBeGreaterThanOrEqual(first.value.searchedTo)
+        }
+      })
+
+      it('stays exhausted once exhausted', async () => {
+        const first = await ctx.executor.exploreFor(['bedrock'], 8)
+        expect(first.ok).toBe(true)
+        if (first.ok && first.value.exhausted) {
+          const second = await ctx.executor.exploreFor(['bedrock'], 8)
+          expect(second.ok).toBe(true)
+          if (second.ok) expect(second.value.exhausted).toBe(true)
+        }
       })
     })
   })
