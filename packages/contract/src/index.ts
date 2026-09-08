@@ -154,7 +154,31 @@ export interface BotExecutor {
   /** Immutable point-in-time snapshot. Throws if not connected. */
   getState(): WorldSnapshot
   /**
-   * Nearest-first: results are ordered by ascending {@link BlockInfo.distance}.
+   * What the bot can **see** from where it is standing — not what exists near
+   * it. A block is returned only when a ray from the bot's eye reaches it
+   * before hitting anything else, so ore encased in rock, and ore in a sealed
+   * cavern, are both absent. Facing direction is deliberately ignored: a player
+   * can turn their head, and depending on yaw would make results flicker as the
+   * pathfinder steers.
+   *
+   * **Expect empty.** For a buried resource in real terrain this usually
+   * returns nothing, and that is the honest answer rather than a failure.
+   * Measured 2026-09-08: of 3216 natural `coal_ore` within 64 blocks of a
+   * surface position, 60 touched a non-solid block and **zero** were visible.
+   *
+   * Nearest-first: results are ordered by ascending {@link BlockInfo.distance},
+   * and `limit` applies to *visible* blocks — buried ones are skipped during
+   * the search rather than taking up room in the result.
+   *
+   * **Synchronous, but not free.** Cost scales with `maxDistance` and with how
+   * *rare* a visible match is, because the answer "none" can only be given
+   * after searching the whole volume. Measured at `maxDistance: 64`: ~2ms when
+   * the block is common and visible, ~140ms for a scarce one, and ~330ms for a
+   * plentiful-but-buried one such as coal. `maxDistance: 32` costs roughly a
+   * quarter of that. Prefer a smaller radius in a loop; the *empty* answer is
+   * the expensive one. (Note this is not new to the visibility rule — a scarce
+   * target already cost ~73ms before it existed.)
+   *
    * Throws if not connected, for the same reason as {@link getState}: there
    * is no world to search, and a silent `[]` would be indistinguishable from
    * "connected, searched, found nothing" — an important difference for a

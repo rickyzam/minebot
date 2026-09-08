@@ -1206,18 +1206,98 @@ against."
 
 ## Task 7: The menu action (JOINT — Track B owns the prompt text)
 
+> **UNBLOCKED 2026-09-08.** Tasks 1–6 shipped in PR 19; the
+> [perception fix](../specs/2026-09-08-perception-line-of-sight-design.md) has now
+> landed, so `find_blocks` no longer returns coal through solid rock and the
+> paired `find_blocks` / `explore_for` rule this task tests is no longer vacuous.
+>
+> Three measured findings from `npm run bench:perception` (2026-09-08) that change
+> this task's content, not merely its timing:
+>
+> 1. **The `emerald_block` fixture gives one usable bearing at *t=0*, not three.**
+>    All 3 markers are exposed, but only **1** is visible from the start (49.1
+>    blocks). Any step here asserting "a target on each bearing is visible from the
+>    start" is false and needs the markers re-sited.
+> 2. **`find_blocks` at `maxDistance: 64` is a ~1/3-second call**, and the *empty*
+>    answer is the expensive one (perception spec §5.3.1). Step 2's menu entry and
+>    the system rules should steer the model to `maxDistance: 32` or less. Per the
+>    measured finding in CLAUDE.md, that guidance belongs in the **system rules**,
+>    not the menu entry — menu wording moved nothing in the last probe, rules
+>    wording flipped 5/5.
+> 3. **`find_blocks` for coal will return empty, always**, at the benchmark start
+>    (0 of 3216 visible). Step 1's before-measurement should be retaken after the
+>    perception fix lands, or the before/after comparison spans two different
+>    worlds and attributes the perception change to the menu change.
+
 `packages/agent` is Track B's package. The action shape is proposed in design §6; **the wording is Ricky's call**, and it must be measured rather than assumed.
 
 **Files:**
 - Modify: `packages/agent/src/actions.ts`, `dispatch.ts`, `prompt.ts`, `probe.ts`
 
-- [ ] **Step 1: Measure the current menu first**
+- [x] **Step 1: Measure the current menu first**
 
 ```bash
-npm run agent:probe
+OLLAMA_HOST=http://127.0.0.1:11434 npm run agent:probe
 ```
 
 Record every scenario's choice. A bigger toolbox is a real test of whether a 14B model stays reliable at tool selection, so this is the before-number that says whether adding an action cost anything.
+
+**Baseline retaken 2026-09-08, AFTER the line-of-sight fix landed** — `qwen3:14b`,
+5 attempts each. Retaken deliberately: the earlier baseline was measured against a
+bot with X-ray vision, and comparing a post-perception "after" against a
+pre-perception "before" would credit the menu change with the perception change.
+
+| Scenario | Hoped | Chose | Decoded |
+|---|---|---|---|
+| no history | `find_blocks` | `find_blocks` ×5 | 5/5 |
+| after a search | `mine_block_at` | `mine_block_at` ×5 | 5/5 |
+| after missing_tool, inventory empty | `give_up` | `give_up` ×5 | 5/5 |
+| mined but the drop was lost | `move_to` | `move_to` ×5 | 5/5 |
+| mine_block_at already returned not_found | `find_blocks` or `give_up` | `give_up` ×5 | 5/5 |
+| goal met | `done` | `done` ×5 | 5/5 |
+
+**TOTAL 30/30 decoded, median 353ms.** Every scenario matched its hope, so any
+post-change deviation is attributable to the change rather than to noise.
+
+Note the fifth row for Step 5: it currently answers `give_up` 5/5. Once
+`explore_for` exists, `give_up` is arguably the *wrong* answer there — see the
+second rule edit in the §7.1 draft, which is a behaviour change this plan did not
+anticipate.
+
+### Step 1a: the larger menu DID degrade tool selection — RICKY NEEDED
+
+Step 1 exists to catch exactly this, and it caught it. Same model, same
+scenarios, 5 attempts each, three states measured:
+
+| Scenario | baseline (7 actions) | + `explore_for` in menu | + menu + drafted rules |
+|---|---|---|---|
+| no history | `find_blocks` ×5 | `find_blocks` ×5 | `find_blocks` ×5 |
+| after a search | `mine_block_at` ×5 | `mine_block_at` ×5 | `mine_block_at` ×5 |
+| after missing_tool | `give_up` ×5 | `give_up` ×5 | `give_up` ×5 |
+| mined but drop lost | `move_to` ×5 | `move_to` ×5 | `move_to` ×5 |
+| **not_found already** | **`give_up` ×5** | **`move_to` ×5** | **`move_to` ×5** |
+| goal met | `done` ×5 | `done` ×5 | `done` ×5 |
+
+30/30 decoded in all three states, so this is tool *selection* degrading, not
+decoding.
+
+**What it means.** Five of six scenarios are unmoved by the bigger menu — the
+14B model holds up fine on size alone. The sixth breaks, and it breaks into
+`move_to`, which the rules block explicitly forbids for that position ("Do NOT
+move to or mine that position again — it cannot help"). So the model is not
+choosing a defensible alternative; it is being pulled by the earlier
+`move_to that position ONCE` rule over the later prohibition. That is precisely
+the order-sensitivity Step 4 is written about.
+
+**The drafted rules did not fix it.** Both §7.1 edits were applied and measured:
+no change, still `move_to` ×5. Plausibly the first edit makes things worse by
+growing the rules block from one line to seven, pushing the prohibition further
+from the top — but that is a hypothesis, not a measurement.
+
+**This is Ricky's call and Track A stopped here deliberately.** Iterating on
+wording by intuition is what the probe exists to prevent, and prompt text is his
+package. What he has to work with: a reproducible regression, a baseline to
+return to, and a draft that is measured NOT to work.
 
 - [ ] **Step 2: Add the action to the schema and menu**
 
