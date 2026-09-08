@@ -114,6 +114,30 @@ export function decode(raw: string): DecodeResult {
       return { ok: true, action: { action: 'find_blocks', names, maxDistance, limit } }
     }
 
+    case 'explore_for': {
+      // Deliberately the same validation as find_blocks minus `limit`, which
+      // exploreFor does not take — the report says what it found, not how many
+      // to report. Shares MAX_DISTANCE: a search radius the executor would
+      // refuse is worth rejecting here, where the model can be told why.
+      const rawNames = o['names']
+      if (!Array.isArray(rawNames) || rawNames.length === 0) {
+        return bad('bad_arguments', 'explore_for needs a non-empty "names" array')
+      }
+      const names: string[] = []
+      for (const candidate of rawNames) {
+        const clean = blockName(candidate)
+        if (clean === null) {
+          return bad('bad_arguments', `"${String(candidate)}" is not a valid block name`)
+        }
+        names.push(clean)
+      }
+      const maxDistance = distance(o['maxDistance'])
+      if (maxDistance === null) {
+        return bad('bad_arguments', `maxDistance must be a number in (0, ${MAX_DISTANCE}]`)
+      }
+      return { ok: true, action: { action: 'explore_for', names, maxDistance } }
+    }
+
     case 'move_to': {
       const x = coord(o['x'], -XZ_MAX, XZ_MAX)
       const y = coord(o['y'], Y_MIN, Y_MAX)

@@ -130,7 +130,12 @@ const SCENARIOS: readonly Scenario[] = [
         },
       ),
     ],
-    hoped: ['find_blocks', 'give_up'],
+    // Was ['find_blocks', 'give_up']. `find_blocks` stopped being a sensible
+    // answer here once perception became line-of-sight limited: the bot has not
+    // moved, so it would see exactly what it just saw. `explore_for` is the
+    // move this position calls for; `give_up` stays acceptable because the goal
+    // may genuinely be out of reach.
+    hoped: ['explore_for', 'give_up'],
   },
   {
     name: 'goal met',
