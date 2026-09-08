@@ -189,6 +189,23 @@ export async function buildArena(bounds: ArenaBounds): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 500))
   sendConsoleCommand(`fill ${x0} ${floorY + 1} ${z0} ${x1} ${floorY + clearance} ${z1} air`)
   sendConsoleCommand(`fill ${x0} ${floorY} ${z0} ${x1} ${floorY} ${z1} stone`)
+
+  // VERIFIED 2026-09-07, the hard way: a coal drop left in the arena by an
+  // earlier run was silently picked up by a later one, so a case that should
+  // have shown "mined but collected nothing" reported a successful collection
+  // instead. Mined drops are shared world state that outlives the run that
+  // created them, and the arena is reused. Despawn them with the rest of the
+  // reset, or every collection assertion is suspect.
+  //
+  // Note the air fill above does NOT do this: /fill replaces blocks, and a
+  // dropped item is an entity, not a block. It survives being filled over.
+  //
+  // Scoped to the arena volume rather than `kill @e[type=item]` globally, so a
+  // concurrently running test elsewhere in the world is not disturbed.
+  const cx = Math.floor((x0 + x1) / 2)
+  const cz = Math.floor((z0 + z1) / 2)
+  const radius = Math.ceil(Math.hypot(x1 - x0, clearance, z1 - z0) / 2) + 4
+  sendConsoleCommand(`kill @e[type=item,x=${cx},y=${floorY},z=${cz},distance=..${radius}]`)
 }
 
 /**
@@ -216,4 +233,22 @@ export function giveItem(username: string, item: string, count = 1): void {
  */
 export function clearInventory(username: string): void {
   sendConsoleCommand(`clear ${username}`)
+}
+
+/**
+ * Puts `item` in an exact inventory slot, using vanilla's slot names —
+ * `hotbar.0`…`hotbar.8`, `inventory.0`…`inventory.26`, `weapon.mainhand`.
+ *
+ * `giveItem` cannot express "in the inventory but NOT in the hand", and the
+ * difference is not academic: `/give` fills the first free slot, and whether
+ * that slot is the *held* one depends on the player's selected hotbar slot.
+ * That selection persists in player data, survives `/clear`, and carries over
+ * between runs — `bot.equip()` moves it, so a test that equips a tool changes
+ * what the next run of that same test starts out holding. A test needing the
+ * tool out of the hand must place it exactly, or it passes or fails according
+ * to what the previous run left behind. (Learned here: the equip test passed
+ * alone and failed in the full suite for exactly this reason.)
+ */
+export function placeInSlot(username: string, slot: string, item: string, count = 1): void {
+  sendConsoleCommand(`item replace entity ${username} ${slot} with ${item} ${count}`)
 }

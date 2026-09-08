@@ -1,4 +1,6 @@
 import mineflayer, { type Bot } from 'mineflayer'
+import pathfinderPkg from 'mineflayer-pathfinder'
+import type { goals as PathfinderGoals } from 'mineflayer-pathfinder'
 import {
   ok,
   fail,
@@ -22,6 +24,32 @@ import {
   type VelocityForwardingOptions,
 } from './velocity-handshake.js'
 import { resolveForwardingSecret } from './forwarding-secret.js'
+import { canHarvest, bestHarvestTool, type ToolItem } from './harvest.js'
+
+// VERIFIED 2026-09-07: `goals` is not an ESM named export of this CJS package
+// — Node's named-export detection finds only `Movements`, `pathfinder` and
+// `default`. Destructuring the default import is the only form that resolves
+// all three.
+const { pathfinder, Movements, goals } = pathfinderPkg
+
+/**
+ * A pathfinder goal. Taken from the plugin's own declarations rather than
+ * widened to `unknown`, so the goal constructors below are argument-checked at
+ * compile time instead of trusted.
+ */
+type PathfinderGoal = PathfinderGoals.Goal
+
+/**
+ * The Block and Vec3 types Mineflayer hands back, derived from its own
+ * signatures rather than imported from `prismarine-block`/`vec3`. Those are
+ * only transitive dependencies, and this repository pins every dependency it
+ * imports explicitly; deriving keeps the types exact with no manifest change.
+ *
+ * Note `MineflayerVec3` is prismarine's class — with `.offset()`, `.set()`,
+ * `.distanceTo()` — not the contract's plain `{ x, y, z }` `Vec3`.
+ */
+type MineflayerBlock = NonNullable<ReturnType<Bot['blockAt']>>
+type MineflayerVec3 = MineflayerBlock['position']
 
 export interface MineflayerExecutorOptions {
   host?: string
@@ -98,13 +126,15 @@ export class MineflayerExecutor implements BotExecutor {
    */
   private fabricModdedEntries: readonly RegistryEntry[] = []
   /**
-   * Settles the currently in-flight cancellable action (currently only
-   * `moveTo`) as `interrupted`, if one is running. `stop()` invokes this
-   * before clearing control states — without it, `stop()` only cleared
-   * control states for a single tick, and `moveTo`'s own `physicsTick`
-   * handler re-asserted `setControlState('forward', true)` on the very next
-   * tick (≤50ms later), so the bot kept walking through the "emergency
-   * brake" Phase 5's reflex layer depends on.
+   * Cancels the currently in-flight action, if one is running, so it settles
+   * as `interrupted`. Owned and cleared by `runAction()`, which sets it for
+   * every action rather than only `moveTo`.
+   *
+   * `stop()` invokes this before clearing control states — without it,
+   * `stop()` only cleared control states for a single tick, and `moveTo`'s own
+   * `physicsTick` handler re-asserted `setControlState('forward', true)` on
+   * the very next tick (≤50ms later), so the bot kept walking through the
+   * "emergency brake" Phase 5's reflex layer depends on.
    */
   private inFlightStop: (() => void) | null = null
   /**
@@ -176,6 +206,11 @@ export class MineflayerExecutor implements BotExecutor {
    */
   moddedRegistryEntries(): readonly RegistryEntry[] {
     return this.fabricModdedEntries
+  }
+
+  /** Integration-test accessor: is the pathfinder plugin live on this bot? */
+  hasPathfinder(): boolean {
+    return typeof this.bot?.pathfinder?.goto === 'function'
   }
 
   async connect(): Promise<Result> {
@@ -306,6 +341,15 @@ export class MineflayerExecutor implements BotExecutor {
         // semantics the explicit spawned emit below already relies on.
         this.watchForUnexpectedDisconnect(bot)
         this.wireBotEvents(bot)
+        // Movement is non-destructive by design: canDig false means the
+        // pathfinder never tunnels. The only blocks this executor breaks are
+        // the ones mineBlock was explicitly asked to break — a pathfinder
+        // allowed to dig would quietly rewrite the terrain the integration
+        // tests depend on.
+        bot.loadPlugin(pathfinder)
+        const movements = new Movements(bot)
+        movements.canDig = false
+        bot.pathfinder.setMovements(movements)
         // By 'spawn' the configuration phase is over, so the handshake has
         // either completed or the server never asked for one.
         this.fabricModdedEntries = fabric?.moddedEntries ?? []
@@ -500,103 +544,327 @@ export class MineflayerExecutor implements BotExecutor {
     this.botWiring = []
   }
 
-  async moveTo(target: Vec3, opts?: ActionOptions): Promise<Result> {
+  /**
+   * The single owner of cancellation bookkeeping for every action.
+   *
+   * Guarantees, in this order:
+   *  - an already-aborted signal resolves `interrupted` before any work;
+   *  - no bot resolves `disconnected`;
+   *  - the caller's signal, `stop()`, and the timeout all abort `signal`,
+   *    which `body` is responsible for reacting to;
+   *  - whatever `body` returns, an aborted run is reported as `interrupted`
+   *    (caller abort or stop()) or `timeout`, never as success.
+   *
+   * It never throws: a body that rejects becomes `internal`, per the contract's
+   * resolve-don't-throw rule.
+   *
+   * Exists because `moveTo` carried ~40 lines of this scaffolding that
+   * `mineBlock`'s four cancellable steps would each have repeated, and every
+   * repetition is a chance to get the resolve-never-throw rule subtly wrong.
+   */
+  private async runAction<T>(
+    opts: ActionOptions | undefined,
+    defaultTimeoutMs: number,
+    body: (bot: Bot, signal: AbortSignal) => Promise<Result<T>>,
+  ): Promise<Result<T>> {
     if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
     const bot = this.bot
     if (!bot) return fail('disconnected', 'not connected')
 
-    const timeoutMs = opts?.timeoutMs ?? 30_000
-    const tolerance = 1.5
+    const controller = new AbortController()
+    let cause: 'abort' | 'stop' | 'timeout' | null = null
 
-    return new Promise<Result>((resolve) => {
-      let settled = false
-      const signal = opts?.signal
+    const onCallerAbort = (): void => {
+      cause ??= 'abort'
+      controller.abort()
+    }
+    const stopThisAction = (): void => {
+      cause ??= 'stop'
+      controller.abort()
+    }
+    const timeoutMs = opts?.timeoutMs ?? defaultTimeoutMs
+    const timer = setTimeout(() => {
+      cause ??= 'timeout'
+      controller.abort()
+    }, timeoutMs)
 
-      const cleanup = (): void => {
-        clearTimeout(timer)
-        bot.removeListener('physicsTick', onTick)
-        signal?.removeEventListener('abort', onAbort)
-        if (this.inFlightStop === stopThisMove) this.inFlightStop = null
-        try {
-          bot.clearControlStates()
-        } catch {
-          // disconnected mid-move
-        }
-      }
-      const finish = (result: Result): void => {
-        if (settled) return
-        settled = true
-        cleanup()
-        resolve(result)
-      }
-      const onAbort = (): void => {
-        finish(fail('interrupted', 'aborted mid-move'))
-      }
-      const stopThisMove = (): void => {
-        finish(fail('interrupted', 'stopped via stop()'))
-      }
-      this.inFlightStop = stopThisMove
-      const onTick = (): void => {
-        const p = bot.entity.position
-        const dx = target.x - p.x
-        const dz = target.z - p.z
-        if (Math.hypot(dx, dz) <= tolerance) {
-          finish(ok(undefined))
-          return
-        }
-        // Minecraft yaw: 0 faces -Z, increasing counter-clockwise.
-        void bot.look(Math.atan2(-dx, -dz), 0, true)
-        bot.setControlState('forward', true)
-        // prismarine-entity's .d.ts doesn't declare isCollidedHorizontally, but
-        // mineflayer's physics plugin sets it on the live entity at runtime
-        // (verified against the dev server) — cast narrowly to read it.
-        const entityWithCollisionFlags = bot.entity as unknown as {
-          isCollidedHorizontally?: boolean
-        }
-        bot.setControlState('jump', entityWithCollisionFlags.isCollidedHorizontally === true)
-      }
-      const timer = setTimeout(
-        () => finish(fail('timeout', `did not reach target within ${timeoutMs}ms`)),
-        timeoutMs,
-      )
+    opts?.signal?.addEventListener('abort', onCallerAbort, { once: true })
+    this.inFlightStop = stopThisAction
 
-      signal?.addEventListener('abort', onAbort, { once: true })
-      bot.on('physicsTick', onTick)
-    })
+    /** The single mapping from "this run was aborted" to a failure reason. */
+    const abortedResult = (): Result<T> =>
+      cause === 'timeout'
+        ? fail('timeout', `did not finish within ${timeoutMs}ms`)
+        : fail('interrupted', cause === 'stop' ? 'stopped via stop()' : 'aborted mid-action')
+
+    try {
+      const result = await body(bot, controller.signal)
+      if (controller.signal.aborted) return abortedResult()
+      return result
+    } catch (e) {
+      if (controller.signal.aborted) return abortedResult()
+      return fail('internal', e instanceof Error ? e.message : String(e))
+    } finally {
+      clearTimeout(timer)
+      opts?.signal?.removeEventListener('abort', onCallerAbort)
+      if (this.inFlightStop === stopThisAction) this.inFlightStop = null
+    }
+  }
+
+  /**
+   * Run a pathfinder goal under an AbortSignal, mapping the plugin's outcomes
+   * onto the contract's failure reasons.
+   *
+   * VERIFIED 2026-09-07 by reading node_modules/mineflayer-pathfinder/lib/goto.js:
+   * goto() rejects with an Error whose `.name` is one of 'NoPath', 'Timeout',
+   * 'PathStopped' or 'GoalChanged'. That name is the only reliable
+   * discriminator, and the NoPath/PathStopped split is what separates
+   * 'unreachable' (pick a different target) from 'interrupted' (re-plan from
+   * current state) for Track B's retry policy.
+   */
+  private async gotoGoal(
+    bot: Bot,
+    signal: AbortSignal,
+    goal: PathfinderGoal,
+  ): Promise<Result> {
+    const onAbort = (): void => {
+      try {
+        bot.pathfinder.stop()
+        bot.pathfinder.setGoal(null)
+      } catch {
+        // disconnected mid-path
+      }
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    try {
+      await bot.pathfinder.goto(goal)
+      return ok(undefined)
+    } catch (e) {
+      // An aborted run is relabelled by runAction, so returning ok here is
+      // safe and keeps the mapping in one place.
+      if (signal.aborted) return ok(undefined)
+      const name = e instanceof Error ? e.name : ''
+      if (name === 'NoPath') return fail('unreachable', 'no path to the target')
+      if (name === 'Timeout') {
+        return fail('timeout', 'pathfinder could not compute a path in time')
+      }
+      if (name === 'PathStopped' || name === 'GoalChanged') {
+        return fail('interrupted', 'path stopped before completion')
+      }
+      return fail('internal', e instanceof Error ? e.message : String(e))
+    } finally {
+      signal.removeEventListener('abort', onAbort)
+    }
+  }
+
+  async moveTo(target: Vec3, opts?: ActionOptions): Promise<Result> {
+    // 60s rather than Phase 1's 30s: a measured 30-block path around a wall
+    // took 6.1s, and Phase 4 will ask for much longer routes.
+    return this.runAction(opts, 60_000, async (bot, signal) =>
+      this.gotoGoal(bot, signal, new goals.GoalNear(target.x, target.y, target.z, 1)),
+    )
   }
 
   async followPlayer(_playerName: string, opts?: ActionOptions): Promise<Result> {
-    if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
-    if (!this.bot) return fail('disconnected', 'not connected')
-    return fail('internal', 'followPlayer arrives in Phase 5')
+    return this.runAction(opts, 30_000, async () =>
+      fail('internal', 'followPlayer arrives in Phase 5'),
+    )
   }
 
   async mineBlock(
-    _target: string | Vec3,
-    _maxDistance: number,
+    target: string | Vec3,
+    maxDistance: number,
     opts?: ActionOptions,
   ): Promise<Result<{ position: Vec3; collected: boolean }>> {
-    if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
-    if (!this.bot) return fail('disconnected', 'not connected')
-    return fail('internal', 'mineBlock arrives in Phase 2')
+    return this.runAction(opts, 60_000, async (bot, signal) => {
+      // --- Step 1: resolve the target to a concrete block ---
+      const resolved = this.resolveMineTarget(bot, target, maxDistance)
+      if (!resolved.ok) return resolved
+      const block = resolved.value
+      const position: Vec3 = {
+        x: block.position.x,
+        y: block.position.y,
+        z: block.position.z,
+      }
+
+      // --- Step 2: harvest check BEFORE digging ---
+      // Ordering is the whole point. Bare-handed or wrong-tooled, coal ore
+      // takes 15 seconds to break and drops nothing (measured), so checking
+      // afterwards would mean destroying the resource to discover we could
+      // not have collected it.
+      const items: ToolItem[] = bot.inventory
+        .items()
+        .map((i) => ({ name: i.name, type: i.type, slot: i.slot }))
+      const held = bot.heldItem
+        ? { name: bot.heldItem.name, type: bot.heldItem.type, slot: bot.heldItem.slot }
+        : null
+
+      if (!canHarvest(block, held)) {
+        const better = bestHarvestTool(block, items)
+        if (!better) {
+          return fail(
+            'missing_tool',
+            `nothing in inventory can harvest ${block.name}; the block was left standing`,
+          )
+        }
+        const toEquip = bot.inventory.items().find((i) => i.slot === better.slot)
+        if (!toEquip) {
+          return fail('internal', `tool in slot ${better.slot} vanished before equipping`)
+        }
+        await bot.equip(toEquip, 'hand')
+      }
+
+      if (bot.inventory.emptySlotCount() === 0) {
+        return fail('inventory_full', 'no free inventory slot for the drop')
+      }
+      if (signal.aborted) return ok({ position, collected: false })
+
+      // --- Step 3: approach, then dig ---
+      const approach = await this.gotoGoal(
+        bot,
+        signal,
+        new goals.GoalLookAtBlock(block.position, bot.world),
+      )
+      if (!approach.ok) return approach
+      if (signal.aborted) return ok({ position, collected: false })
+
+      // Re-read the block: the approach took time, and something else may have
+      // broken it while we walked.
+      const fresh = bot.blockAt(block.position)
+      if (!fresh || fresh.name === 'air') {
+        return fail(
+          'not_found',
+          `${block.name} at ${position.x},${position.y},${position.z} is gone`,
+        )
+      }
+      await bot.dig(fresh)
+
+      // --- Step 4: collect the drop ---
+      const collected = await this.collectDrop(bot, signal, block.position)
+      return ok({ position, collected })
+    })
+  }
+
+  /**
+   * Walk onto whatever the dig dropped and wait for it to reach the inventory.
+   *
+   * VERIFIED 2026-09-07: mining does not collect. After a successful dig the
+   * coal sat as an item entity 1.72 blocks away and was still uncollected
+   * three seconds later — Minecraft's pickup radius is roughly one block, so
+   * waiting longer would not have helped. The bot has to go and get it.
+   *
+   * Best-effort by design, and never fails the action: the block WAS mined,
+   * and reporting a failure would lose that. A drop that fell in lava or was
+   * grabbed by a mob resolves `collected: false`, which is precisely the
+   * distinction the contract's boolean exists to carry.
+   */
+  private async collectDrop(
+    bot: Bot,
+    signal: AbortSignal,
+    origin: MineflayerVec3,
+  ): Promise<boolean> {
+    const countItems = (): number => bot.inventory.items().reduce((n, i) => n + i.count, 0)
+    const before = countItems()
+    const deadline = Date.now() + 8_000
+
+    // Give the drop a moment to spawn and settle before looking for it.
+    await new Promise((r) => setTimeout(r, 400))
+
+    while (Date.now() < deadline && !signal.aborted) {
+      if (countItems() > before) return true
+
+      // Only drops near where we dug — anything further away is someone
+      // else's litter, not this dig's product.
+      const drop = Object.values(bot.entities)
+        .filter((e) => e?.name === 'item' && e.position && e.position.distanceTo(origin) < 6)
+        .map((e) => ({ entity: e, distance: e.position.distanceTo(bot.entity.position) }))
+        .sort((a, b) => a.distance - b.distance)[0]
+
+      if (!drop) {
+        await new Promise((r) => setTimeout(r, 300))
+        continue
+      }
+
+      // The drop can despawn, be collected, or be killed mid-path; none of
+      // that is an error here, so fall through and re-check the inventory.
+      await this.gotoGoal(
+        bot,
+        signal,
+        new goals.GoalNear(
+          Math.floor(drop.entity.position.x),
+          Math.floor(drop.entity.position.y),
+          Math.floor(drop.entity.position.z),
+          0,
+        ),
+      )
+      await new Promise((r) => setTimeout(r, 500))
+    }
+
+    return countItems() > before
+  }
+
+  /**
+   * Resolve a mine target to a live block. A name searches for the nearest
+   * match; a position names one block exactly — which is the point of
+   * accepting a Vec3 at all, since a name re-search may pick a different
+   * block than the planner reasoned about.
+   */
+  private resolveMineTarget(
+    bot: Bot,
+    target: string | Vec3,
+    maxDistance: number,
+  ): Result<MineflayerBlock> {
+    if (typeof target === 'string') {
+      if (!bot.registry.blocksByName[target]) {
+        return fail('invalid_target', `unknown block name "${target}"`)
+      }
+      const nearest = this.findBlocks({ names: [target], maxDistance, limit: 1 })[0]
+      if (!nearest) return fail('not_found', `no ${target} within ${maxDistance} blocks`)
+      const block = bot.blockAt(
+        this.toBlockPos(bot, nearest.position.x, nearest.position.y, nearest.position.z),
+      )
+      if (!block) return fail('not_found', `the ${target} found is no longer loaded`)
+      return ok(block)
+    }
+
+    const origin = bot.entity.position
+    const distance = Math.hypot(target.x - origin.x, target.y - origin.y, target.z - origin.z)
+    if (distance > maxDistance) {
+      return fail(
+        'not_found',
+        `target is ${distance.toFixed(1)} blocks away, beyond maxDistance ${maxDistance}`,
+      )
+    }
+    const block = bot.blockAt(this.toBlockPos(bot, target.x, target.y, target.z))
+    if (!block || block.name === 'air') {
+      return fail('not_found', `no block at (${target.x}, ${target.y}, ${target.z})`)
+    }
+    return ok(block)
+  }
+
+  /**
+   * Build a prismarine Vec3 without importing `vec3` directly. `vec3` is only
+   * a transitive dependency of mineflayer, and this repository pins every
+   * dependency it imports explicitly — cloning a Vec3 the bot already owns
+   * gets the same instance type with no manifest change. `offset()` returns a
+   * new vector, so the bot's own position is never mutated.
+   */
+  private toBlockPos(bot: Bot, x: number, y: number, z: number): MineflayerVec3 {
+    return bot.entity.position.offset(0, 0, 0).set(x, y, z)
   }
 
   async placeBlock(_blockName: string, _position: Vec3, opts?: ActionOptions): Promise<Result> {
-    if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
-    if (!this.bot) return fail('disconnected', 'not connected')
-    return fail('internal', 'placeBlock arrives in Phase 5')
+    return this.runAction(opts, 30_000, async () =>
+      fail('internal', 'placeBlock arrives in Phase 5'),
+    )
   }
 
   async attack(_entityId: number, opts?: ActionOptions): Promise<Result> {
-    if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
-    if (!this.bot) return fail('disconnected', 'not connected')
-    return fail('internal', 'attack arrives in Phase 5')
+    return this.runAction(opts, 30_000, async () => fail('internal', 'attack arrives in Phase 5'))
   }
 
   async flee(opts?: ActionOptions): Promise<Result> {
-    if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
-    if (!this.bot) return fail('disconnected', 'not connected')
-    return fail('internal', 'flee arrives in Phase 5')
+    return this.runAction(opts, 30_000, async () => fail('internal', 'flee arrives in Phase 5'))
   }
 
   chat(message: string): void {
@@ -611,6 +879,16 @@ export class MineflayerExecutor implements BotExecutor {
     const cancel = this.inFlightStop
     this.inFlightStop = null
     cancel?.()
+    // Halt the pathfinder explicitly as well. Cancelling the action aborts its
+    // signal, which gotoGoal reacts to — but stop() is the emergency brake, and
+    // it must also stop a bot left walking by anything not currently tracked as
+    // an in-flight action.
+    try {
+      this.bot?.pathfinder?.stop()
+      this.bot?.pathfinder?.setGoal(null)
+    } catch {
+      // pathfinder not loaded, or disconnected
+    }
     try {
       this.bot?.clearControlStates()
     } catch {

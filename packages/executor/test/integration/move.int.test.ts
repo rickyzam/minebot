@@ -90,8 +90,19 @@ describe('MineflayerExecutor.moveTo', () => {
     const start = executor.getState().self.position
     const controller = new AbortController()
 
+    // The target must be ON the runway (which ends at ARENA.x1 = 560), and far
+    // enough that the walk is still in progress a second from now. It used to
+    // be start.x + 60 ≈ 565 — off the platform's east edge, over open air.
+    // Phase 1's raw movement never evaluated reachability, so it set off
+    // toward the void and aborting mid-stride produced 'interrupted'. The
+    // pathfinder decides up front that there is no path to a spot with no
+    // floor and returns 'unreachable' in well under a second, so the abort
+    // never lands and this test measured the old implementation's blindness
+    // rather than its own subject. ~50 blocks along the runway is reachable
+    // and takes ~10s (measured: 30 blocks ≈ 6.1s), so the 1s abort is
+    // comfortably mid-walk.
     const pending = executor.moveTo(
-      { x: start.x + 60, y: start.y, z: start.z },
+      { x: ARENA.x1 - 5, y: start.y, z: start.z },
       { signal: controller.signal, timeoutMs: 30_000 },
     )
     setTimeout(() => controller.abort(), 1_000)
@@ -106,7 +117,7 @@ describe('MineflayerExecutor.moveTo', () => {
     expect(Math.hypot(later.x - atAbort.x, later.z - atAbort.z)).toBeLessThan(2)
   })
 
-  it('times out on an unreachable target', async () => {
+  it('times out on a reachable target it cannot arrive at in time', async () => {
     executor = new MineflayerExecutor({ username: 'ITMoveTimeout' })
     await executor.connect()
     await resetToArena(executor, 'ITMoveTimeout')
@@ -118,11 +129,20 @@ describe('MineflayerExecutor.moveTo', () => {
     // blocks from y≈199 to real terrain, likely dying and respawning
     // elsewhere. The test still went green because it only asserted
     // `reason === 'timeout'`, which a respawned-and-idle bot also satisfies —
-    // passing for the wrong reason instead of exercising an in-bounds,
-    // reachable-forever walk that legitimately never arrives.
+    // passing for the wrong reason instead of exercising an in-bounds walk
+    // that legitimately does not arrive in time.
+    //
+    // The target used to be start.x + 5000, which under Phase 1's raw movement
+    // was "walk forward forever until the clock runs out". Under the
+    // pathfinder that coordinate has no floor and no path, so it now reports
+    // 'unreachable' — which is the correct answer for it, and precisely the
+    // distinction Task 7 exists to draw. Timing out is a different outcome and
+    // still needs covering, so this walks somewhere genuinely reachable and
+    // cuts the clock short: ~50 blocks along the runway takes ~10s (measured:
+    // 30 blocks ≈ 6.1s), so a 3s budget expires mid-walk.
     const r = await executor.moveTo(
-      { x: start.x + 5_000, y: start.y, z: start.z },
-      { timeoutMs: 6_000 },
+      { x: ARENA.x1 - 5, y: start.y, z: start.z },
+      { timeoutMs: 3_000 },
     )
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toBe('timeout')
