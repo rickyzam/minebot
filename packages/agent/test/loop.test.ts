@@ -68,6 +68,44 @@ describe('runGoal — the guards', () => {
     expect(out.steps).toHaveLength(3)
   })
 
+  it('stops when two useless actions alternate instead of repeating', async () => {
+    // VERIFIED against the live server: the loop oscillated
+    //   move_to -> mine_block_at -> move_to -> mine_block_at -> ...
+    // making no progress. The old guard needed `stuckThreshold` IDENTICAL
+    // consecutive signatures, so the interleaving broke the run every time and
+    // it never fired. That run only ended because the model volunteered
+    // give_up; a less cooperative one would have burned the whole budget.
+    const m = await connected()
+    const llm = new FakeLlmClient([WALK, FIND, WALK, FIND, WALK, FIND, WALK, FIND], {
+      repeatLast: true,
+    })
+    const out = await run(m, llm, { maxSteps: 20, stuckThreshold: 3 })
+
+    expect(out.status).toBe('stuck')
+    // Three occurrences of one signature inside a window of six steps.
+    expect(out.steps.length).toBeLessThanOrEqual(6)
+  })
+
+  it('does not call genuine progress stuck', async () => {
+    // The guard must not fire on a run that repeats an ACTION TYPE while
+    // actually getting somewhere — mining three different ores is
+    // find/mine/find/mine, which is exactly the shape the alternating guard
+    // looks for. The signature includes the action's arguments, so different
+    // targets are different signatures and this must still reach done.
+    const m = await connected()
+    const llm = new FakeLlmClient([
+      FIND,
+      '{"action":"mine_block_at","x":18,"y":60,"z":-34,"maxDistance":32}',
+      FIND,
+      '{"action":"move_to","x":5,"y":64,"z":5}',
+      FIND,
+      '{"action":"move_to","x":9,"y":64,"z":9}',
+      DONE,
+    ])
+    const out = await run(m, llm, { maxSteps: 20, stuckThreshold: 3 })
+    expect(out.status).toBe('done')
+  })
+
   it('stops after consecutive unusable replies', async () => {
     const m = await connected()
     const out = await run(m, new FakeLlmClient(['not an action'], { repeatLast: true }), {

@@ -106,6 +106,33 @@ const SCENARIOS: readonly Scenario[] = [
     hoped: ['move_to'],
   },
   {
+    // Observed twice against the live server, in unrelated circumstances: after
+    // mine_block_at came back not_found, the model mined the SAME position
+    // again rather than accepting the block was gone. The block is not coming
+    // back; the useful moves are to search elsewhere or give up.
+    name: 'mine_block_at already returned not_found',
+    goal: 'get me some coal',
+    inventory: [PICKAXE],
+    history: [
+      found,
+      step(
+        2,
+        { action: 'mine_block_at', ...COAL_AT, maxDistance: 32 },
+        { kind: 'result', result: ok({ position: COAL_AT, collected: false }) },
+      ),
+      step(3, { action: 'move_to', ...COAL_AT }, { kind: 'result', result: ok(undefined) }),
+      step(
+        4,
+        { action: 'mine_block_at', ...COAL_AT, maxDistance: 32 },
+        {
+          kind: 'result',
+          result: fail('not_found', `no block at ${COAL_AT.x},${COAL_AT.y},${COAL_AT.z}`),
+        },
+      ),
+    ],
+    hoped: ['find_blocks', 'give_up'],
+  },
+  {
     name: 'goal met',
     goal: 'get me some coal',
     inventory: [PICKAXE, COAL],

@@ -40,13 +40,36 @@ const outcomeSignature = (o: StepOutcome): string => {
 const signatureOf = (s: Step): string | null =>
   s.action === null ? null : `${JSON.stringify(s.action)}|${outcomeSignature(s.outcome)}`
 
+/**
+ * Has the run stopped making progress?
+ *
+ * Fires when one action-and-outcome signature occurs `threshold` times inside
+ * the last `threshold * 2` steps — NOT only when they are consecutive.
+ *
+ * VERIFIED against the live server: the loop oscillated
+ * `move_to -> mine_block_at -> move_to -> mine_block_at` around a block that no
+ * longer existed. The old rule required `threshold` IDENTICAL CONSECUTIVE
+ * signatures, so each interleaved action reset it and the guard never fired.
+ * That run ended only because the model chose to give up; nothing in the loop
+ * would have stopped it. Two useless actions taking turns is exactly as stuck
+ * as one repeated, and far more likely than a model repeating itself verbatim.
+ *
+ * A window rather than a global count, so a long run is not condemned by
+ * something it did and recovered from many steps ago. The signature includes
+ * the action's arguments, so mining three different blocks is three different
+ * signatures and never trips this.
+ */
 const isStuck = (steps: readonly Step[], threshold: number): boolean => {
   if (threshold < 1 || steps.length < threshold) return false
-  const tail = steps.slice(-threshold)
-  const first = tail[0]
-  const target = first ? signatureOf(first) : null
-  if (target === null) return false
-  return tail.every((s) => signatureOf(s) === target)
+  const counts = new Map<string, number>()
+  for (const s of steps.slice(-threshold * 2)) {
+    const signature = signatureOf(s)
+    if (signature === null) continue
+    const seen = (counts.get(signature) ?? 0) + 1
+    if (seen >= threshold) return true
+    counts.set(signature, seen)
+  }
+  return false
 }
 
 /**
