@@ -89,4 +89,59 @@ describe('the full loop against the live server', () => {
       expect(mine.outcome.result.ok).toBe(true)
     }
   })
+
+  it('renders a game-produced missing_tool into the next prompt', async () => {
+    executor = new MineflayerExecutor({ username: 'ITLoopNoTool' })
+    expect((await executor.connect()).ok).toBe(true)
+    // No tool. The real executor's harvest guard produces missing_tool, and
+    // leaves the ore standing rather than spending 15s destroying it for
+    // nothing (Phase 2 design; measured).
+    await setUpArena(executor, 'ITLoopNoTool')
+
+    const llm = new FakeLlmClient([
+      `{"action":"mine_block_at","x":${ORE.x},"y":${ORE.y},"z":${ORE.z},"maxDistance":32}`,
+      '{"action":"give_up","reason":"no pickaxe in inventory"}',
+    ])
+
+    const outcome = await runBotGoal('get me some coal', {
+      executor,
+      decider: new SchemaDecider(llm),
+      maxSteps: 6,
+    })
+
+    expect(outcome.status).toBe('gave_up')
+
+    const mine = outcome.steps[0]
+    expect(mine?.outcome.kind).toBe('result')
+    if (mine?.outcome.kind === 'result') {
+      expect(mine.outcome.result.ok).toBe(false)
+      if (!mine.outcome.result.ok) expect(mine.outcome.result.reason).toBe('missing_tool')
+    }
+
+    // Track A's guard, re-proven from the far side of the loop: missing_tool
+    // must mean "we declined to destroy it", not "we destroyed it and said so".
+    //
+    // Keep observer usernames to 16 characters. Minecraft caps them there, and
+    // a longer one is rejected at login — connect() returns disconnected, which
+    // reads as a mysterious fixture failure rather than a naming mistake. This
+    // one was originally 'ITLoopNoToolCheck', which is 17.
+    const observer = new MineflayerExecutor({ username: 'ITNoToolWatch' })
+    try {
+      expect((await observer.connect()).ok).toBe(true)
+      await teleportAndWait(observer, 'ITNoToolWatch', START)
+      await waitForOnGround(observer, { expectedY: ARENA.floorY + 1 })
+      const still = observer.findBlocks({ names: ['coal_ore'], maxDistance: 32, limit: 5 })
+      expect(still.map((b) => b.position)).toContainEqual(ORE)
+    } finally {
+      await observer.disconnect()
+    }
+
+    // The integration assertion that matters: the failure the *game* produced
+    // reached the model's input carrying its reason. Asserting only on the
+    // returned status would pass against a loop that drops the detail on the
+    // floor, and the model would then be deciding blind.
+    expect(llm.requests).toHaveLength(2)
+    const secondPrompt = llm.requests[1]?.messages.map((m) => m.content).join('\n') ?? ''
+    expect(secondPrompt).toContain('missing_tool')
+  })
 })
