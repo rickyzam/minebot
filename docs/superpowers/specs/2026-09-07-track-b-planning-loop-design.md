@@ -37,19 +37,58 @@ with its termination guards.
 
 ## 2. Environment
 
-The design spec's §2 host — the 16-core Linux box with the 16GB GPU that runs Ollama on
-`:11434` — **is not the machine this package is being developed on.** There is no
-reachable model endpoint today.
+The model runs on another machine on the LAN: **Ollama 0.33.3 at `192.168.1.21:11434`**,
+holding `qwen3:14b` (9.3GB, Q4_K_M) alongside `qwen3:30b-a3b`, `qwen2.5-coder:14b` and
+`llama3.2:3b`. It is reachable from the development machine, so the measurements in §2.1
+are real rather than deferred.
 
-That is a design input, not an obstacle. It forces the LLM transport behind an interface
-from the first commit, with a scripted fake as the only implementation any test uses. The
-consequence is a property worth keeping permanently: **`npm test` never opens a socket.**
-It already never talks to Minecraft; now it also never talks to a model.
+`OLLAMA_HOST` and `MINEBOT_MODEL` configure the client; the defaults are
+`http://127.0.0.1:11434` and `qwen3:14b`, so a colocated setup needs no configuration and
+this one sets `OLLAMA_HOST`.
 
-The cost is honest and stated here: this slice cannot answer "does `qwen3:14b` reliably
-emit schema-correct actions?" It builds the machinery that makes the answer measurable,
-and §12 records the question as still open. A `npm run agent:probe` script exists for the
-day an endpoint does, and is not part of `npm test`.
+**`npm test` still never opens a socket.** That was forced when no endpoint existed; it is
+now a deliberate discipline, and the more important for being optional. A reachable box is a
+standing temptation to write tests that depend on a machine being up, and this repo already
+separates its server-dependent tests into their own Vitest project for exactly that reason.
+Model behaviour is measured by `npm run agent:probe`, which reports numbers, and never by a
+pass/fail unit test.
+
+### 2.1 Measured model behaviour (2026-09-07)
+
+Against `qwen3:14b` at temperature 0, five samples per cell, over five hand-built turns of
+the coal scenario — no history, after a search, after a `missing_tool` failure, after a mine
+that lost its drop, and after the goal was met.
+
+| | Replies decoded | Median latency |
+|---|---|---|
+| **Schema-constrained, `think:false`** | **25/25** | **370ms** |
+| Native tool-calling, `think:false` | 20/25 | 469ms |
+| Schema-constrained, `think:true` | 10/10 | 7641ms |
+
+Read these as consistency, not robustness: temperature 0 makes the model near-deterministic,
+so `5/5` means "it does this every time," not "it survives rephrasing."
+
+Five findings, each of which changed a decision below:
+
+1. **Tool-calling fails on `done`.** All five of its rejections were the same case — asked to
+   end the run, the model answers in prose instead of calling the tool, because "the goal is
+   achieved" reads as a conversational conclusion rather than a function call. That is the
+   *terminal* action; a loop that cannot reliably reach it always burns its full budget.
+   This resolves design spec §8.2 — see §5.
+2. **Thinking mode costs 20× latency and accuracy.** It also degraded turn 2, choosing a
+   redundant `move_to` in 4 of 5 samples where `think:false` chose `mine_block_at` every
+   time. Design spec §8.1 guessed `think: false`; the measurement is decisive.
+3. **The menu wording is load-bearing.** A terse auto-generated menu produced a wasted
+   `move_to` on turn 2 in 5 of 5 samples; the hand-written menu of §4, with JSON examples and
+   the hint *"Prefer this after find_blocks"*, produced `mine_block_at` in 5 of 5. Same model,
+   same temperature, same scenario. Prompt edits are behavioural changes and need re-probing.
+4. **First call is cold.** 2884ms on the first request, ~370ms after. The three-layer
+   architecture's premise — reflexes cannot wait for the planner — still holds, but the margin
+   is far more comfortable than the notes' "multi-second" estimate.
+5. **`collected: false` is misread.** After a successful mine whose drop was lost, the model
+   chose to mine the same, now-destroyed block in 5 of 5 samples rather than walking to the
+   drop. That would fail `not_found` and then trip the stuck guard. Recorded as open in §12;
+   it is a prompt-wording problem, not a structural one.
 
 ## 3. Architecture — one action per turn
 
@@ -89,7 +128,26 @@ export type ActionRequest =
   | { action: 'mine_block_at'; x: number; y: number; z: number; maxDistance: number }
   | { action: 'chat'; message: string }
   | { action: 'done'; summary: string }
+  | { action: 'give_up'; reason: string }
 ```
+
+### 4.0 Why `give_up` exists
+
+Probing (§2.1) showed the model, handed a `missing_tool` failure with a genuinely empty
+inventory, choosing `chat("I need a pickaxe to mine coal ore")` in 5 of 5 samples. That is a
+sensible read of the situation and a dead end: with no way to say the goal is unreachable, the
+run then grinds on to `budget_exhausted` or `stuck`, and neither distinguishes *"impossible,
+and here is why"* from *"the loop malfunctioned"*.
+
+`give_up` is `done`'s twin — a terminal action carrying the model's own reason, surfaced as the
+`gave_up` outcome. The phase plan lists *"when does it escalate, retry with a wider radius, or
+give up and report back"* as explicitly Track B's question; this is the smallest thing that
+makes the last of those expressible. It also stops roughly a dozen wasted model calls per
+impossible goal.
+
+It is deliberately **not** folded into `done` with a success flag. The probe shows `done` being
+chosen correctly and reliably, and conflating "achieved" with "abandoned" at the schema level
+puts that at risk for no gain.
 
 ### 4.1 Why `find_blocks` is an action the model chooses
 
@@ -132,9 +190,14 @@ exhausting its budget.
 
 ## 5. The LLM seam
 
-Design spec §8.2 leaves "Ollama native tool-calling vs. hand-rolled JSON" open, to be
-resolved at Phase 3. It cannot be resolved now — there is no model to measure. So the
-design keeps both reachable at a cost of one small interface.
+Design spec §8.2 left "Ollama native tool-calling vs. hand-rolled JSON" open, to be resolved at
+Phase 3. **It is resolved here instead, by measurement: schema-constrained output wins** —
+25/25 decoded against 20/25, and 370ms against 469ms (§2.1). More decisively than the totals
+suggest, since every tool-calling failure was the terminal `done` action.
+
+So the design commits to schema-constrained output and does **not** carry a tool-calling
+implementation. Keeping one would be an abstraction maintained for a choice the evidence has
+already made.
 
 Two layers:
 
@@ -149,14 +212,8 @@ export interface ChatRequest {
   signal?: AbortSignal
 }
 
-/** The model's reply. `toolCalls` stays absent until a tool-calling Decider exists. */
-export interface ChatReply {
-  content: string
-  toolCalls?: readonly { name: string; arguments: unknown }[]
-}
-
 export interface LlmClient {
-  chat(req: ChatRequest): Promise<ChatReply>
+  chat(req: ChatRequest): Promise<string>
 }
 
 // decide.ts — mechanism. Prompt in, one validated action out.
@@ -169,16 +226,14 @@ export type DecideResult =
   | { ok: false; error: DecodeError;    raw: string }
 ```
 
-`SchemaDecider` is the only implementation in this slice: it sets `format` to the action
-schema and parses the reply's content. A future `ToolCallDecider` would set `tools` and read
-`message.tool_calls`, and would reuse `actions.ts`, `prompt.ts` and the entire semantic
-validator unchanged — tool definitions *are* JSON Schema. The measured mechanism cost is
-therefore one new decider plus populating `ChatReply.toolCalls` in `OllamaClient`, and Phase 3
-chooses with evidence instead of a guess made today.
+`SchemaDecider` is the only implementation: it sets `format` to the action schema and parses
+the reply's content.
 
-`ChatReply` is an object rather than a bare string for exactly this reason: a tool-calling reply
-is not text, and a `Promise<string>` transport would have made the swap a change to every
-implementation's signature instead of an added field.
+`Decider` survives the resolution of §8.2, but it earns its place as a **testing** seam rather
+than a mechanism one. `runGoal` needs something injectable to depend on — the `llm_error` test
+supplies a decider that throws, which is not expressible against a concrete class. Should a
+future model behave differently enough to reopen the question, §2.1 is the measurement to
+repeat and `probe.ts` is the tool for it.
 
 `LlmClient` has exactly two implementations: `OllamaClient`, the only module in the package
 that opens a socket, and `FakeLlmClient`, which returns replies a test queued and records
@@ -189,14 +244,15 @@ every request it received. Every test uses the fake.
 `POST {host}/api/chat`, `stream: false`, with `format` set to the action schema,
 `think: false`, and `temperature: 0`.
 
-`think: false` addresses design spec §8.1 directly: `qwen3:14b` advertises a thinking mode
-whose traces inflate latency and can wrap JSON in prose. Disabling it is the spec's own
-recommendation ("Track B should test with thinking disabled first"), and constrained output
-would fight it regardless. Temperature 0 because this is classification over a fixed menu,
-not generation.
+`think: false` settles design spec §8.1, which recommended testing with thinking disabled
+first. Measured (§2.1), it is not close: thinking costs **20× latency** — 7641ms against
+370ms — and made the model *worse*, choosing a redundant `move_to` in 4 of 5 samples on a turn
+that `think:false` got right every time. Temperature 0 because this is classification over a
+fixed menu, not generation.
 
 Configuration is environment-driven with defaults: `OLLAMA_HOST`
-(`http://127.0.0.1:11434`) and `MINEBOT_MODEL` (`qwen3:14b`).
+(`http://127.0.0.1:11434`) and `MINEBOT_MODEL` (`qwen3:14b`). The dev box is
+`http://192.168.1.21:11434`.
 
 ## 6. Decoding and validation
 
@@ -216,6 +272,7 @@ empty reply, or a model that ignores the constraint, still has to be handled. `n
 | coordinates | finite; floored to integers; `-64 <= y <= 320`; `abs(x)`, `abs(z) <= 3e7` |
 | `message` | non-empty, `<= 256` characters (Minecraft's own limit) |
 | `summary` | non-empty |
+| `reason` | non-empty (`give_up`) |
 
 Stripping the namespace prefix is a deliberate normalisation, not laxity: Mineflayer's block
 names are bare (`coal_ore`), the contract's own `BlockQuery` example uses bare names, and a
@@ -295,7 +352,14 @@ something.
 export type GoalOutcome =
   | { status: 'done'; summary: string; steps: readonly Step[] }
   | {
-      status: 'budget_exhausted' | 'stuck' | 'undecodable' | 'interrupted' | 'disconnected'
+      status:
+        | 'gave_up'
+        | 'budget_exhausted'
+        | 'stuck'
+        | 'undecodable'
+        | 'interrupted'
+        | 'disconnected'
+        | 'llm_error'
       detail: string
       steps: readonly Step[]
     }
@@ -304,14 +368,17 @@ export type GoalOutcome =
 | Status | Cause |
 |---|---|
 | `done` | The model chose `done`. |
+| `gave_up` | The model chose `give_up`. `detail` carries its stated reason. |
 | `budget_exhausted` | `maxSteps` reached. Default **16**. |
 | `stuck` | The same `(action, outcome)` pair three times running. |
 | `undecodable` | Three consecutive undecodable steps. |
 | `interrupted` | The caller's `AbortSignal` fired. |
 | `disconnected` | `getState()` or `findBlocks()` threw. |
+| `llm_error` | The model could not be reached, or returned an error. |
 
 Failure is a returned value, never a thrown error — the same reasoning the contract gives for
-`Result`, applied one layer up.
+`Result`, applied one layer up. `llm_error` exists so that stays true when the endpoint is
+down: without it an unreachable model would be the one thing that had to throw.
 
 ### 7.3 The throw/resolve asymmetry
 
@@ -426,8 +493,10 @@ accident would turn an exhausted script into a passing test.
 | Decision | Choice | Rationale |
 |---|---|---|
 | Loop shape | One action per turn, prompt rebuilt each turn | §3.5 preemption makes plan queues re-planning with extra steps; rebuilding keeps snapshots from going stale in a transcript |
-| Model access | Interface + scripted fake; real client unverified | No endpoint reachable; keeps `npm test` socket-free permanently |
-| Decode mechanism | JSON-Schema-constrained output, behind a `Decider` seam | §8.2 defers the choice to Phase 3; the seam costs one file and preserves the option |
+| Model access | Interface + scripted fake in every test; real client used only by `probe.ts` | The endpoint is reachable, so socket-free tests are now a discipline rather than a constraint — and the more worth keeping for being optional |
+| Decode mechanism | JSON-Schema-constrained output; no tool-calling implementation | Measured: 25/25 vs 20/25 and 370ms vs 469ms, with every tool-calling failure landing on the terminal `done` action (§2.1) |
+| `Decider` seam | Kept, as a testing seam | §8.2 is answered, so it no longer preserves a mechanism choice; it still lets `runGoal` be handed a decider that throws |
+| Terminal actions | `done` and `give_up`, kept separate | The model reliably chooses `done`; folding "abandoned" into it risks that for no gain (§4.0) |
 | Mining actions | Split into `mine_nearest_block` / `mine_block_at` | Keeps every schema member a flat object; one top-level union instead of a nested one |
 | Failure policy | Feed outcomes back to the model; budget + repetition guards only | Phase 4 owns policy, and should write it against observed failures |
 | Decode errors | Agent-local type, not `FailureReason` | `Result`'s vocabulary is about the game world; reusing it would widen the shared contract |
@@ -436,15 +505,24 @@ accident would turn an exhausted script into a passing test.
 
 ## 12. Open questions
 
-1. **Does `qwen3:14b` actually hold the format?** Unanswerable here — no endpoint. The
-   machinery makes it measurable; `probe.ts` is where the answer comes from. Carries design
-   spec §8.1 and §8.2 forward unresolved.
-2. **Is the repetition guard too aggressive?** Three identical `(action, outcome)` pairs is a
+1. ~~**Does `qwen3:14b` actually hold the format?**~~ **Answered** (§2.1): 25/25 under
+   schema-constrained decoding at 370ms median. Design spec §8.1 and §8.2 are both resolved.
+   The measurement is five samples per cell at temperature 0, so it establishes consistency,
+   not robustness — re-run `probe.ts` after any prompt or menu change.
+2. **The model mines a block it has already destroyed.** Given `collected: false`, it chose to
+   re-mine the same position in 5 of 5 samples instead of walking to the drop. The stuck guard
+   catches it, but a wasted step and a `not_found` is the wrong outcome for a mine that
+   *succeeded*. Likely a menu-wording fix; needs a probe run to confirm rather than a guess.
+3. **How sensitive is behaviour to menu wording?** One terse rewrite of the menu changed turn 2
+   from `mine_block_at` to a wasted `move_to`, 5 of 5 (§2.1). That is a large effect from an
+   edit that looked cosmetic, and it means prompt text is behavioural code. Unknown how much
+   further it can be improved, or how brittle the current wording is.
+4. **Is the repetition guard too aggressive?** Three identical `(action, outcome)` pairs is a
    guess. Legitimately repeating an action after two interruptions would trip it. The step log
    will show whether it fires on real runs; tune with evidence.
-3. **Is an 8-step history window enough?** Long enough to see a failed approach, short enough
+5. **Is an 8-step history window enough?** Long enough to see a failed approach, short enough
    to stay cheap. Unmeasured.
-4. **Should `find_blocks` results persist beyond the window?** A block found at step 2 falls
+6. **Should `find_blocks` results persist beyond the window?** A block found at step 2 falls
    out of the prompt by step 11, and the model would have to search again. A small dedicated
    "known blocks" section may be warranted. Deferred until a run demonstrates the problem.
 
@@ -454,12 +532,21 @@ By construction, swapping the mock for the real executor changes **only the call
 `runGoal` takes a `BotExecutor` and does not know which one it has. That is the whole point of
 the contract, and `runContractSuite` is what makes it a verified step rather than a hope.
 
-Two real dependencies, both on Track A, and both worth stating plainly:
+**Phase 2 landed while this spec was being written** (PR #11). `moveTo` runs on
+`mineflayer-pathfinder`, and `mineBlock` resolves a target, checks harvestability, digs, and
+walks onto the drop. Every action the menu of §4 exposes is now genuinely implemented on the
+real executor, so the coal trace is executable end to end rather than blocked at the mining
+step. The earlier draft of this section said otherwise; it was true when written.
 
-- **Phase 2's executor half is unfinished.** `mineBlock` still returns
-  `fail('internal', 'mineBlock arrives in Phase 2')` and `mineflayer-pathfinder` is not a
-  dependency yet. Phase 2's contract changes (tasks 1–4) landed; tasks 5–13 did not. A Phase 3
-  run attempting the coal trace will fail at the mining step until they do.
-- **The reflex layer does not exist**, so nothing yet drives the interruption path in a real
+Three things to know before wiring it up:
+
+- **The dev server moved.** A Velocity proxy now fronts it: people connect on 25565, the Fabric
+  backend listens on loopback 25566, and `MineflayerExecutor` defaults to 25566 and signs its
+  own forwarding payload. Nothing in `packages/agent/` cares — it never constructs an executor
+  — but the Phase 3 caller does.
+- **`collected: false` is a live failure mode**, not a hypothetical. §12 question 2 records the
+  model mishandling it, and Phase 2 measured that mining genuinely does not collect on its own.
+  A first real run is likely to hit this.
+- **The reflex layer still does not exist**, so nothing drives the interruption path in a real
   game. This slice's `interrupted` handling is exercised by injection against the mock, which
   verifies the loop's half of the protocol but not the arbiter's.
