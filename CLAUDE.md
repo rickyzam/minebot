@@ -11,11 +11,12 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 ## Commands
 
 ```bash
-npm test                  # 168 unit tests. No network. Fast. Run these constantly.
+npm test                  # 179 unit tests. No network. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
-npm run test:integration  # 61 tests. Requires the live dev server.
+npm run test:integration  # 79 tests. Requires the live dev server.
 npm run smoke             # Minimal "can a bot connect at all" check.
 npm run demo              # Connect, print snapshot, walk. The Phase 1 deliverable.
+npm run demo:phase2       # Connect, path around a wall, mine coal. The Phase 2 deliverable.
 ```
 
 When an integration test fails, run `npm run smoke` first. It separates "my code is broken" from "the server is unreachable," and that distinction saves a lot of wasted debugging.
@@ -54,6 +55,14 @@ These cost real debugging time to discover. Treat them as settled.
 | The backend advertises forwarding version **4**, but version **1** is accepted | Later versions only add a Mojang public key, which a bot does not have |
 | Bot UUIDs are the offline-mode ones (`MD5("OfflinePlayer:<name>")`, v3) | Deliberate: a bot's identity and player data survive the proxy being added or removed |
 | `/fill` silently refuses unloaded chunks with "That position is not loaded" | The test arena is `forceload`ed. This bug once made every test pass against a freefalling bot |
+| `bot.canDigBlock()` returns `true` bare-handed, with a shovel, and with a pickaxe | It means "breakable", not "harvestable". Never use it for `missing_tool`; use `block.harvestTools` |
+| `bot.pathfinder.bestHarvestTool()` returned `iron_shovel` for coal ore when that was the only inventory item | Untrustworthy. `harvest.ts` owns the decision instead |
+| Mining does not collect — a drop 1.72 blocks away was uncollected 3s later | `mineBlock` walks onto the drop; `collected: false` is a real outcome, not a bug |
+| Coal ore `digTime`: 15000ms bare-handed or wrong-tooled (drops nothing), 2300ms wooden pickaxe, 1150ms stone | The harvest guard exists to avoid the 15s no-drop case |
+| `goals` is not an ESM named export of `mineflayer-pathfinder` | Use the default import and destructure |
+| `goto()` rejects with `.name` of `NoPath` / `Timeout` / `PathStopped` / `GoalChanged` | That name is the only discriminator between `unreachable` and `interrupted` |
+| Mined item drops persist in the world across runs | The arena reset despawns them (`/fill` does not — a drop is an entity, not a block), or collection assertions report false greens |
+| A player's selected hotbar slot persists in player data, survives `/clear`, and is moved by `bot.equip()` | `/give` alone cannot put an item "in the inventory but not in the hand" — use `placeInSlot()`. A test that equips changes what its own next run starts holding |
 
 ## The dev server
 
@@ -107,8 +116,7 @@ When you add a guard, prove it can fire. A safety check nobody has seen trigger 
 
 Deliberately unimplemented — do not "helpfully" fill these in:
 
-- `mineBlock`, `placeBlock`, `followPlayer`, `attack`, `flee` are stubs returning `fail('internal', '… arrives in Phase N')`. They **do** still check `opts?.signal?.aborted` first and return `interrupted` — the contract suite asserts this for all six actions.
-- No `mineflayer-pathfinder`. Phase 1 movement is raw by design; the pathfinder arrives in Phase 2.
+- `placeBlock`, `followPlayer`, `attack` and `flee` are stubs returning `fail('internal', '… arrives in Phase 5')`. They **do** still check `opts?.signal?.aborted` first and return `interrupted` — the contract suite asserts this for all six actions. `runAction()` now gives them that check for free; do not re-add it by hand.
 - `packages/agent/` does not exist. It is the other track's package and must never depend on `mineflayer`.
 
 ## Conventions

@@ -2,7 +2,7 @@
 
 A tool-calling LLM agent that plays Minecraft as a bot — a "smarter NPC" that can navigate, mine, build from blueprints, fight or flee, and talk to players, all through one shared local model rather than a specialised model per behaviour.
 
-**Status: Phase 1 complete.** The bot connects to a server, reports immutable world state, and walks to a coordinate under cancellable control. Mining, pathfinding, building and combat are later phases.
+**Status: Phase 2 complete.** The bot connects to a server, reports immutable world state, paths around obstacles to a coordinate, and mines a block with the right tool and collects the drop — all under cancellable control. Building and combat are later phases.
 
 ## The core idea
 
@@ -51,7 +51,7 @@ Both development tracks build against this one interface. Its three load-bearing
 
 ```bash
 npm install
-npm test        # 168 unit tests — no network, no Minecraft needed
+npm test        # 179 unit tests — no network, no Minecraft needed
 npm run typecheck
 ```
 
@@ -83,11 +83,12 @@ Then:
 
 ```bash
 npm run smoke            # Does a bot connect at all?
-npm run test:integration # 37 tests against the live server
+npm run test:integration # 79 tests against the live server
 npm run demo             # Connect, print a snapshot, walk to a coordinate
+npm run demo:phase2      # Path around a wall, mine coal ore, collect the drop
 ```
 
-**Pick an open biome.** Phase 1 movement is deliberately naive — look at the target, walk forward, jump when blocked. It has no answer to a tree. A jungle spawn leaves the bot with zero walkable blocks in any direction; open plains gives it 20+.
+**Biome no longer matters much.** Phase 1's movement was deliberately naive — look at the target, walk forward, jump when blocked — and had no answer to a tree. Phase 2 replaced it with `mineflayer-pathfinder`, which routes around obstacles, so a jungle spawn is now workable rather than a dead stop. Movement is non-destructive by design (`canDig` is off), so terrain the bot cannot climb or walk around still reports `unreachable`.
 
 ## Commands
 
@@ -98,14 +99,15 @@ npm run demo             # Connect, print a snapshot, walk to a coordinate
 | `npm run test:integration` | Integration tests | Yes |
 | `npm run smoke` | Minimal connect check | Yes |
 | `npm run demo` | Phase 1 deliverable | Yes |
+| `npm run demo:phase2` | Phase 2 deliverable | Yes |
 
 ## Roadmap
 
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Connect, read state, walk to a coordinate | **Done** |
-| 2 | Pathfinding + mining a known block | Next |
-| 3 | Close the LLM loop once, end to end | |
+| 2 | Pathfinding + mining a known block | **Done** |
+| 3 | Close the LLM loop once, end to end | Next |
 | 4 | Reliable "find and mine coal" — search, retry, recovery | The bulk of the work |
 | 5 | Full toolbox: building, follow, chat, reflex combat | |
 | 6 | Multi-bot scaling against one shared model | |
@@ -114,6 +116,7 @@ npm run demo             # Connect, print a snapshot, walk to a coordinate
 
 - [Design spec](docs/superpowers/specs/2026-09-07-minecraft-agent-design.md) — the contract, structure, testing strategy, and **§9: contract changes awaiting agreement**
 - [Phase 1 plan](docs/superpowers/plans/2026-09-07-phase-1-track-a.md) — task breakdown plus verified environment facts
+- [Phase 2 design](docs/superpowers/specs/2026-09-07-phase-2-pathfinding-and-mining-design.md) and [plan](docs/superpowers/plans/2026-09-07-phase-2-track-a.md) — pathfinding and mining, with the measurements that shaped them
 - [Design notes](docs/notes/) — original architecture reasoning, phase plan, feasibility
 
 Contributors and agents working in this repo should also read [CLAUDE.md](CLAUDE.md).
