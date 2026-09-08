@@ -51,6 +51,31 @@ type PathfinderGoal = PathfinderGoals.Goal
 type MineflayerBlock = NonNullable<ReturnType<Bot['blockAt']>>
 type MineflayerVec3 = MineflayerBlock['position']
 
+/**
+ * How close counts as having arrived, for `moveTo`.
+ *
+ * `GoalNear(..., 1)` is satisfied within 1 block of the target's block
+ * coordinates, and a bot standing on that block sits ~0.87 from its corner
+ * origin, so a genuine arrival lands under ~1.9. The margin above that is
+ * deliberate: this check exists to catch a pathfinder that stopped metres
+ * short, not to re-litigate the goal's own tolerance.
+ */
+const ARRIVAL_TOLERANCE = 2.5
+
+/**
+ * How close the bot must be before a dig is believable. `GoalLookAtBlock`
+ * defaults to a reach of 4.5, and the server enforces roughly 4.5-6 for
+ * survival block breaking, so anything beyond this was never going to break
+ * the block whatever the local world model says afterwards.
+ */
+const DIG_REACH = 5
+
+/** Straight-line distance from the bot to a point, in blocks. */
+const distanceFrom = (bot: Bot, p: { x: number; y: number; z: number }): number => {
+  const o = bot.entity.position
+  return Math.hypot(o.x - p.x, o.y - p.y, o.z - p.z)
+}
+
 export interface MineflayerExecutorOptions {
   host?: string
   /**
@@ -626,6 +651,7 @@ export class MineflayerExecutor implements BotExecutor {
     bot: Bot,
     signal: AbortSignal,
     goal: PathfinderGoal,
+    reached: () => boolean,
   ): Promise<Result> {
     const onAbort = (): void => {
       try {
@@ -638,6 +664,19 @@ export class MineflayerExecutor implements BotExecutor {
     signal.addEventListener('abort', onAbort, { once: true })
     try {
       await bot.pathfinder.goto(goal)
+      // VERIFIED 2026-09-08, the hard way — a human watched the bot stand still
+      // while this reported success. goto() resolves SUCCESSFULLY when the
+      // computed path has zero length: lib/goto.js checks
+      // `results.path.length === 0` BEFORE it checks `noPath` or `timeout`, and
+      // a bot with no legal move produces exactly that. So a resolved promise
+      // is not evidence of arrival, and `ok` here was a lie the planner had no
+      // way to detect — it reported move_to OK from 8.6 blocks away, then
+      // mine_block_at OK for an ore it never touched.
+      //
+      // Trust the world, not the library's resolve.
+      if (!reached()) {
+        return fail('unreachable', 'the pathfinder stopped short of the goal')
+      }
       return ok(undefined)
     } catch (e) {
       // An aborted run is relabelled by runAction, so returning ok here is
@@ -661,7 +700,12 @@ export class MineflayerExecutor implements BotExecutor {
     // 60s rather than Phase 1's 30s: a measured 30-block path around a wall
     // took 6.1s, and Phase 4 will ask for much longer routes.
     return this.runAction(opts, 60_000, async (bot, signal) =>
-      this.gotoGoal(bot, signal, new goals.GoalNear(target.x, target.y, target.z, 1)),
+      this.gotoGoal(
+        bot,
+        signal,
+        new goals.GoalNear(target.x, target.y, target.z, 1),
+        () => distanceFrom(bot, target) <= ARRIVAL_TOLERANCE,
+      ),
     )
   }
 
@@ -724,6 +768,7 @@ export class MineflayerExecutor implements BotExecutor {
         bot,
         signal,
         new goals.GoalLookAtBlock(block.position, bot.world),
+        () => distanceFrom(bot, position) <= DIG_REACH,
       )
       if (!approach.ok) return approach
       if (signal.aborted) return ok({ position, collected: false })
@@ -796,6 +841,11 @@ export class MineflayerExecutor implements BotExecutor {
           Math.floor(drop.entity.position.z),
           0,
         ),
+        // Collection is best-effort and its result is discarded: the loop below
+        // re-checks the inventory, which is the only thing that actually
+        // settles whether the drop was picked up. Failing to reach a drop that
+        // has already despawned is normal, not an error worth reporting.
+        () => true,
       )
       await new Promise((r) => setTimeout(r, 500))
     }
