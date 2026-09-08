@@ -17,6 +17,17 @@ import { runBotGoal } from '../../src/session.js'
 const ARENA: ArenaBounds = { x0: 1100, x1: 1130, z0: 0, z1: 8, floorY: 199, clearance: 6 }
 const START = { x: 1105, y: ARENA.floorY + 1, z: 4 }
 const ORE = { x: 1112, y: ARENA.floorY + 1, z: 4 }
+/**
+ * A deliberately distant ore, for the abort test only.
+ *
+ * Aborting at 1.5s against ORE (7 blocks away) does not do what it looks like:
+ * the bot arrives in about a second and the stone-pickaxe dig takes 1150ms, so
+ * the abort lands during collectDrop — after the block is already broken. The
+ * status is still `interrupted`, so the test passes its headline assertion
+ * while the ore it claims is standing has in fact been mined. 21 blocks is a
+ * ~4s walk, so the abort lands mid-path and the dig never starts.
+ */
+const ORE_FAR = { x: 1126, y: ARENA.floorY + 1, z: 4 }
 
 /**
  * Builds the arena around a connected bot. The executor must already be
@@ -26,8 +37,9 @@ const ORE = { x: 1112, y: ARENA.floorY + 1, z: 4 }
 async function setUpArena(
   executor: MineflayerExecutor,
   username: string,
-  opts: { tool?: string } = {},
+  opts: { tool?: string; ore?: { x: number; y: number; z: number } } = {},
 ): Promise<void> {
+  const ore = opts.ore ?? ORE
   await buildArena(ARENA)
   await teleportAndWait(executor, username, START)
   await waitForOnGround(executor, { expectedY: ARENA.floorY + 1 })
@@ -37,7 +49,7 @@ async function setUpArena(
     giveItem(username, opts.tool)
     await new Promise((r) => setTimeout(r, 1_000))
   }
-  placeArenaBlock(ORE, 'coal_ore')
+  placeArenaBlock(ore, 'coal_ore')
   await new Promise((r) => setTimeout(r, 800))
 }
 
@@ -143,5 +155,61 @@ describe('the full loop against the live server', () => {
     expect(llm.requests).toHaveLength(2)
     const secondPrompt = llm.requests[1]?.messages.map((m) => m.content).join('\n') ?? ''
     expect(secondPrompt).toContain('missing_tool')
+  })
+
+  it('resolves interrupted and halts the bot when the goal is aborted', async () => {
+    executor = new MineflayerExecutor({ username: 'ITLoopAbort' })
+    expect((await executor.connect()).ok).toBe(true)
+    await setUpArena(executor, 'ITLoopAbort', { tool: 'stone_pickaxe', ore: ORE_FAR })
+
+    const controller = new AbortController()
+    const llm = new FakeLlmClient(
+      [`{"action":"mine_block_at","x":${ORE_FAR.x},"y":${ORE_FAR.y},"z":${ORE_FAR.z},"maxDistance":32}`],
+      { repeatLast: true },
+    )
+
+    const pending = runBotGoal('get me some coal', {
+      executor,
+      decider: new SchemaDecider(llm),
+      maxSteps: 6,
+      signal: controller.signal,
+    })
+    // Lands mid-path: ORE_FAR is a ~4s walk, so at 1.5s the bot is still
+    // travelling and the dig has not started. See ORE_FAR for why aborting
+    // during the dig or the collection would make this test lie.
+    setTimeout(() => controller.abort(), 1_500)
+
+    const outcome = await pending
+    expect(outcome.status).toBe('interrupted')
+
+    // Not merely labelled interrupted — it stopped early. The script repeats
+    // one mine action forever, so an abort that did not take would run to the
+    // maxSteps budget of 6. One or two steps is the proof it took effect.
+    expect(outcome.steps.length).toBeLessThanOrEqual(2)
+
+    // The aborted step must itself report interrupted, not a success the loop
+    // then relabelled — that distinction is the contract rule under test.
+    const aborted = outcome.steps.at(-1)
+    expect(aborted?.outcome.kind).toBe('result')
+    if (aborted?.outcome.kind === 'result') {
+      expect(aborted.outcome.result.ok).toBe(false)
+      if (!aborted.outcome.result.ok) {
+        expect(aborted.outcome.result.reason).toBe('interrupted')
+      }
+    }
+
+    // The ore must still be standing: an aborted dig is a dig that did not
+    // complete. runBotGoal has already disconnected the bot, so observe from
+    // a fresh one (16-character username limit — see above).
+    const observer = new MineflayerExecutor({ username: 'ITAbortWatch' })
+    try {
+      expect((await observer.connect()).ok).toBe(true)
+      await teleportAndWait(observer, 'ITAbortWatch', START)
+      await waitForOnGround(observer, { expectedY: ARENA.floorY + 1 })
+      const still = observer.findBlocks({ names: ['coal_ore'], maxDistance: 32, limit: 5 })
+      expect(still.map((b) => b.position)).toContainEqual(ORE_FAR)
+    } finally {
+      await observer.disconnect()
+    }
   })
 })
