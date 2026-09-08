@@ -85,10 +85,34 @@ Five findings, each of which changed a decision below:
 4. **First call is cold.** 2884ms on the first request, ~370ms after. The three-layer
    architecture's premise — reflexes cannot wait for the planner — still holds, but the margin
    is far more comfortable than the notes' "multi-second" estimate.
-5. **`collected: false` is misread.** After a successful mine whose drop was lost, the model
-   chose to mine the same, now-destroyed block in 5 of 5 samples rather than walking to the
-   drop. That would fail `not_found` and then trip the stuck guard. Recorded as open in §12;
-   it is a prompt-wording problem, not a structural one.
+5. **`collected: false` was misread**, and is now fixed. See §2.2.
+
+### 2.2 Tuning the prompt (measured 2026-09-07, `probe.ts` at 5 samples per scenario)
+
+The first implemented run reproduced §2.1 — 25/25 decoded, 359ms median — but got two of the
+five scenarios wrong: handed `missing_tool` with an empty inventory it chose `chat` 5/5 rather
+than `give_up`, and handed `collected: false` it chose to re-mine the block it had just
+destroyed 5/5.
+
+Both are now 5/5 correct. What fixed them is the finding worth keeping:
+
+| Change | Scenario | Before | After |
+|---|---|---|---|
+| Sharpened the `give_up` **menu entry** (*"Prefer this over chatting about being stuck — chat does NOT end the run"*) | `missing_tool` | `chat` 5/5 | `chat` 5/5 — **no effect** |
+| Added one line to the **system rules** (*"chat does NOT end the run and nobody is guaranteed to answer it. If you cannot make progress, choose give_up and say why."*) | `missing_tool` | `chat` 5/5 | **`give_up` 5/5** |
+| Added a system rule explaining that `drop collected: false` means the block is already broken and the item is on the ground | drop lost | `mine_block_at` 5/5 | **`move_to` 5/5** |
+
+**The rules block outweighs the menu description.** Near-identical wording placed in the menu
+did nothing and placed in the rules flipped the answer completely, 5/5 both times. The menu
+appears to be read as *what the actions are*; the rules as *what to do*. Guidance about **when**
+to choose something belongs in the rules — putting it in the menu entry looks like it should
+work and measurably does not.
+
+The ineffective menu edit was reverted rather than kept. A change that measures as doing
+nothing is not free: it is future wording that looks load-bearing and is not.
+
+All five scenarios now answer correctly 5/5, at a 297ms median, with no regression in the three
+that were already right.
 
 ## 3. Architecture — one action per turn
 
@@ -509,14 +533,13 @@ accident would turn an exhausted script into a passing test.
    schema-constrained decoding at 370ms median. Design spec §8.1 and §8.2 are both resolved.
    The measurement is five samples per cell at temperature 0, so it establishes consistency,
    not robustness — re-run `probe.ts` after any prompt or menu change.
-2. **The model mines a block it has already destroyed.** Given `collected: false`, it chose to
-   re-mine the same position in 5 of 5 samples instead of walking to the drop. The stuck guard
-   catches it, but a wasted step and a `not_found` is the wrong outcome for a mine that
-   *succeeded*. Likely a menu-wording fix; needs a probe run to confirm rather than a guess.
-3. **How sensitive is behaviour to menu wording?** One terse rewrite of the menu changed turn 2
-   from `mine_block_at` to a wasted `move_to`, 5 of 5 (§2.1). That is a large effect from an
-   edit that looked cosmetic, and it means prompt text is behavioural code. Unknown how much
-   further it can be improved, or how brittle the current wording is.
+2. ~~**The model mines a block it has already destroyed.**~~ **Fixed** (§2.2): a system rule
+   explaining `collected: false` moved it from `mine_block_at` 5/5 to `move_to` 5/5.
+3. **How brittle is the current prompt?** §2.2 established that the rules block outweighs the
+   menu, and that all five scenarios now answer correctly — but "correct on five hand-built
+   scenarios at temperature 0" is a low bar. Unknown: how it behaves on scenarios nobody
+   anticipated, how much the ordering of the rules matters, and whether the rules block has a
+   length past which earlier rules stop being honoured.
 4. **Is the repetition guard too aggressive?** Three identical `(action, outcome)` pairs is a
    guess. Legitimately repeating an action after two interruptions would trip it. The step log
    will show whether it fires on real runs; tune with evidence.
