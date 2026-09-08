@@ -134,9 +134,11 @@ npm run demo:phase3      # The whole loop: real state, real model, real action
 | 1 | Connect, read state, walk to a coordinate | **Done** |
 | 2 | Pathfinding + mining a known block | **Done** |
 | 3 | Close the LLM loop once, end to end | **Done** |
-| 4 | Reliable "find and mine coal" — search, retry, recovery | Next — the bulk of the work |
+| 4 | Reliable "find and mine coal" — search, retry, recovery | In progress — the bulk of the work |
+| 4.5 | [Line-of-sight perception](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — stop `findBlocks` seeing through rock | Proposed, awaiting Track B agreement |
 | 5 | Full toolbox: building, follow, chat, reflex combat | |
 | 6 | Multi-bot scaling against one shared model | |
+| 7 | [Memory and recall](docs/notes/Memory%20and%20Recall.md) — short-term spatial memory, durable landmarks | Roadmap only; depends on 4.5 |
 
 Track B's planning loop is built, tested against the mock, and measured against
 `qwen3:14b`. Phase 3 is the swap, and with Phase 2 complete nothing blocks it.
@@ -146,6 +148,8 @@ Track B's planning loop is built, tested against the mock, and measured against
 - [Design spec](docs/superpowers/specs/2026-09-07-minecraft-agent-design.md) — the contract, structure, testing strategy, and **§9: contract changes awaiting agreement**
 - [Phase 1 plan](docs/superpowers/plans/2026-09-07-phase-1-track-a.md) — task breakdown plus verified environment facts
 - [Phase 2 design](docs/superpowers/specs/2026-09-07-phase-2-pathfinding-and-mining-design.md) and [plan](docs/superpowers/plans/2026-09-07-phase-2-track-a.md) — pathfinding and mining, with the measurements that shaped them
+- [Perception: line of sight](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — why `findBlocks` must not see through rock, and the contract change it needs
+- [Memory and recall](docs/notes/Memory%20and%20Recall.md) — roadmap design for short-term spatial memory and durable landmarks
 - [Design notes](docs/notes/) — original architecture reasoning, phase plan, feasibility
 
 Contributors and agents working in this repo should also read [CLAUDE.md](CLAUDE.md).

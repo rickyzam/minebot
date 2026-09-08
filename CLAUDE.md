@@ -8,6 +8,8 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 - [Track B design](docs/superpowers/specs/2026-09-07-track-b-planning-loop-design.md) — the planning loop. §4 explains why the action menu is not a mirror of `BotExecutor`, §2.1–2.2 record what the real model actually does, and §12 lists what is still unmeasured.
 - [Phase 2 design](docs/superpowers/specs/2026-09-07-phase-2-pathfinding-and-mining-design.md) — pathfinding and mining. Its §2 table is measurements against the live server, and three of them contradict the obvious assumption.
 - [Phase 1 plan](docs/superpowers/plans/2026-09-07-phase-1-track-a.md) — its "Verified environment facts" block is measurements, not assumptions.
+- [Perception: line of sight](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — `findBlocks` currently sees through solid rock, which design §1 never intended. Proposed fix, **awaiting Track B agreement**; read before touching perception.
+- [Memory and recall](docs/notes/Memory%20and%20Recall.md) — roadmap. Its two invariants ("memory is written only from perception output", "memory produces search hints, never action targets") constrain work being done now, not just later.
 
 ## Commands
 
@@ -78,6 +80,7 @@ These cost real debugging time to discover. Treat them as settled.
 | `bot.dig()` applies the break to Mineflayer's **local** world model optimistically | A dig that the server ignored still leaves the bot reporting `not_found` for a block that is still standing. Never treat the digging bot's own view as verification — check from a second connection |
 | Parkour reach is **4 blocks displacement = 3 air blocks**, regardless of elevation | Measured across five arenas. Elevation does not extend it: a 1-block **drop** keeps full reach, a 1-block **rise** loses one (fails at 4, works at 3). Cardinal directions only — diagonal jumps are never generated |
 | A player's sprint-jump clears **4 air blocks**; the bot manages **3** | The bot's reach is strictly one block shorter than a human's. Terrain designed by walking it yourself will not necessarily be traversable by the bot — this cost a session to discover |
+| **`findBlocks` has no line-of-sight test** — it queries the client's world model, so it returns blocks encased in solid rock | Measured at the Phase 4 benchmark start: 3219 natural `coal_ore` within 64 blocks, exactly **1** touching air, and that one `unreachable` even with a pickaxe. `exploreFor` for coal therefore returns 8 hits having travelled 0.0 blocks. This is X-ray vision and design §1 never intended it — see the line-of-sight spec |
 | `bot.pathfinder.searchRadius` defaults to `-1` (unlimited) | A genuinely unreachable target burns the whole `thinkTimeout` (5s) and reports `timeout` rather than `noPath`, so the planner is told "retry" when the truth is "pick another target". See issue on bounding it |
 
 ## The dev server
