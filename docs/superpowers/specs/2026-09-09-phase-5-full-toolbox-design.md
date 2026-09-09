@@ -82,14 +82,12 @@ answering "when is it done?".
 These need measurement against real mobs before they are specified, not after.
 Which runs straight into §4.
 
-## 4. **The dev server is peaceful. There are no hostile mobs to test against.**
+## 4. Combat testing: the constraint is daylight, not difficulty
 
-CLAUDE.md records the backend as *"1.21.10, offline mode, survival + peaceful"*,
-and that is confirmed against the running server rather than taken from the doc
-— `difficulty` on the console answers **"The difficulty is Peaceful"** (checked
-2026-09-09). On peaceful, hostile mobs do not spawn **and existing ones are
-removed immediately**, including ones placed with `/summon`. So today there is no
-way to exercise a single line of combat code against the live server.
+The server runs Peaceful — CLAUDE.md says so and the console confirms it
+(`difficulty` answers *"The difficulty is Peaceful"*, checked 2026-09-09). On
+Peaceful, hostile mobs do not spawn and existing ones are removed immediately,
+so nothing combat-related can be exercised without changing it.
 
 **RESOLVED 2026-09-09: Dorel granted standing permission to change the difficulty
 and restart the server as needed.** So the constraint is not permission. What
