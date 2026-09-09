@@ -670,6 +670,55 @@ only what not to do, or have it point at the finished-position rule — is
 deliberately NOT drafted here, because two drafted-then-failed candidates is
 enough evidence that guessing does not work on this one.
 
+#### 2026-09-09, later: the SCENARIO was broken, and fixing it sharpens the defect
+
+The reasoning above was gathered against a fixture that contradicted itself, so
+it needed re-taking. `probe.ts` hardcoded the bot's position at `(12, 64, -30)`
+for **every** scenario, while this scenario's history contains a successful
+`move_to(18, 60, -34)`. The model was told, in the same prompt:
+
+```
+Position: (12, 64, -30)
+  3. move_to(18, 60, -34) -> OK
+```
+
+The bot cannot both have moved there and still be 8.2 blocks away. Against that
+state `move_to` is a defensible reading rather than the rule violation the
+scenario exists to catch, so the fixture could not tell "the model ignored a
+rule" from "the model noticed it was not where it should be". **Fixed**:
+`snapshot()` now takes a position, and a scenario whose history moved the bot
+must override the default.
+
+**The defect survives the fix, and both candidates still fail.** Re-measured on
+the corrected fixture: `not_found already` answers `move_to` ×5 with the branch's
+rules, and `move_to` ×5 again with Ricky's reorder applied. The reorder was
+reverted a second time. Every other scenario is unmoved, 35/35 decode.
+
+**The defect is now unambiguous, and worse than it looked.** With the position
+corrected, the model chooses to `move_to` a position **it is already standing
+on**. No reading of the state makes that sensible; there is no longer any
+competing interpretation to appeal to.
+
+The reasoning changed too, and it now points where Ricky's hypothesis did rather
+than where Track A's did. Three samples, identical:
+
+> The rule says that if mining returns "not_found," the block is gone and should
+> not be mined again. **Moving to the position is needed to pick up the drop if
+> it is still there.**
+
+So the model DOES reach the finished-position rule now — it paraphrases it — but
+applies only its "do not **mine**" half and drops the "do not **move to**" half,
+then falls back on the drop-collection permission. Which is the competition
+Ricky diagnosed. His reorder still does not fix it, but the mechanism he named
+is the one operating; Track A's "third rule" reading was an artifact of the
+broken fixture and is withdrawn.
+
+**Where that leaves it.** One defect, sharply characterised, on a fixture that
+now tests what it claims. Three candidates have been measured and none works,
+so this is not a wording near-miss — something about how the permission is
+phrased survives every reordering tried so far. Track B's call, and no fourth
+guess is drafted here.
+
 ## 8. Impact on Track B
 
 Expected to be an improvement, not a cost. The planner currently receives

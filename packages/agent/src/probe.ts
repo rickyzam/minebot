@@ -13,7 +13,7 @@
  * change to the action menu or the prompt — §2.1 measured a terse menu rewrite
  * changing one turn's answer in 5 of 5 samples, and no unit test covers that.
  */
-import type { ItemStack, WorldSnapshot } from '@minebot/contract'
+import type { ItemStack, Vec3, WorldSnapshot } from '@minebot/contract'
 import { ok, fail } from '@minebot/contract'
 import { ACTION_SCHEMA, type ActionName } from './actions.js'
 import { decode } from './decide.js'
@@ -25,10 +25,25 @@ const PICKAXE: ItemStack = { name: 'stone_pickaxe', count: 1, slot: 0 }
 const COAL: ItemStack = { name: 'coal', count: 1, slot: 1 }
 const COAL_AT = { x: 18, y: 60, z: -34 }
 
-const snapshot = (inventory: ItemStack[]): WorldSnapshot => ({
+/** Where the bot starts, for every scenario that has not walked anywhere. */
+const START = { x: 12, y: 64, z: -30 }
+
+/**
+ * `position` defaults to {@link START}, and a scenario whose history contains a
+ * successful `move_to` MUST override it.
+ *
+ * MEASURED 2026-09-09: it was previously hardcoded, so the `not_found already`
+ * scenario told the model "you are at (12, 64, -30)" directly above "step 3:
+ * move_to(18, 60, -34) -> OK". The bot cannot both have moved there and still
+ * be 8.2 blocks away, and against that state `move_to` is a defensible reading
+ * rather than the rule violation the scenario is trying to catch. A fixture
+ * that contradicts itself cannot tell "the model ignored a rule" from "the
+ * model noticed it was not where it should be".
+ */
+const snapshot = (inventory: ItemStack[], position: Vec3 = START): WorldSnapshot => ({
   takenAt: Date.now(),
   self: {
-    position: { x: 12, y: 64, z: -30 },
+    position,
     health: 20,
     food: 18,
     dimension: 'overworld',
@@ -58,6 +73,8 @@ interface Scenario {
   readonly goal: string
   readonly inventory: ItemStack[]
   readonly history: readonly Step[]
+  /** Defaults to {@link START}. Required when the history moved the bot. */
+  readonly position?: Vec3
   /** What a competent player would do. Reported, never asserted. */
   readonly hoped: readonly ActionName[]
 }
@@ -131,6 +148,9 @@ const SCENARIOS: readonly Scenario[] = [
     name: 'mine_block_at already returned not_found',
     goal: 'get me some coal',
     inventory: [PICKAXE],
+    // Step 3 below is a SUCCESSFUL move_to, so the bot is standing here. The
+    // default START would contradict its own history — see `snapshot`.
+    position: COAL_AT,
     history: [
       found,
       step(
@@ -184,7 +204,11 @@ const main = async (): Promise<void> => {
   const allLatencies: number[] = []
 
   for (const scenario of SCENARIOS) {
-    const messages = renderPrompt(scenario.goal, snapshot(scenario.inventory), scenario.history)
+    const messages = renderPrompt(
+      scenario.goal,
+      snapshot(scenario.inventory, scenario.position),
+      scenario.history,
+    )
     const chose = new Map<string, number>()
     const latencies: number[] = []
     let decoded = 0
