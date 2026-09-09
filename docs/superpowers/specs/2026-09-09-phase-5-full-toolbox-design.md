@@ -176,7 +176,17 @@ floating block. Scope: a saved list, per the work-split note. Not `.schem` /
 
 ## 7. Decisions needed before implementation
 
-### Decision 1 — how does the planner learn it was preempted? (Track A, but Track B feels it)
+### Decision 1 — how does the planner learn it was preempted? — ANSWERED 2026-09-09
+
+**It already does, and Track B built it.** `packages/agent/src/loop.ts:161-165`
+falls through and re-plans on an `interrupted` result whenever no outer signal
+was aborted, with a comment naming §3.5 and warning never to retry the
+interrupted action against the snapshot it was chosen for. So the arbiter can be
+a plain `BotExecutor` decorator: no new `FailureReason`, no new flag, no change
+to `packages/agent`. The original framing below is kept because the options it
+rejected are still the wrong answers.
+
+
 
 `interrupted` currently means both "you aborted me" and "the reflex layer
 preempted you". Options: a distinct `FailureReason` (**no** — that set is closed
