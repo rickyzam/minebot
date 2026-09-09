@@ -2,12 +2,13 @@ import { describe, it, expect } from 'vitest'
 import { ACTION_NAMES, ACTION_SCHEMA, ACTION_MENU } from '../src/actions.js'
 
 describe('action menu', () => {
-  it('names exactly the seven actions the model may choose', () => {
+  it('names exactly the eight actions the model may choose', () => {
     expect([...ACTION_NAMES]).toEqual([
       'find_blocks',
       'move_to',
       'mine_nearest_block',
       'mine_block_at',
+      'explore_for',
       'chat',
       'done',
       'give_up',

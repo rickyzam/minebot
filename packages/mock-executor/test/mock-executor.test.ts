@@ -17,13 +17,37 @@ const seededBlocks = [
   { name: 'stone', position: { x: 12, y: 64, z: 0 }, distance: 12 },
 ]
 
+/**
+ * The line-of-sight pair. Kept out of `seededBlocks` deliberately: that array
+ * backs `expectFindable`'s `minCount`, and adding a name it does not query
+ * would make the count and the query disagree.
+ *
+ * The hidden one is NEARER than the control, which is what gives the suite's
+ * `limit: 1` assertion its teeth — if visibility were applied after the limit
+ * rather than during the search, the buried block would consume the limit and
+ * the visible one would disappear.
+ */
+const visibilityBlocks = [
+  { name: 'coal_ore', position: { x: 2, y: 60, z: 0 }, distance: 2, visible: false },
+  { name: 'coal_ore', position: { x: 6, y: 64, z: 0 }, distance: 6 },
+]
+
 runContractSuite('MockExecutor', async () => {
-  const executor = new MockExecutor({ actionDelayMs: 20, blocks: [...seededBlocks] })
+  const executor = new MockExecutor({
+    actionDelayMs: 20,
+    blocks: [...seededBlocks, ...visibilityBlocks],
+  })
   await executor.connect()
   return {
     executor,
     cleanup: () => executor.disconnect(),
     expectFindable: { names: SEEDED_BLOCK_NAMES, minCount: seededBlocks.length },
+    prepareVisibilityFixture: () =>
+      Promise.resolve({
+        hidden: { name: 'coal_ore', position: visibilityBlocks[0]!.position },
+        control: { name: 'coal_ore', position: visibilityBlocks[1]!.position },
+        maxDistance: 16,
+      }),
   }
 })
 

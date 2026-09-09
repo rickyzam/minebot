@@ -33,6 +33,7 @@ import {
   DEFAULT_PERCEPTION_RADIUS,
   type SearchState,
 } from './explore.js'
+import { isPerceivable, observe, type PerceptionWorld } from './visibility.js'
 
 // VERIFIED 2026-09-07: `goals` is not an ESM named export of this CJS package
 // — Node's named-export detection finds only `Movements`, `pathfinder` and
@@ -557,26 +558,71 @@ export class MineflayerExecutor implements BotExecutor {
     return toSnapshot(this.requireBot() as MineflayerLike)
   }
 
+  /**
+   * Adapt the live bot to the pure visibility rule in `visibility.ts`.
+   *
+   * The cast in `canSee` is safe in the direction it is used: the blocks that
+   * reach it come from Mineflayer's own search and are real prismarine `Block`
+   * instances; `BlockView` is only the structural subset the rule reads.
+   */
+  private perceptionWorld(bot: Bot): PerceptionWorld {
+    return {
+      blockAt: (p) => bot.blockAt(this.toBlockPos(bot, p.x, p.y, p.z), false),
+      canSee: (block) => bot.canSeeBlock(block as Parameters<Bot['canSeeBlock']>[0]),
+    }
+  }
+
   findBlocks(query: BlockQuery): readonly BlockInfo[] {
     const bot = this.requireBot()
     if (query.names.length === 0) return []
     const names = new Set(query.names)
     const origin = bot.entity.position
+    const world = this.perceptionWorld(bot)
+    const seenAt = Date.now()
     const positions = bot.findBlocks({
       matching: (block) => block !== null && names.has(block.name),
+      // Perception is limited to what the bot could see from where it stands.
+      //
+      // This MUST be `useExtraInfo` rather than a filter over the returned
+      // array, and it must not move into `matching`. Both are load-bearing,
+      // and both were established by reading Mineflayer's source rather than
+      // guessed — see the line-of-sight spec §5.2:
+      //
+      //  - `useExtraInfo`, when a function, runs as `matcher(b) && extra(b)`
+      //    (blocks.js:146-149), so only on blocks that already matched by
+      //    type, and — crucially — INSIDE the search. `blocks.push` is gated
+      //    on it (blocks.js:185) and the early break reads
+      //    `blocks.length >= count` (blocks.js:193), so `count` counts
+      //    VISIBLE blocks. Filtering the returned array instead would apply
+      //    `limit` to buried candidates first and then discard them, reporting
+      //    "no coal here" while a visible one sat just past the limit — a
+      //    worse lie than the X-ray it replaces.
+      //  - `matching` runs once per block in the volume, and is ALSO called on
+      //    a synthetic positionless block to test each section's palette
+      //    (blocks.js:130). A position-dependent test there is meaningless and
+      //    would skip whole sections.
+      useExtraInfo: (block) => isPerceivable(world, block),
       maxDistance: query.maxDistance,
       count: query.limit,
     })
     return Object.freeze(
       positions
         .slice(0, query.limit)
-        .map((p) =>
-          Object.freeze({
-            name: bot.blockAt(p)?.name ?? 'unknown',
+        .map((p) => {
+          const block = bot.blockAt(p, false)
+          // Provenance is produced here and dropped at the return, because the
+          // contract's BlockInfo carries none yet. See visibility.observe().
+          const seen = observe(
+            block ?? { name: 'unknown', position: p, boundingBox: 'block' },
+            origin,
+            seenAt,
+          )
+          return Object.freeze({
+            name: seen.name,
             position: Object.freeze({ x: p.x, y: p.y, z: p.z }),
-            distance: Math.hypot(p.x - origin.x, p.y - origin.y, p.z - origin.z),
-          }),
-        )
+            distance: seen.distance,
+          })
+        })
         // Fix 4 (post-review): Mineflayer's own findBlocks() sorts nearest-first
         // relative to a *floored* origin point, but we report `distance`
         // relative to the bot's exact (unfloored) position — the two can

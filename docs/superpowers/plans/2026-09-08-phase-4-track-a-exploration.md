@@ -1206,20 +1206,158 @@ against."
 
 ## Task 7: The menu action (JOINT — Track B owns the prompt text)
 
+> **UNBLOCKED 2026-09-08.** Tasks 1–6 shipped in PR 19; the
+> [perception fix](../specs/2026-09-08-perception-line-of-sight-design.md) has now
+> landed, so `find_blocks` no longer returns coal through solid rock and the
+> paired `find_blocks` / `explore_for` rule this task tests is no longer vacuous.
+>
+> Three measured findings from `npm run bench:perception` (2026-09-08) that change
+> this task's content, not merely its timing:
+>
+> 1. **The `emerald_block` fixture gives one usable bearing at *t=0*, not three.**
+>    All 3 markers are exposed, but only **1** is visible from the start (49.1
+>    blocks). Any step here asserting "a target on each bearing is visible from the
+>    start" is false and needs the markers re-sited.
+> 2. **`find_blocks` at `maxDistance: 64` is a ~1/3-second call**, and the *empty*
+>    answer is the expensive one (perception spec §5.3.1). Step 2's menu entry and
+>    the system rules should steer the model to `maxDistance: 32` or less. Per the
+>    measured finding in CLAUDE.md, that guidance belongs in the **system rules**,
+>    not the menu entry — menu wording moved nothing in the last probe, rules
+>    wording flipped 5/5.
+> 3. **`find_blocks` for coal will return empty, always**, at the benchmark start
+>    (0 of 3216 visible). Step 1's before-measurement should be retaken after the
+>    perception fix lands, or the before/after comparison spans two different
+>    worlds and attributes the perception change to the menu change.
+
 `packages/agent` is Track B's package. The action shape is proposed in design §6; **the wording is Ricky's call**, and it must be measured rather than assumed.
 
 **Files:**
 - Modify: `packages/agent/src/actions.ts`, `dispatch.ts`, `prompt.ts`, `probe.ts`
 
-- [ ] **Step 1: Measure the current menu first**
+- [x] **Step 1: Measure the current menu first**
 
 ```bash
-npm run agent:probe
+OLLAMA_HOST=http://127.0.0.1:11434 npm run agent:probe
 ```
 
 Record every scenario's choice. A bigger toolbox is a real test of whether a 14B model stays reliable at tool selection, so this is the before-number that says whether adding an action cost anything.
 
-- [ ] **Step 2: Add the action to the schema and menu**
+**Baseline retaken 2026-09-08, AFTER the line-of-sight fix landed** — `qwen3:14b`,
+5 attempts each. Retaken deliberately: the earlier baseline was measured against a
+bot with X-ray vision, and comparing a post-perception "after" against a
+pre-perception "before" would credit the menu change with the perception change.
+
+| Scenario | Hoped | Chose | Decoded |
+|---|---|---|---|
+| no history | `find_blocks` | `find_blocks` ×5 | 5/5 |
+| after a search | `mine_block_at` | `mine_block_at` ×5 | 5/5 |
+| after missing_tool, inventory empty | `give_up` | `give_up` ×5 | 5/5 |
+| mined but the drop was lost | `move_to` | `move_to` ×5 | 5/5 |
+| mine_block_at already returned not_found | `find_blocks` or `give_up` | `give_up` ×5 | 5/5 |
+| goal met | `done` | `done` ×5 | 5/5 |
+
+**TOTAL 30/30 decoded, median 353ms.** Every scenario matched its hope, so any
+post-change deviation is attributable to the change rather than to noise.
+
+Note the fifth row for Step 5: it currently answers `give_up` 5/5. Once
+`explore_for` exists, `give_up` is arguably the *wrong* answer there — see the
+second rule edit in the §7.1 draft, which is a behaviour change this plan did not
+anticipate.
+
+### Step 1a: the larger menu DID degrade tool selection — RICKY NEEDED
+
+Step 1 exists to catch exactly this, and it caught it. Same model, same
+scenarios, 5 attempts each, three states measured:
+
+| Scenario | baseline (7 actions) | + `explore_for` in menu | + menu + drafted rules |
+|---|---|---|---|
+| no history | `find_blocks` ×5 | `find_blocks` ×5 | `find_blocks` ×5 |
+| after a search | `mine_block_at` ×5 | `mine_block_at` ×5 | `mine_block_at` ×5 |
+| after missing_tool | `give_up` ×5 | `give_up` ×5 | `give_up` ×5 |
+| mined but drop lost | `move_to` ×5 | `move_to` ×5 | `move_to` ×5 |
+| **not_found already** | **`give_up` ×5** | **`move_to` ×5** | **`move_to` ×5** |
+| goal met | `done` ×5 | `done` ×5 | `done` ×5 |
+
+30/30 decoded in all three states, so this is tool *selection* degrading, not
+decoding.
+
+**What it means.** Five of six scenarios are unmoved by the bigger menu — the
+14B model holds up fine on size alone. The sixth breaks, and it breaks into
+`move_to`, which the rules block explicitly forbids for that position ("Do NOT
+move to or mine that position again — it cannot help"). So the model is not
+choosing a defensible alternative; it is being pulled by the earlier
+`move_to that position ONCE` rule over the later prohibition. That is precisely
+the order-sensitivity Step 4 is written about.
+
+**The drafted rules did not fix it.** Both §7.1 edits were applied and measured:
+no change, still `move_to` ×5. Plausibly the first edit makes things worse by
+growing the rules block from one line to seven, pushing the prohibition further
+from the top — but that is a hypothesis, not a measurement.
+
+**This is Ricky's call and Track A stopped here deliberately.** Iterating on
+wording by intuition is what the probe exists to prevent, and prompt text is his
+package. What he has to work with: a reproducible regression, a baseline to
+return to, and a draft that is measured NOT to work.
+
+### Step 1b: ANSWERED 2026-09-08 — and the regression is now *wrong*, not merely unverified
+
+Ricky answered every §7.1 gate item on 2026-09-08: **Option A** for the cost
+budget, the contract doc wording as drafted, prompt edits 1 and 2 as drafted, and
+**`explore_for` is the intended answer to a dead position**.
+
+That last one is what changes this step's status. Until it was answered, the
+branch's `move_to` ×5 was an unverified deviation from a `hoped` list that
+allowed two answers. Now the intended answer is known, and `move_to` is neither
+of them — nor is it defensible on its own terms, since the rules forbid it two
+lines earlier. **The accepted edits stay and do not fix it.**
+
+The remaining hypothesis is **order, not wording**, and it is drafted as a
+candidate in [spec §7.1](../specs/2026-09-08-perception-line-of-sight-design.md)
+under "The regression, and the candidate fix": state the terminal condition
+before the permission that competes with it. It is **deliberately unapplied** —
+the branch holds the reproducible regression and a known-good baseline, and
+committing an unprobed guess would destroy both.
+
+### Step 1c: RESOLVED 2026-09-09 — Step 1 is complete
+
+Everything in Steps 1a and 1b was measured with an instrument that could not
+support it. `probe.ts` sampled five times **in one process**: the same prompt,
+byte-identical by hash, gave `give_up` in nine runs and `move_to` in five
+others, each run internally unanimous and one of them 40/40. So the order
+hypothesis above, and the two before it, were neither confirmed nor refuted by
+the runs that appeared to settle them.
+
+`agent:probe` now spawns a **fresh process per replicate** and flags any
+scenario whose replicates disagree. Re-judged on it:
+
+| Candidate | Replicated |
+|---|---|
+| prompt edits 1 + 2 | `move_to` 4/4 |
+| the order candidate above | `move_to` 4/4 |
+| neutral menu description | `move_to` 4/4 |
+| "a finished position tells you nothing about anywhere else" | `move_to` 4/4 |
+
+**Fixed by changing what the rule asks the model to check**, not what it says:
+`"use move_to that position ONCE"` requires inferring from history whether it
+had already gone; comparing the state's `Position` line against the coordinate
+does not. **7/7 scenarios stable and on target across 6 replicates**, with
+`mined but the drop was lost` still choosing `move_to` 6/6.
+
+Full detail in [spec §7.1](../specs/2026-09-08-perception-line-of-sight-design.md)
+under "RESOLVED 2026-09-09". Steps 2–5 of this task are now unblocked; Step 1's
+baseline is superseded by the replicated numbers above.
+
+**Blocked on the probe, not on a decision.** `OLLAMA_HOST` was unset and the
+model box at `192.168.1.21:11434` did not answer, so no measurement could be
+taken. One run settles it.
+
+➡ **The decision lives in the line-of-sight spec's
+[§7.1](../specs/2026-09-08-perception-line-of-sight-design.md), which is the
+single index of everything open for Ricky.** It repeats this table, so §7.1 can
+be answered without reading this plan. Recorded here too because this is where
+Task 7 will be executed once the wording is settled.
+
+- [x] **Step 2: Add the action to the schema and menu** — done in commit `abe2adf`.
 
 In `actions.ts`, add `explore_for` to `ACTION_NAMES`, its variant to `ACTION_SCHEMA` (`names: string[]`, `maxDistance: number`), and a menu entry:
 
@@ -1229,7 +1367,7 @@ explore_for         {"action":"explore_for","names":["coal_ore"],"maxDistance":6
                     Slow — it moves the bot and takes time.
 ```
 
-- [ ] **Step 3: Dispatch it**
+- [x] **Step 3: Dispatch it** — done in commit `abe2adf`, with the `ExplorationReport` rendering below.
 
 ```ts
     case 'explore_for':
@@ -1241,7 +1379,12 @@ explore_for         {"action":"explore_for","names":["coal_ore"],"maxDistance":6
 
 `StepOutcome`'s `result` case already carries `Result<unknown>`, so no new outcome kind is needed — but give the report a readable rendering in `renderOutcome` (found count, `searchedTo`, `exhausted`) rather than letting an object stringify into the prompt.
 
-- [ ] **Step 4: Rewrite the find/explore rules TOGETHER**
+- [x] **Step 4: Rewrite the find/explore rules TOGETHER** — SUPERSEDED. The draft below was written before the perception fix and one of its clauses, *"it is instant and free"*, is now measurably false (§5.3.1: a scarce target costs ~73ms even without line-of-sight, ~330ms with it). What shipped instead is §7.1's **edit 1**, accepted as drafted by Ricky on 2026-09-08 and on the branch in commit `abe2adf`. Kept below only as the record of what this plan originally proposed.
+
+⚠ **Rewriting them together was the right instinct and it was not enough.** The
+pair that actually conflicts is not `find_blocks`/`explore_for` — it is the
+drop-collection permission and the finished-position prohibition, which this
+plan did not anticipate. See Step 1b.
 
 Not as two adjacent descriptions. The rules block is order-sensitive, and a conflicting earlier rule beats a correct later one — measured while fixing the `not_found` oscillation, where *adding* a rule changed nothing and *merging* fixed it outright.
 
@@ -1255,7 +1398,7 @@ Replace the existing `find_blocks` rule with one paired instruction:
   use it only after find_blocks has come up empty.
 ```
 
-- [ ] **Step 5: Add a probe scenario and measure**
+- [ ] **Step 5: Add a probe scenario and measure** — scenario ADDED 2026-09-08, measurement PENDING (no reachable model; see Step 1b). `probe.ts` now carries seven scenarios; the new one is below, with a comment recording *why* an empty `find_blocks` stopped being a dead end.
 
 ```ts
   {

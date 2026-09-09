@@ -1,5 +1,27 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import type { ActionOptions, BotExecutor, Result } from '@minebot/contract'
+import type { ActionOptions, BlockInfo, BotExecutor, Result, Vec3 } from '@minebot/contract'
+
+/**
+ * A pair of blocks with the same name, both within `maxDistance`, differing
+ * only in whether the bot could see them from where it stands.
+ *
+ * Visibility cannot be asserted portably any other way. The mock has no
+ * geometry and declares it per seeded block; the real executor derives it from
+ * a raycast and needs a block genuinely walled in. Both can produce this pair,
+ * so the guarantee runs identically against each — which is the whole point of
+ * this suite, and the reason the fixture is not simply skipped for the real
+ * implementation.
+ */
+export interface VisibilityFixture {
+  /** Exists, is close, and must never be reported. Nearer than `control`. */
+  hidden: { name: string; position: Vec3 }
+  /** Same name, further away, and must be reported. */
+  control: { name: string; position: Vec3 }
+  /** A radius comfortably containing both. */
+  maxDistance: number
+  /** Undo any world changes the fixture made. */
+  release?: () => Promise<void>
+}
 
 export interface ContractSuiteContext {
   executor: BotExecutor
@@ -18,6 +40,19 @@ export interface ContractSuiteContext {
    * to vacuous.
    */
   expectFindable?: { names: readonly string[]; minCount: number }
+  /**
+   * Builds the {@link VisibilityFixture} for the line-of-sight guarantees.
+   *
+   * A thunk rather than a field because the real executor has to modify the
+   * world to produce it, and paying that on every test in this suite — not
+   * just the four that need it — would slow the integration run for nothing.
+   *
+   * Optional only so a future executor that genuinely cannot place blocks can
+   * omit it. Both factories in this repo supply it; a new one that skips it
+   * silently drops the visibility guarantees, which is exactly the vacuous
+   * fixture this suite has been bitten by before.
+   */
+  prepareVisibilityFixture?: () => Promise<VisibilityFixture>
 }
 
 /**
@@ -121,6 +156,108 @@ export function runContractSuite(
       for (let i = 1; i < found.length; i++) {
         expect(found[i]!.distance).toBeGreaterThanOrEqual(found[i - 1]!.distance)
       }
+    })
+
+    describe('perception is limited to line of sight', () => {
+      // The bot may only know about blocks it could see from where it stands.
+      // Telemetry may inform movement and physics; it may not inform what the
+      // bot knows exists. Before this, `findBlocks` answered from the client's
+      // world model with no visibility test at all — measured against the live
+      // server, 3216 coal blocks within 64 blocks of a surface position, 60
+      // touching a non-solid neighbour and ZERO actually visible, all 3216
+      // reported as findable.
+      //
+      // Every assertion here is paired with a control block, and that pairing
+      // is the point. "The hidden block was not returned" is also what a
+      // fixture that silently failed to place anything would produce; asserting
+      // that an equally-close VISIBLE block *was* returned is what separates
+      // "the rule works" from "nothing is there".
+      let fixture: VisibilityFixture | null = null
+
+      beforeEach(async () => {
+        fixture = ctx.prepareVisibilityFixture ? await ctx.prepareVisibilityFixture() : null
+      })
+
+      /**
+       * Skips at RUNTIME, so an executor that omits `prepareVisibilityFixture`
+       * reports four SKIPPED tests rather than four green ones. That is the
+       * difference between "this executor was not checked" and "this executor
+       * passed", and an early `return` erases it — the trap this repo has
+       * already been bitten by (CLAUDE.md, "fixtures that silently skip
+       * themselves"). Both factories here supply the fixture, so nothing skips
+       * today; this is the guard for the next implementation.
+       *
+       * It cannot be `describe.skipIf`: `ctx` is assigned in a `beforeEach`, so
+       * it does not exist when `describe` registers. Do not "simplify" it back.
+       */
+      const requireFixture = (t: { skip: (note?: string) => never }): VisibilityFixture => {
+        if (!ctx.prepareVisibilityFixture) {
+          t.skip('executor declares no prepareVisibilityFixture')
+        }
+        // Reached only when the factory declared a thunk that then produced
+        // nothing — a fixture that no-opped. Loud, because a test passing
+        // against a world that was never built is the vacuous green this whole
+        // block exists to prevent.
+        if (!fixture) {
+          throw new Error('prepareVisibilityFixture produced no fixture — the world was not built')
+        }
+        return fixture
+      }
+
+      afterEach(async () => {
+        await fixture?.release?.()
+        fixture = null
+      })
+
+      const at = (position: Vec3) => (b: BlockInfo) =>
+        b.position.x === position.x && b.position.y === position.y && b.position.z === position.z
+
+      it('returns a block that is exposed and in line of sight', (t) => {
+        const { control, maxDistance } = requireFixture(t)
+        const found = ctx.executor.findBlocks({
+          names: [control.name],
+          maxDistance,
+          limit: 20,
+        })
+        expect(found.some(at(control.position))).toBe(true)
+      })
+
+      it('does not return a block that exists nearby but is enclosed', (t) => {
+        const { hidden, maxDistance } = requireFixture(t)
+        const found = ctx.executor.findBlocks({
+          names: [hidden.name],
+          maxDistance,
+          limit: 20,
+        })
+        expect(found.some(at(hidden.position))).toBe(false)
+      })
+
+      it('applies the limit to visible blocks, not to buried candidates', (t) => {
+        // The nearest-first trap: if visibility were applied to an already
+        // truncated result, a nearer buried block would consume the limit and
+        // the visible one would vanish. `limit: 1` is the sharpest form of that
+        // test, because the hidden block is closer than the control.
+        const { hidden, control, maxDistance } = requireFixture(t)
+        // Same class of silent pass: the fixture's own doc requires one name
+        // for both blocks, so a mismatch is a malformed fixture, not a reason
+        // to report this assertion as having run.
+        if (hidden.name !== control.name) {
+          t.skip('fixture used different names for hidden and control')
+        }
+        const found = ctx.executor.findBlocks({ names: [hidden.name], maxDistance, limit: 1 })
+        expect(found).toHaveLength(1)
+        expect(found.some(at(control.position))).toBe(true)
+      })
+
+      it('never reports through exploreFor what findBlocks would not return', async (t) => {
+        // Exploration must not see further than perception, or the X-ray hole
+        // reopens through the back door — and memory, which is written only
+        // from perception output, would inherit it.
+        const { hidden, maxDistance } = requireFixture(t)
+        const r = await ctx.executor.exploreFor([hidden.name], maxDistance)
+        if (!r.ok) return
+        expect(r.value.found.some(at(hidden.position))).toBe(false)
+      })
     })
 
     // Valid-shape arguments that need no matching world state: the point of
@@ -375,8 +512,23 @@ export function runContractSuite(
       })
 
       it('never lets searchedTo go backwards within one search', async () => {
-        const first = await ctx.executor.exploreFor(['stone'], 32)
-        const second = await ctx.executor.exploreFor(['stone'], 32)
+        // Re-grounded 2026-09-08 with the line-of-sight change. This searched
+        // for `stone`, which was found instantly while findBlocks had X-ray
+        // vision — so both calls reported searchedTo 0 and the assertion held
+        // trivially. Once perception became honest, stone stopped being visible
+        // to a bot standing on the surface, the search began walking the full
+        // 32-block spiral, and it exhausted its budget: `ok` was false and the
+        // test failed on the guard rather than the guarantee.
+        //
+        // Use whatever the factory declared findable, as the limit test above
+        // already does, so this keeps measuring monotonicity rather than
+        // measuring how long a fruitless spiral takes. Giving it real teeth
+        // against the live executor would need maxDistance > the perception
+        // radius AND a target that is never found — a multi-minute walk, which
+        // belongs in `bench:explore`, not in a contract suite.
+        const target = ctx.expectFindable?.names ?? ['stone']
+        const first = await ctx.executor.exploreFor([...target], 32)
+        const second = await ctx.executor.exploreFor([...target], 32)
         expect(first.ok && second.ok).toBe(true)
         if (first.ok && second.ok) {
           expect(second.value.searchedTo).toBeGreaterThanOrEqual(first.value.searchedTo)

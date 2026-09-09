@@ -43,6 +43,12 @@ export async function dispatch(
         result: await executor.mineBlock(positionOf(action), action.maxDistance, { signal }),
       }
 
+    case 'explore_for':
+      return {
+        kind: 'result',
+        result: await executor.exploreFor(action.names, action.maxDistance, { signal }),
+      }
+
     case 'chat':
       // `chat` returns void on the contract — there is nothing to await and no
       // Result to report, so a synchronous success stands in for one.

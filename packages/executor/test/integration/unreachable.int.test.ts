@@ -86,8 +86,28 @@ describe('a bot that cannot move', () => {
     )
     expect(ring.length).toBeGreaterThan(0)
 
-    const ore = executor.findBlocks({ names: ['coal_ore'], maxDistance: 32, limit: 5 })
-    expect(ore.map((b) => b.position)).toContainEqual(ORE)
+    // The penned bot must NOT be able to see the ore — it is sealed in a stone
+    // box, and perception is limited to line of sight. Before that rule existed
+    // this assertion was inverted: the premise check asked the penned bot to
+    // confirm the ore, and it happily did, through a solid wall.
+    const throughTheWall = executor.findBlocks({ names: ['coal_ore'], maxDistance: 32, limit: 5 })
+    expect(throughTheWall.map((b) => b.position)).not.toContainEqual(ORE)
+
+    // So the ore's existence is confirmed from a SECOND connection outside the
+    // pen — the same pattern the mineBlock test below already uses, and for the
+    // same reason: a bot's own view is not evidence about what it cannot see.
+    // Without this the suite would be asserting `unreachable` against an ore
+    // that might never have been placed.
+    const observer = new MineflayerExecutor({ username: 'ITPenFixWatch' })
+    try {
+      expect((await observer.connect()).ok).toBe(true)
+      await teleportAndWait(observer, 'ITPenFixWatch', { x: ORE.x + 2, y: ORE.y, z: ORE.z })
+      await waitForOnGround(observer, { expectedY: ARENA.floorY + 1 })
+      const outside = observer.findBlocks({ names: ['coal_ore'], maxDistance: 16, limit: 5 })
+      expect(outside.map((b) => b.position)).toContainEqual(ORE)
+    } finally {
+      await observer.disconnect()
+    }
 
     const p = executor.getState().self.position
     expect(Math.abs(p.x - START.x)).toBeLessThan(1.5)

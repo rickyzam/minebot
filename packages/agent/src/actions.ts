@@ -29,6 +29,19 @@ export type ActionRequest =
       readonly z: number
       readonly maxDistance: number
     }
+  /**
+   * Go and look for blocks that cannot be seen from here.
+   *
+   * Exists because `find_blocks` is limited to line of sight, so an empty
+   * result is the normal answer for anything buried — measured, 0 of 3216
+   * nearby coal blocks visible from a surface position. Without this action an
+   * empty search was a dead end and `give_up` was the only correct move.
+   */
+  | {
+      readonly action: 'explore_for'
+      readonly names: readonly string[]
+      readonly maxDistance: number
+    }
   | { readonly action: 'chat'; readonly message: string }
   | { readonly action: 'done'; readonly summary: string }
   /**
@@ -47,6 +60,7 @@ export const ACTION_NAMES = [
   'move_to',
   'mine_nearest_block',
   'mine_block_at',
+  'explore_for',
   'chat',
   'done',
   'give_up',
@@ -107,6 +121,16 @@ export const ACTION_SCHEMA = {
     },
     {
       type: 'object',
+      properties: {
+        action: named('explore_for'),
+        names: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8 },
+        maxDistance: { type: 'number' },
+      },
+      required: ['action', 'names', 'maxDistance'],
+      additionalProperties: false,
+    },
+    {
+      type: 'object',
       properties: { action: named('chat'), message: { type: 'string' } },
       required: ['action', 'message'],
       additionalProperties: false,
@@ -126,7 +150,20 @@ export const ACTION_SCHEMA = {
   ],
 } as const
 
-/** The human-readable menu, rendered into the system prompt. */
+/**
+ * The human-readable menu, rendered into the system prompt.
+ *
+ * The wording below is the Phase 4 plan's own draft (Task 7 Step 2), used
+ * verbatim rather than invented here.
+ *
+ * Adding this entry once regressed the `not_found already` probe scenario into
+ * `move_to`, an action the rules forbid for a finished position. That is fixed
+ * — not here, but in `prompt.ts`, by making the drop-collection rule ask the
+ * model to compare its own Position against the coordinate rather than to infer
+ * from history whether it had already gone. Re-measure with `agent:probe` after
+ * touching this menu; it replicates across processes now, which single-run
+ * measurement did not.
+ */
 export const ACTION_MENU = [
   'find_blocks         {"action":"find_blocks","names":["coal_ore","deepslate_coal_ore"],"maxDistance":32,"limit":5}',
   '                    Search for blocks by name, nearest first. This is the ONLY way',
@@ -137,6 +174,9 @@ export const ACTION_MENU = [
   '                    Mine the nearest matching block. Use only when you have not searched.',
   'mine_block_at       {"action":"mine_block_at","x":18,"y":60,"z":-34,"maxDistance":32}',
   '                    Mine one exact block. Prefer this after find_blocks.',
+  'explore_for         {"action":"explore_for","names":["coal_ore"],"maxDistance":64}',
+  '                    Walk around looking for blocks you cannot currently see.',
+  '                    Slow — it moves the bot and takes time.',
   'chat                {"action":"chat","message":"hello"}',
   '                    Say something in game chat.',
   'done                {"action":"done","summary":"mined one coal ore"}',

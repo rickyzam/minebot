@@ -19,6 +19,22 @@ import {
 
 const describeVec = (v: Vec3): string => `(${v.x}, ${v.y}, ${v.z})`
 
+/**
+ * A block seeded into the mock's world, optionally hidden from perception.
+ *
+ * `findBlocks` returns only what the bot could see from where it stands, and
+ * the real executor derives that from world geometry with a raycast. The mock
+ * has no geometry, so visibility cannot be derived and has to be declared.
+ *
+ * Defaults to `true`, which is why this is additive: every existing seeding of
+ * plain `BlockInfo` keeps behaving exactly as before. Seed `visible: false` to
+ * exercise the buried case — a block that exists, is close, and must never be
+ * reported.
+ */
+export interface SeededBlock extends BlockInfo {
+  readonly visible?: boolean
+}
+
 export type MockActionName =
   | 'moveTo'
   | 'followPlayer'
@@ -47,7 +63,11 @@ export interface MockOptions {
   food?: number
   inventory?: ItemStack[]
   entities?: EntityInfo[]
-  blocks?: BlockInfo[]
+  /**
+   * Blocks in the mock's world. Plain {@link BlockInfo} entries are visible;
+   * see {@link SeededBlock} to seed one that exists but cannot be seen.
+   */
+  blocks?: readonly SeededBlock[]
   /** Simulated duration of each action, so cancellation can be exercised. */
   actionDelayMs?: number
   /**
@@ -80,7 +100,7 @@ export class MockExecutor implements BotExecutor {
   private food: number
   private inventory: ItemStack[]
   private entities: EntityInfo[]
-  private blocks: BlockInfo[]
+  private blocks: readonly SeededBlock[]
   private readonly delayMs: number
   private readonly exploreDelayMs: number
   /**
@@ -172,12 +192,24 @@ export class MockExecutor implements BotExecutor {
     const names = new Set(query.names)
     return Object.freeze(
       this.blocks
+        // Perception is limited to what the bot could see from where it
+        // stands. The real executor derives this from geometry; the mock has
+        // none, so it is declared per block (see SeededBlock).
+        //
+        // The filter runs BEFORE `slice(query.limit)`, matching the real
+        // executor, where the visibility test runs inside Mineflayer's search
+        // and `count` therefore counts visible blocks. Filtering after the
+        // slice would let buried blocks consume the limit and report "none"
+        // while a visible one sat just past it.
+        .filter((b) => b.visible !== false)
         .filter((b) => names.has(b.name) && b.distance <= query.maxDistance)
         // Nearest-first, matching the real executor (which inherits Mineflayer's
         // nearest-first search order) — see BlockQuery/BlockInfo in the contract.
         .sort((a, b) => a.distance - b.distance)
         .slice(0, query.limit)
-        .map((b) => Object.freeze({ ...b })),
+        // Explicit fields rather than a spread: `visible` is mock-side seeding
+        // and must never leak into a contract BlockInfo.
+        .map((b) => Object.freeze({ name: b.name, position: b.position, distance: b.distance })),
     )
   }
 
@@ -233,7 +265,15 @@ export class MockExecutor implements BotExecutor {
 
     const match =
       typeof target === 'string'
-        ? this.blocks.find((b) => b.name === target && b.distance <= maxDistance)
+        ? // By NAME the executor searches, so it can only reach what it can
+          // see — MineflayerExecutor.mineBlock() resolves a name through its
+          // own findBlocks(). By POSITION it does not: an explicit coordinate
+          // came from somewhere the caller already knows about, and the real
+          // executor digs at it without re-perceiving. Keeping that asymmetry
+          // is what makes the two implementations agree.
+          this.blocks.find(
+            (b) => b.visible !== false && b.name === target && b.distance <= maxDistance,
+          )
         : this.blocks.find(
             (b) =>
               b.position.x === target.x &&
@@ -307,6 +347,10 @@ export class MockExecutor implements BotExecutor {
     const covered = at + MOCK_PERCEPTION_RADIUS
     const wanted = new Set(names)
     const found = this.blocks
+      // Exploration cannot see further than perception: a block findBlocks
+      // would not return from here must not surface through exploreFor either,
+      // or the X-ray hole reopens through the back door.
+      .filter((b) => b.visible !== false)
       .filter((b) => wanted.has(b.name) && b.distance <= covered)
       .sort((a, b) => a.distance - b.distance)
       .map((b) => Object.freeze({ name: b.name, position: b.position, distance: b.distance }))
