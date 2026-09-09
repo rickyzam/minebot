@@ -22,7 +22,8 @@
     "bench:explore": "tsx scripts/bench-explore.ts",
     "bench:perception": "tsx scripts/bench-perception.ts",
     "agent:probe": "tsx packages/agent/src/probe.ts",
-    "agent:demo": "tsx packages/agent/src/demo.ts"
+    "agent:demo": "tsx packages/agent/src/demo.ts",
+    "explore:path": "tsx scripts/explore-path.ts"
   },
   "devDependencies": {
     "@types/node": "26.4.1",
