@@ -129,6 +129,8 @@ Three layers, and they are not interchangeable:
 
 **Prompt text is behavioural code that no test covers.** Changing `ACTION_MENU` or the system rules in `prompt.ts` changes what the bot does, and `npm test` will stay green regardless. Re-run `npm run agent:probe` after any such edit. Measured example: sharpening a menu entry did nothing (5/5 unchanged), while near-identical wording in the system-rules block flipped the answer completely (5/5). Guidance about *when* to choose an action belongs in the rules, not the menu.
 
+**`scripts/` is not covered by `npm test`.** It is type-checked and nothing more, so a change that breaks a diagnostic tool at *runtime* passes the whole sweep. This bit on 2026-09-09: making `findBlocks` line-of-sight limited broke `bench:world` outright — its surveyor got 50× slower, blocked the event loop past the keepalive window, and the server dropped it — while 310 unit tests, 101 integration tests, typecheck and invariants all stayed green. If you change something a script depends on, run the script. `surveyor.int.test.ts` now guards this particular tool; the other scripts have no such cover.
+
 ### Two traps this repo has already fallen into
 
 **Tests that rot.** A `moveTo` test once targeted "current position + 6 blocks" against a persistent world. Every success walked the bot further along until it wedged against a tree — green when written, reliably red a day later. Any test whose outcome depends on accumulated world state will eventually fail for reasons unrelated to the code. Use the arena.

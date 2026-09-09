@@ -43,7 +43,7 @@ import { MineflayerExecutor } from '@minebot/executor'
  * `findBlocks` — see the line-of-sight spec §10. A diagnostic surveyor is not
  * the bot.
  */
-function surveyBlocks(
+export function surveyBlocks(
   executor: MineflayerExecutor,
   names: readonly string[],
   maxDistance: number,
