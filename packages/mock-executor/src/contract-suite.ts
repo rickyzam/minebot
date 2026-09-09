@@ -178,6 +178,32 @@ export function runContractSuite(
         fixture = ctx.prepareVisibilityFixture ? await ctx.prepareVisibilityFixture() : null
       })
 
+      /**
+       * Skips at RUNTIME, so an executor that omits `prepareVisibilityFixture`
+       * reports four SKIPPED tests rather than four green ones. That is the
+       * difference between "this executor was not checked" and "this executor
+       * passed", and an early `return` erases it — the trap this repo has
+       * already been bitten by (CLAUDE.md, "fixtures that silently skip
+       * themselves"). Both factories here supply the fixture, so nothing skips
+       * today; this is the guard for the next implementation.
+       *
+       * It cannot be `describe.skipIf`: `ctx` is assigned in a `beforeEach`, so
+       * it does not exist when `describe` registers. Do not "simplify" it back.
+       */
+      const requireFixture = (t: { skip: (note?: string) => never }): VisibilityFixture => {
+        if (!ctx.prepareVisibilityFixture) {
+          t.skip('executor declares no prepareVisibilityFixture')
+        }
+        // Reached only when the factory declared a thunk that then produced
+        // nothing — a fixture that no-opped. Loud, because a test passing
+        // against a world that was never built is the vacuous green this whole
+        // block exists to prevent.
+        if (!fixture) {
+          throw new Error('prepareVisibilityFixture produced no fixture — the world was not built')
+        }
+        return fixture
+      }
+
       afterEach(async () => {
         await fixture?.release?.()
         fixture = null
@@ -186,9 +212,8 @@ export function runContractSuite(
       const at = (position: Vec3) => (b: BlockInfo) =>
         b.position.x === position.x && b.position.y === position.y && b.position.z === position.z
 
-      it('returns a block that is exposed and in line of sight', () => {
-        if (!fixture) return
-        const { control, maxDistance } = fixture
+      it('returns a block that is exposed and in line of sight', (t) => {
+        const { control, maxDistance } = requireFixture(t)
         const found = ctx.executor.findBlocks({
           names: [control.name],
           maxDistance,
@@ -197,9 +222,8 @@ export function runContractSuite(
         expect(found.some(at(control.position))).toBe(true)
       })
 
-      it('does not return a block that exists nearby but is enclosed', () => {
-        if (!fixture) return
-        const { hidden, maxDistance } = fixture
+      it('does not return a block that exists nearby but is enclosed', (t) => {
+        const { hidden, maxDistance } = requireFixture(t)
         const found = ctx.executor.findBlocks({
           names: [hidden.name],
           maxDistance,
@@ -208,25 +232,28 @@ export function runContractSuite(
         expect(found.some(at(hidden.position))).toBe(false)
       })
 
-      it('applies the limit to visible blocks, not to buried candidates', () => {
-        if (!fixture) return
+      it('applies the limit to visible blocks, not to buried candidates', (t) => {
         // The nearest-first trap: if visibility were applied to an already
         // truncated result, a nearer buried block would consume the limit and
         // the visible one would vanish. `limit: 1` is the sharpest form of that
         // test, because the hidden block is closer than the control.
-        const { hidden, control, maxDistance } = fixture
-        if (hidden.name !== control.name) return
+        const { hidden, control, maxDistance } = requireFixture(t)
+        // Same class of silent pass: the fixture's own doc requires one name
+        // for both blocks, so a mismatch is a malformed fixture, not a reason
+        // to report this assertion as having run.
+        if (hidden.name !== control.name) {
+          t.skip('fixture used different names for hidden and control')
+        }
         const found = ctx.executor.findBlocks({ names: [hidden.name], maxDistance, limit: 1 })
         expect(found).toHaveLength(1)
         expect(found.some(at(control.position))).toBe(true)
       })
 
-      it('never reports through exploreFor what findBlocks would not return', async () => {
-        if (!fixture) return
+      it('never reports through exploreFor what findBlocks would not return', async (t) => {
         // Exploration must not see further than perception, or the X-ray hole
         // reopens through the back door — and memory, which is written only
         // from perception output, would inherit it.
-        const { hidden, maxDistance } = fixture
+        const { hidden, maxDistance } = requireFixture(t)
         const r = await ctx.executor.exploreFor([hidden.name], maxDistance)
         if (!r.ok) return
         expect(r.value.found.some(at(hidden.position))).toBe(false)
