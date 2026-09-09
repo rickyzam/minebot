@@ -405,6 +405,11 @@ the contract to fit the code. In particular, if §5.3's cost measurement forces
 > | 5 | Prompt edit 2 — the `not_found` tail | **Accepted as drafted** |
 > | 6 | Is `explore_for` the right answer to a dead position? | **Yes** |
 >
+> **Update 2026-09-09:** the candidate fix below was applied, probed, and
+> **reverted** — it does not work either. The cause is now *measured* rather than
+> hypothesised, and it is a third rule neither of us suspected. See
+> "Why it actually happens".
+>
 > **One thing is still open, and it is not a wording preference.** Answer 6 makes
 > the branch's measured behaviour wrong rather than merely unverified: the
 > `not_found already` scenario answers `move_to` ×5, which is neither
@@ -607,6 +612,63 @@ replacing it with an unprobed guess would destroy both. One
 `OLLAMA_HOST=… npm run agent:probe` run decides it, and the bar is the
 `not_found already` row answering `explore_for` while the other five scenarios
 stay unmoved.
+
+#### MEASURED 2026-09-09: the candidate does not fix it either. REVERTED.
+
+Applied exactly as drafted and probed. `not_found already` still answers
+`move_to` ×5; the other six scenarios are unmoved and 35/35 still decode. So the
+reorder is behaviourally **neutral** — it neither fixes nor harms. Reverted
+rather than kept, on the same principle that rejected the over-fetch route: a
+change with no demonstrated benefit does not earn a place in the prompt.
+
+**Both hypotheses were wrong.** Track A blamed the rules block growing from one
+line to seven; Track B blamed the drop-collection permission sitting above the
+prohibition. Neither is it.
+
+#### Why it actually happens — measured, not guessed
+
+The model was given the identical prompt with the JSON schema omitted, so it
+would answer in prose, and asked to name its action and quote the rule that
+justifies it. Nothing shipped was changed. Three samples, all identical in
+substance:
+
+> `{"action":"move_to","x":18,"y":60,"z":-34}`
+> The rule *"If an action failed, read the reason before choosing again.
+> Repeating an action that just failed the same way will not help."* justifies
+> this action, as the previous attempt to mine the block at (18, 60, -34) failed
+> because the block was not found, and moving to that position **may help locate
+> the block again**.
+
+So the competing rule is a **third** one that neither hypothesis considered:
+
+```
+- If an action failed, read the reason before choosing again. Repeating an action
+  that just failed the same way will not help.
+```
+
+The model reads it as *"do not repeat `mine_block_at` — pick something else"*,
+and `move_to` is the something else. It is obeying a rule, correctly, and that
+rule only says what **not** to do. The finished-position prohibition is never
+cited in any sample: it is not being out-competed, it is not being reached at
+all. That is why reordering the other pair changed nothing.
+
+Two further observations from the same run, both free:
+
+- The model's stated reason — *"moving to that position may help locate the
+  block again"* — is a belief the rules never contradict in terms it is using.
+  It is not reasoning about a finished position; it is reasoning about a failed
+  lookup.
+- Two of the three samples emitted `move_to` with a spurious `maxDistance`
+  field. The schema rejects it (`additionalProperties: false`), which is why the
+  probe still shows 35/35 decoded — but it suggests the model is pattern-matching
+  the shape of `mine_block_at` rather than choosing `move_to` deliberately.
+
+**Still Track B's call, and still unfixed.** The mechanism is now known, which
+is what the previous two attempts lacked; the wording that acts on it is Ricky's.
+The obvious direction — make the failed-action rule say what to do rather than
+only what not to do, or have it point at the finished-position rule — is
+deliberately NOT drafted here, because two drafted-then-failed candidates is
+enough evidence that guessing does not work on this one.
 
 ## 8. Impact on Track B
 
