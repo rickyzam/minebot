@@ -390,7 +390,7 @@ surface is a new agreement, not a detail — stop and ask rather than adjusting
 the contract to fit the code. In particular, if §5.3's cost measurement forces
 `findBlocks` to stop being synchronous-and-free, that is a new agreement.
 
-## 7.1 SECOND GATE — ANSWERED 2026-09-08, except the regression.
+## 7.1 SECOND GATE — ANSWERED 2026-09-08. Regression CLOSED 2026-09-09.
 
 > **Ricky's answers, 2026-09-08.** Recorded here because this section was the
 > single index of what was open. Entry point is
@@ -405,12 +405,15 @@ the contract to fit the code. In particular, if §5.3's cost measurement forces
 > | 5 | Prompt edit 2 — the `not_found` tail | **Accepted as drafted** |
 > | 6 | Is `explore_for` the right answer to a dead position? | **Yes** |
 >
-> **Update 2026-09-09:** the candidate fix below was applied, probed, and
-> **reverted** — it does not work either. The cause is now *measured* rather than
-> hypothesised, and it is a third rule neither of us suspected. See
-> "Why it actually happens".
+> **RESOLVED 2026-09-09 — nothing in this section is open any more.** Jump to
+> "RESOLVED 2026-09-09. How it was actually fixed" for the outcome. In short:
+> the probe could not measure reliably (identical prompts gave opposite answers
+> across runs), which is why three candidates appeared to fail for unclear
+> reasons. With a replicating probe the defect was re-judged and fixed, 7/7
+> scenarios stable across 6 replicates. The narrative below is kept as the
+> record of what was tried; read it as history, not as open questions.
 >
-> **One thing is still open, and it is not a wording preference.** Answer 6 makes
+> **The following was still open at the time of writing.** Answer 6 makes
 > the branch's measured behaviour wrong rather than merely unverified: the
 > `not_found already` scenario answers `move_to` ×5, which is neither
 > `explore_for` nor `give_up` and is forbidden by the rules two lines earlier.
@@ -573,7 +576,10 @@ independent and can merge without it.
       `hoped: ['explore_for', 'give_up']`; `give_up` stays acceptable only
       because a goal can be genuinely unachievable, not because standing still
       is a defensible answer to a dead position.
-- [ ] **The regression itself** — STILL OPEN, and answer 6 sharpens it from
+- [x] **The regression itself** — **CLOSED 2026-09-09.** Fixed by making the
+      drop-collection rule positional; see "How it was actually fixed" below.
+      7/7 scenarios stable and on target across 6 replicates. The text below is
+      kept as the record of what was tried and what it cost. Answer 6 sharpened it from
       "unverified" to "wrong". `not_found already` answers `move_to` ×5, an
       action the rules forbid and which the accepted edits do not correct.
       See below.
@@ -718,6 +724,81 @@ now tests what it claims. Three candidates have been measured and none works,
 so this is not a wording near-miss — something about how the permission is
 phrased survives every reordering tried so far. Track B's call, and no fourth
 guess is drafted here.
+
+### RESOLVED 2026-09-09. How it was actually fixed
+
+Everything above this line was reasoned from an instrument that could not
+support it. Both findings below came out of a systematic ablation of the
+prompt; the conclusion order is preserved because the second was unreachable
+without the first.
+
+#### The measuring instrument was unsound
+
+The same prompt — verified byte-identical by sha256 — produced `give_up` in
+**nine** runs and `move_to` in **five** others. Every run was internally
+unanimous, one of them **40/40**. A single process's "5/5" therefore describes
+how that process settled, not how the prompt behaves, and the instability is
+invisible from inside a run because within a process the answer never varies.
+
+That is why three candidate fixes were each declared ineffective on evidence
+that could not carry the claim. `probe.ts` had warned that 5/5 is "consistency
+rather than robustness"; the reality was worse than the warning.
+
+`agent:probe` now spawns one **fresh process per replicate** (default 4, first
+argument to override) and reports each replicate's modal answer, flagging any
+scenario whose replicates disagree. Processes rather than loops, because that
+is the boundary the instability was observed across.
+
+#### The defect, re-judged and fixed
+
+Re-measured with replication, the defect is real — `move_to` in 4/4 replicates
+— and all three earlier candidates genuinely do fail:
+
+| Candidate | Replicated result |
+|---|---|
+| Track A's prompt edits 1 + 2 (shipped) | `move_to` 4/4 |
+| Track B's rule reorder | `move_to` 4/4 |
+| Neutral, non-motion menu description | `move_to` 4/4 |
+| "A finished position tells you nothing about anywhere else" | `move_to` 4/4 |
+
+So the earlier verdicts were right, for reasons that had not been established.
+
+**What works is not what the rule says but what it asks the model to check.**
+The rule read *"use move_to that position ONCE"*, which requires inferring from
+the step history whether it had already gone — an inference the model does not
+make. It now compares the `Position` line in the state against the coordinate,
+which is a check it can perform:
+
+```
+- "OK (drop collected: false)" means the block IS broken and its item is lying on
+  the ground at that position. Mining it again will fail — there is nothing left to
+  mine. If you are NOT already standing at that position, use move_to ONCE to walk
+  over the item and pick it up. If your Position above already equals it, the item
+  is gone and that position is finished.
+```
+
+**7/7 scenarios stable and on target across 6 replicates.** `mined but the drop
+was lost` still chooses `move_to` 6/6, so the rule discriminates rather than
+prohibiting outright — which is what every blunt candidate got wrong.
+
+The generalisable lesson, and the reason this took four attempts: every earlier
+candidate reworded or reordered the *claim*. None changed the *inference the
+model is asked to perform*. Prompt fixes that move work from inference to
+comparison are worth trying before fixes that argue harder.
+
+#### Still not perfect, and recorded as such
+
+It settles on `give_up`, not `explore_for`. Both are in the scenario's `hoped`
+list and `give_up` is defensible — the goal may genuinely be out of reach — but
+`explore_for` is the better answer and is not reached. Diagnosed but unfixed:
+asked to explain, the model reasons *"no more coal can be collected **from this
+position**"* and then gives up on the **goal**, a scope confusion. The rule
+written for exactly that ("a finished position tells you nothing about anywhere
+else") measured as no help, so the cause is understood and the remedy is not.
+
+Scope caveat: this is one 14B model at temperature 0 over seven scenarios.
+"Stable across 6 replicates" is far stronger than anything available before, but
+it is not evidence the prompt is robust in general.
 
 ## 8. Impact on Track B
 

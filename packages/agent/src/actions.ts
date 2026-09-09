@@ -153,17 +153,16 @@ export const ACTION_SCHEMA = {
 /**
  * The human-readable menu, rendered into the system prompt.
  *
- * PROMPT TEXT IS TRACK B's, and this entry is UNSETTLED — adding it measurably
- * regressed one probe scenario into an action the rules forbid, and the drafted
- * rule edits did not fix it.
- *
- * ➡ See the line-of-sight spec §7.1, the single index of what is open for Ricky.
- *
  * The wording below is the Phase 4 plan's own draft (Task 7 Step 2), used
- * verbatim rather than invented here, and present at all only because an action
- * absent from the menu can never be chosen. Measured earlier in this project:
- * menu wording moved nothing (5/5 unchanged) while rules wording flipped the
- * answer outright (5/5), so the rules are where the fix will have to live.
+ * verbatim rather than invented here.
+ *
+ * Adding this entry once regressed the `not_found already` probe scenario into
+ * `move_to`, an action the rules forbid for a finished position. That is fixed
+ * — not here, but in `prompt.ts`, by making the drop-collection rule ask the
+ * model to compare its own Position against the coordinate rather than to infer
+ * from history whether it had already gone. Re-measure with `agent:probe` after
+ * touching this menu; it replicates across processes now, which single-run
+ * measurement did not.
  */
 export const ACTION_MENU = [
   'find_blocks         {"action":"find_blocks","names":["coal_ore","deepslate_coal_ore"],"maxDistance":32,"limit":5}',

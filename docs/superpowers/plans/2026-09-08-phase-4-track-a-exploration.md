@@ -1318,6 +1318,35 @@ before the permission that competes with it. It is **deliberately unapplied** �
 the branch holds the reproducible regression and a known-good baseline, and
 committing an unprobed guess would destroy both.
 
+### Step 1c: RESOLVED 2026-09-09 — Step 1 is complete
+
+Everything in Steps 1a and 1b was measured with an instrument that could not
+support it. `probe.ts` sampled five times **in one process**: the same prompt,
+byte-identical by hash, gave `give_up` in nine runs and `move_to` in five
+others, each run internally unanimous and one of them 40/40. So the order
+hypothesis above, and the two before it, were neither confirmed nor refuted by
+the runs that appeared to settle them.
+
+`agent:probe` now spawns a **fresh process per replicate** and flags any
+scenario whose replicates disagree. Re-judged on it:
+
+| Candidate | Replicated |
+|---|---|
+| prompt edits 1 + 2 | `move_to` 4/4 |
+| the order candidate above | `move_to` 4/4 |
+| neutral menu description | `move_to` 4/4 |
+| "a finished position tells you nothing about anywhere else" | `move_to` 4/4 |
+
+**Fixed by changing what the rule asks the model to check**, not what it says:
+`"use move_to that position ONCE"` requires inferring from history whether it
+had already gone; comparing the state's `Position` line against the coordinate
+does not. **7/7 scenarios stable and on target across 6 replicates**, with
+`mined but the drop was lost` still choosing `move_to` 6/6.
+
+Full detail in [spec §7.1](../specs/2026-09-08-perception-line-of-sight-design.md)
+under "RESOLVED 2026-09-09". Steps 2–5 of this task are now unblocked; Step 1's
+baseline is superseded by the replicated numbers above.
+
 **Blocked on the probe, not on a decision.** `OLLAMA_HOST` was unset and the
 model box at `192.168.1.21:11434` did not answer, so no measurement could be
 taken. One run settles it.
