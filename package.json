@@ -16,6 +16,7 @@
     "demo": "tsx packages/executor/src/cli.ts",
     "demo:phase2": "tsx packages/executor/src/phase2-demo.ts",
     "demo:phase3": "tsx packages/bot/src/phase3-demo.ts",
+    "demo:phase4": "tsx packages/bot/src/phase4-demo.ts",
     "bots": "tsx scripts/spawn-bots.ts",
     "arena:map": "tsx scripts/arena-map.ts",
     "bench:world": "tsx scripts/bench-world.ts",

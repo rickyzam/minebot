@@ -2,7 +2,7 @@
 
 A tool-calling LLM agent that plays Minecraft as a bot — a "smarter NPC" that can navigate, mine, build from blueprints, fight or flee, and talk to players, all through one shared local model rather than a specialised model per behaviour.
 
-**Status: Phase 2 complete, and the planning loop is built.** The bot connects to a server, reports immutable world state, paths around obstacles to a coordinate, and mines a block with the right tool and collects the drop — all under cancellable control. Separately, `packages/agent/` turns game state into an LLM decision and back into an action, tested against the mock and measured against a real model. Wiring the two together is Phase 3 and is not done yet. Building and combat are later phases.
+**Status: Phase 4 Track A complete — the bot finds coal it cannot see.** It connects, reports immutable world state, paths around obstacles, mines with the right tool, and collects the drop, all under cancellable control. `packages/agent/` turns that state into an LLM decision and back into an action; the two are wired together and run end to end. Perception is limited to line of sight, so the bot no longer sees ore through rock — which is what makes searching necessary and honest. Building and combat are later phases.
 
 ## The core idea
 
@@ -57,11 +57,15 @@ Three properties are worth knowing:
   detail — are rendered into the next prompt and the model decides. The only
   hardcoded guards are a step budget and a repetition check. Phase 4 writes the
   real policy against the step logs this produces.
-- **Prompt changes are measured, not assumed.** `npm run agent:probe` runs five
-  scenarios against a real model and reports what it chose. This caught two
-  defects that every unit test passed straight through, and established that the
+- **Prompt changes are measured, not assumed.** `npm run agent:probe` runs seven
+  scenarios against a real model and reports what it chose. This caught defects
+  that every unit test passed straight through, and established that the
   system-rules block outweighs the action menu for guidance about *when* to
   choose something.
+- **And the measurement itself is replicated.** The probe spawns a fresh process
+  per replicate, because the same prompt — byte-identical — was measured giving
+  opposite answers in different runs, each run internally unanimous. A single
+  run's "5/5" describes the run, not the prompt.
 
 ### The cross-implementation test suite
 
@@ -73,7 +77,7 @@ Three properties are worth knowing:
 
 ```bash
 npm install
-npm test        # 260 unit tests — no network, no Minecraft, no model
+npm test        # 310 unit tests — no network, no Minecraft, no model
 npm run typecheck
 ```
 
@@ -105,10 +109,11 @@ Then:
 
 ```bash
 npm run smoke            # Does a bot connect at all?
-npm run test:integration # 82 tests against the live server
+npm run test:integration # 103 tests against the live server
 npm run demo             # Connect, print a snapshot, walk to a coordinate
 npm run demo:phase2      # Path around a wall, mine coal ore, collect the drop
 npm run demo:phase3      # The whole loop: real state, real model, real action
+npm run demo:phase4      # Find coal that is not visible, on real terrain
 ```
 
 **Biome no longer matters much.** Phase 1's movement was deliberately naive — look at the target, walk forward, jump when blocked — and had no answer to a tree. Phase 2 replaced it with `mineflayer-pathfinder`, which routes around obstacles, so a jungle spawn is now workable rather than a dead stop. Movement is non-destructive by design (`canDig` is off), so terrain the bot cannot climb or walk around still reports `unreachable`.
@@ -124,8 +129,13 @@ npm run demo:phase3      # The whole loop: real state, real model, real action
 | `npm run demo` | Phase 1 deliverable | Yes |
 | `npm run demo:phase2` | Phase 2 deliverable | Yes |
 | `npm run demo:phase3` | Phase 3 deliverable | Yes — server **and** Ollama |
+| `npm run demo:phase4` | Phase 4 deliverable: find coal it cannot see | Yes — server **and** Ollama |
 | `npm run agent:demo` | Track B deliverable: the loop against a fake model and a mock world | No |
-| `npm run agent:probe` | Ask a real model for one action across five scenarios; report what it chose | No (needs Ollama) |
+| `npm run agent:probe` | Ask a real model for one action across seven scenarios, replicated across processes | No (needs Ollama) |
+| `npm run bench:world` | Qualify, place and verify the benchmark world's terrain and ore | Yes |
+| `npm run bench:explore` | Score the search: success rate and medians over N runs | Yes |
+| `npm run bench:perception` | What line-of-sight perception costs, by block and radius | Yes |
+| `npm run explore:path` | Print (or mark in-world) the exact waypoints a search will visit | Yes for `--mark` |
 
 ## Roadmap
 
@@ -134,14 +144,21 @@ npm run demo:phase3      # The whole loop: real state, real model, real action
 | 1 | Connect, read state, walk to a coordinate | **Done** |
 | 2 | Pathfinding + mining a known block | **Done** |
 | 3 | Close the LLM loop once, end to end | **Done** |
-| 4 | Reliable "find and mine coal" — search, retry, recovery | In progress — the bulk of the work |
-| 4.5 | [Line-of-sight perception](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — stop `findBlocks` seeing through rock | Agreed with Track B; not yet implemented |
+| 4 (Track A) | Search: `exploreFor`, a scored benchmark, and the `explore_for` action | **Done** |
+| 4.5 | [Line-of-sight perception](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — stop `findBlocks` seeing through rock | **Done** |
+| 4 (rest) | Retry and recovery policy, against the step logs the loop now produces | Next |
 | 5 | Full toolbox: building, follow, chat, reflex combat | |
 | 6 | Multi-bot scaling against one shared model | |
-| 7 | [Memory and recall](docs/notes/Memory%20and%20Recall.md) — short-term spatial memory, durable landmarks | Roadmap only; depends on 4.5 |
+| 7 | [Memory and recall](docs/notes/Memory%20and%20Recall.md) — short-term spatial memory, durable landmarks | Roadmap only |
 
-Track B's planning loop is built, tested against the mock, and measured against
-`qwen3:14b`. Phase 3 is the swap, and with Phase 2 complete nothing blocks it.
+**What Phase 4 Track A established, measured rather than assumed.** A horizontal
+surface spiral does **not** find naturally-occurring coal in real terrain: 0 of 3
+runs, each travelling ~605 blocks and reporting `exhausted` honestly. Every
+natural coal seam in the benchmark region is sealed in rock, and none is visible
+from anywhere along the search path. When coal *is* reachable the same search
+finds it 3 of 3, from three separate bearings at the outermost ring. So the
+search works and the world is the limit — which is what makes digging and
+cave-following the next capability rather than a guess.
 
 ## Documentation
 
