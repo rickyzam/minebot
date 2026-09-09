@@ -123,9 +123,19 @@ const SYSTEM = [
   '- After find_blocks, mine the exact block you found with mine_block_at.',
   '- If an action failed, read the reason before choosing again. Repeating an action',
   '  that just failed the same way will not help.',
+  // The condition here is POSITIONAL on purpose, and that is the whole fix.
+  // It used to read "use move_to that position ONCE", leaving the model to work
+  // out from the step history whether it had already gone. It did not: with
+  // explore_for on the menu it chose move_to to a position it was already
+  // standing on, 4/4 replicates. Comparing the Position line above against the
+  // coordinate is a check it can actually perform, and it does — 7/7 scenarios
+  // on target across 6 replicates, with "mined but the drop was lost" still
+  // choosing move_to, which is what stops this from being a blunt prohibition.
   '- "OK (drop collected: false)" means the block IS broken and its item is lying on',
   '  the ground at that position. Mining it again will fail — there is nothing left to',
-  '  mine. Use move_to that position ONCE to walk over the item and pick it up.',
+  '  mine. If you are NOT already standing at that position, use move_to ONCE to walk',
+  '  over the item and pick it up. If your Position above already equals it, the item',
+  '  is gone and that position is finished.',
   '- If you have ALREADY moved to that position and the item is still not in your',
   '  inventory, the drop is gone for good and that position is finished. The same is',
   '  true once mining it returns not_found. Do NOT move to or mine that position',
