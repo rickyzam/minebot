@@ -58,7 +58,11 @@ const describeValue = (v: unknown): string => {
             .map((b) => `${b.name} at ${vec(b.position)}, ${dist(b.distance)} away`)
             .join('; ')}`
     const more = r.exhausted ? 'nowhere left to search' : 'more ground remains'
-    return ` (${what}; searched out to ${r.searchedTo}; ${more})`
+    // Rounded because searchedTo is a raw distance: the Phase 4 demo put
+    // "searched out to 32.202484376209235" in front of the model. Fifteen
+    // significant figures of noise in a prompt is not free, and the number is
+    // only ever read as "how far have I got".
+    return ` (${what}; searched out to ${r.searchedTo.toFixed(0)}; ${more})`
   }
   return ''
 }

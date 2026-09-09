@@ -14,15 +14,19 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 ## Commands
 
 ```bash
-npm test                  # 263 unit tests. No network, no model. Fast. Run these constantly.
+npm test                  # 310 unit tests. No network, no model. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
-npm run test:integration  # 85 tests. Requires the live dev server.
+npm run test:integration  # 103 tests. Requires the live dev server.
 npm run smoke             # Minimal "can a bot connect at all" check.
 npm run demo              # Connect, print snapshot, walk. The Phase 1 deliverable.
 npm run demo:phase2       # Connect, path around a wall, mine coal. The Phase 2 deliverable.
 npm run demo:phase3       # Real state, real model, real action. The Phase 3 deliverable.
+npm run demo:phase4       # Find coal that is NOT visible, on real terrain. The Phase 4 deliverable.
 npm run agent:demo        # The planning loop against a fake model and a mock world. No server.
-npm run agent:probe       # Ask a real model for one action, five scenarios. Needs OLLAMA_HOST.
+npm run agent:probe       # Seven scenarios, replicated across fresh processes. Needs OLLAMA_HOST.
+npm run bench:world       # Qualify / place / verify the benchmark world. `-- setup`, `-- verify`
+npm run bench:explore     # Score the search over N runs. `-- 3 --one-per-run`, `-- 3 --natural`
+npm run explore:path      # The exact waypoints a search visits; `--mark` builds them in-world
 npm run arena:map         # Print an arena layer by layer, floor holes included. Diagnostic.
 npm run bench:perception  # What honest (line-of-sight) perception costs. Live server. `-- 5 --detail`
 ```
@@ -86,6 +90,10 @@ These cost real debugging time to discover. Treat them as settled.
 | A **bot's position persists in player data** between runs, and tests move it | The contract integration suite's own `exploreFor` tests walk the bot 32 blocks and its visibility fixture teleports it to an arena, so each run started wherever the last one ended. Any fixture declaring "these blocks are findable" must pin the bot's position first — `contract.int.test.ts` teleports to a fixed surface start every test |
 | `bot.findBlocks` takes **two** predicates, invoked at different rates: `matching` runs per **block in the volume**, `useExtraInfo` — *when passed a function* — runs only on blocks that already matched by type | `useExtraInfo` is the per-candidate hook, and it runs **upstream of `count`**, so `count` counts survivors and a filter there cannot be defeated by nearest-first truncation. Never put a position-dependent test in `matching`: it is also called on a synthetic **positionless** block to test each section's palette |
 | **`findBlocks` is not "free"**, and never was — it walks an octahedron outward and early-breaks only once `count` hits accumulate | A target it cannot satisfy forces a full-volume walk. Measured through the shipped executor at `maxDistance: 64`: `grass_block` 2.4ms, `emerald_block` 147ms, `coal_ore` 339ms, `stone` 909ms. The *empty* answer is the expensive one. Cost is set by `maxDistance`, not by filter cleverness — r=32 costs a quarter of r=64 |
+| The **benchmark world** is `(2343, 72, 2625)`, radius 64, plains — chosen by `bench:world qualify` for gentle terrain: 0.73% of adjacent column pairs are rough, worst step 7 | The gate is the STEP BETWEEN ADJACENT COLUMNS, not total elevation range. A 50-block range that slopes gently is walkable; a 3-block step is not. An earlier height-range criterion rejected good regions and accepted bad ones |
+| **A horizontal surface spiral does not find natural coal.** Measured 3/3 runs: `found=0`, `travelled` ~605 blocks, `searchedTo=64`, `exhausted=true` | This is design §8 risk 1, answered. Every natural seam in the region is sealed in rock and none is visible from anywhere on the path. The search is not broken — the world is the limit, which is what points at digging and cave-following next |
+| The same search finds **placed** coal 3/3, from three bearings at the outermost ring (r≈63) | Positive control for the above. Without it, `found=0` could not be distinguished from a search that never looked |
+| `exploreFor` waypoints are deterministic and enumerable — `npm run explore:path` prints them from the same pure `nextWaypoint` the executor uses | 21 waypoints for radius 64 / spacing 32, in rings at r=0/32/63/64. Place fixtures at computed points rather than estimating a distance by watching the bot |
 | `bot.pathfinder.searchRadius` defaults to `-1` (unlimited) | A genuinely unreachable target burns the whole `thinkTimeout` (5s) and reports `timeout` rather than `noPath`, so the planner is told "retry" when the truth is "pick another target". See issue on bounding it |
 
 ## The dev server
@@ -128,6 +136,8 @@ Three layers, and they are not interchangeable:
 **`agent:probe` measures across processes, not samples.** MEASURED 2026-09-09: the same prompt, byte-identical by hash, gave `give_up` in nine runs and `move_to` in five others — each run internally unanimous, one of them 40/40. A single process's "5/5" says how that process settled, not how the prompt behaves, and the instability is invisible from inside a run. The probe now spawns a fresh process per replicate (`npm run agent:probe -- <replicates> <attempts>`) and flags scenarios whose replicates disagree. **Never judge a prompt change on one run.** Three separate fixes were wrongly declared ineffective before this landed.
 
 **Prompt text is behavioural code that no test covers.** Changing `ACTION_MENU` or the system rules in `prompt.ts` changes what the bot does, and `npm test` will stay green regardless. Re-run `npm run agent:probe` after any such edit. Measured example: sharpening a menu entry did nothing (5/5 unchanged), while near-identical wording in the system-rules block flipped the answer completely (5/5). Guidance about *when* to choose an action belongs in the rules, not the menu.
+
+**`scripts/` and the `demo:*` entry points are not covered by `npm test`.** It is type-checked and nothing more, so a change that breaks a diagnostic tool at *runtime* passes the whole sweep. This bit on 2026-09-09: making `findBlocks` line-of-sight limited broke `bench:world` outright — its surveyor got 50× slower, blocked the event loop past the keepalive window, and the server dropped it — while 310 unit tests, 101 integration tests, typecheck and invariants all stayed green. If you change something a script depends on, run the script. `surveyor.int.test.ts` now guards that particular tool; the other scripts have no such cover. The same change also broke `demo:phase2`, which located its ore with `findBlocks` through a solid wall — it now asserts the ore is correctly INVISIBLE and mines the coordinate it placed. Run the demos before claiming a phase is green.
 
 ### Two traps this repo has already fallen into
 

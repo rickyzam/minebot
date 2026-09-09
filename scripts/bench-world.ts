@@ -14,7 +14,55 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+import type { Bot } from 'mineflayer'
 import { MineflayerExecutor } from '@minebot/executor'
+
+/**
+ * Ground truth about the terrain, deliberately BYPASSING the bot's perception.
+ *
+ * `executor.findBlocks` answers "what can the bot see from here", which is the
+ * right question for a bot and the wrong one for a surveyor. This file measures
+ * what the world IS — where the surface sits, whether the region is wet, and
+ * whether a `setblock` actually landed. A block encased in rock still has to
+ * count when the question is "did the command take effect".
+ *
+ * It is also the difference between working and not. MEASURED 2026-09-09 at the
+ * benchmark region, `maxDistance: 105`, `limit: 60000`:
+ *
+ *   perception  4896ms, 2088 hits
+ *   raw           99ms, 60000 hits
+ *
+ * `surfaceProfile` issues four such queries, so going through perception spent
+ * ~20 SECONDS blocking the event loop. Mineflayer answers keepalives on that
+ * same loop, so the server dropped the scanner mid-scan and `bench:world setup`
+ * died with EPIPE. Nothing caught it because `bench:world` is in neither
+ * `npm test` nor the integration suite.
+ *
+ * This is not a licence to route around perception elsewhere. The bot's own
+ * knowledge, and anything memory is written from, must come through
+ * `findBlocks` — see the line-of-sight spec §10. A diagnostic surveyor is not
+ * the bot.
+ */
+export function surveyBlocks(
+  executor: MineflayerExecutor,
+  names: readonly string[],
+  maxDistance: number,
+  limit: number,
+): { name: string; position: { x: number; y: number; z: number } }[] {
+  const bot = (executor as unknown as { bot: Bot | null }).bot
+  if (bot === null) throw new Error('surveyBlocks: executor is not connected')
+  const wanted = new Set(names)
+  return bot
+    .findBlocks({
+      matching: (b) => b !== null && wanted.has(b.name),
+      maxDistance,
+      count: limit,
+    })
+    .map((p) => ({
+      name: bot.blockAt(p, false)?.name ?? 'unknown',
+      position: { x: p.x, y: p.y, z: p.z },
+    }))
+}
 
 /**
  * Gentle biomes only. Jungle, swamp, ocean and mountain variants are excluded
@@ -321,7 +369,7 @@ function surfaceProfile(
 
   const highestPerColumn = (names: readonly string[]): Map<string, number> => {
     const out = new Map<string, number>()
-    for (const b of executor.findBlocks({ names, maxDistance: reach, limit: SCAN_LIMIT })) {
+    for (const b of surveyBlocks(executor, names, reach, SCAN_LIMIT)) {
       if (!inRegion(b.position)) continue
       const key = `${b.position.x},${b.position.z}`
       const seen = out.get(key)
@@ -330,11 +378,7 @@ function surfaceProfile(
     return out
   }
 
-  const surfaces = executor.findBlocks({
-    names: SURFACE_MARKERS,
-    maxDistance: reach,
-    limit: SCAN_LIMIT,
-  })
+  const surfaces = surveyBlocks(executor, SURFACE_MARKERS, reach, SCAN_LIMIT)
   const top = new Map<string, number>()
   for (const b of surfaces) {
     if (!inRegion(b.position)) continue
@@ -350,11 +394,7 @@ function surfaceProfile(
   // and told us nothing about whether the surface was wet.
   const heights = [...top.values()]
   const mid = percentile(heights, 0.5)
-  const allFluids = executor.findBlocks({
-    names: FLUIDS,
-    maxDistance: reach,
-    limit: SCAN_LIMIT,
-  })
+  const allFluids = surveyBlocks(executor, FLUIDS, reach, SCAN_LIMIT)
   const fluids = allFluids.filter(
     (b) => inRegion(b.position) && b.position.y >= mid - 4 && b.position.y <= mid + 12,
   ).length
@@ -763,9 +803,9 @@ function surfaceNear(top: Map<string, number>, x: number, z: number): number | u
 function missingOre(executor: MineflayerExecutor, fixture: BenchFixture): OreSpec[] {
   const names = [...new Set(fixture.ore.map((o) => o.block))]
   const seen = new Set(
-    executor
-      .findBlocks({ names, maxDistance: 160, limit: SCAN_LIMIT })
-      .map((b) => `${b.position.x},${b.position.y},${b.position.z}`),
+    surveyBlocks(executor, names, 160, SCAN_LIMIT).map(
+      (b) => `${b.position.x},${b.position.y},${b.position.z}`,
+    ),
   )
   return fixture.ore.filter((o) => !seen.has(`${o.x},${o.y},${o.z}`))
 }

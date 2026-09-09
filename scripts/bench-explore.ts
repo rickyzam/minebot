@@ -56,6 +56,7 @@ const median = (xs: readonly number[]): number => {
 async function main(): Promise<void> {
   const args = process.argv.slice(2)
   const natural = args.includes('--natural')
+  const onePerRun = args.includes('--one-per-run')
   const runs = Number(args.find((a) => !a.startsWith('--')) ?? 10)
   if (!Number.isFinite(runs) || runs < 1) {
     console.error('usage: npm run bench:explore -- [runs] [--natural]')
@@ -82,7 +83,7 @@ async function main(): Promise<void> {
   const byPosition = new Map(fixture.ore.map((o) => [oreKey(o), o.bearing ?? 'fixture']))
 
   console.log(
-    `${runs} run(s), ${natural ? 'NATURAL coal_ore, fixture targets removed' : `fixture ${target} placed`}, ` +
+    `${runs} run(s), ${natural ? 'NATURAL coal_ore, fixture targets removed' : `fixture ${target} placed${onePerRun ? ', ONE per run (bearing rotates)' : ''}`}, ` +
       `radius ${SEARCH_RADIUS}, budget ${BUDGET_MS}ms, ` +
       `start (${fixture.start.x}, ${fixture.start.y}, ${fixture.start.z})\n`,
   )
@@ -95,8 +96,15 @@ async function main(): Promise<void> {
     // looking.
     for (const o of fixture.ore) mc(`setblock ${o.x} ${o.y} ${o.z} air`)
     await sleep(800)
+    // One target per run rotates the BEARING while holding distance fixed, so
+    // three runs test three directions at equal difficulty. Placing all three
+    // measures something easier — "find whichever of three is nearest" — and
+    // cannot tell a direction-blind search from a working one.
+    const placing = onePerRun
+      ? [fixture.ore[(run - 1) % fixture.ore.length]!]
+      : fixture.ore
     if (!natural) {
-      for (const o of fixture.ore) mc(`setblock ${o.x} ${o.y} ${o.z} ${o.block}`)
+      for (const o of placing) mc(`setblock ${o.x} ${o.y} ${o.z} ${o.block}`)
       await sleep(800)
     }
 

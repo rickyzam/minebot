@@ -1,6 +1,6 @@
 {
   "verifiedOn": "2026-09-08",
-  "note": "Region proposed by a human standing in it and confirmed by `bench:world qualify`. Every number is measured, not assumed - re-check with `npm run bench:world -- verify`. Targets sit ONE BLOCK ABOVE their column's measured surface rather than replacing it: replacing the grass block removes the very marker the surface profile is measured from. The target is emerald_block, NOT coal_ore, and that is load-bearing: findBlocks queries the client's world model with no line-of-sight, so it returns blocks encased in solid stone. Measured here: 3219 natural coal_ore within 64 blocks of the start, every one of them buried. A coal_ore target is therefore found at the origin without the bot moving, and the benchmark would score perception rather than search. emerald_block does not occur in worldgen at all, so a hit is unambiguously the block we placed.",
+  "note": "Region proposed by a human standing in it and confirmed by `bench:world qualify`. Every number is measured, not assumed - re-check with `npm run bench:world -- verify`. Targets sit ONE BLOCK ABOVE their column's measured surface rather than replacing it: replacing the grass block removes the very marker the surface profile is measured from. The target is coal_ore as of 2026-09-09. It was emerald_block while findBlocks had X-ray vision, because 3216 natural coal_ore sat within 64 blocks of the start and every one of them was 'found' at the origin without the bot moving, scoring perception rather than search. Perception is now line-of-sight limited and that reason is gone: measured over three full 605-block spirals, ZERO natural coal_ore is visible anywhere in the search area, so a coal hit is unambiguously the block we placed - and bench-explore reports the bearing it matched, or 'natural', so the ambiguity is detected rather than assumed away. The three targets sit on the OUTERMOST ring of the actual search path at near-identical distance (63.0/63.1/63.4) on three separated bearings, computed with `npm run explore:path` rather than estimated. Outermost is deliberate: it is the last ground the spiral covers, so a hit means the search ran essentially to completion. Placing ONE per run (`--one-per-run`) varies the bearing without varying the difficulty.",
   "biome": "minecraft:plains",
   "radius": 64,
   "start": {
@@ -23,31 +23,31 @@
   },
   "ore": [
     {
-      "x": 2391,
-      "y": 67,
-      "z": 2625,
-      "block": "emerald_block",
-      "bearing": "east",
-      "distance": 48.0,
-      "surfaceY": 66
+      "x": 2399,
+      "y": 71,
+      "z": 2654,
+      "block": "coal_ore",
+      "bearing": "south-east",
+      "distance": 63.1,
+      "surfaceY": 70
     },
     {
-      "x": 2319,
-      "y": 70,
-      "z": 2667,
-      "block": "emerald_block",
+      "x": 2321,
+      "y": 80,
+      "z": 2566,
+      "block": "coal_ore",
       "bearing": "north-west",
-      "distance": 48.4,
-      "surfaceY": 69
+      "distance": 63.0,
+      "surfaceY": 79
     },
     {
-      "x": 2319,
-      "y": 72,
-      "z": 2583,
-      "block": "emerald_block",
-      "bearing": "south-west",
-      "distance": 48.4,
-      "surfaceY": 71
+      "x": 2350,
+      "y": 78,
+      "z": 2688,
+      "block": "coal_ore",
+      "bearing": "south",
+      "distance": 63.4,
+      "surfaceY": 77
     }
   ]
 }

@@ -52,18 +52,26 @@ async function main(): Promise<number> {
         `health ${before.self.health}, holding ${before.self.heldItem?.name ?? 'nothing'}`,
     )
 
-    const found = executor.findBlocks({ names: ['coal_ore'], maxDistance: 32, limit: 5 })
-    console.log(
-      `found ${found.length} coal_ore; nearest at ` +
-        `${found[0] ? `(${found[0].position.x}, ${found[0].position.y}, ${found[0].position.z})` : 'n/a'}`,
-    )
-    if (!found[0]) {
-      console.error('FAIL: no coal ore found — the arena setup did not take')
+    // The ore sits BEHIND the wall, so the bot must not be able to see it from
+    // here — and since 2026-09-08 it cannot. This demo used to LOCATE the ore
+    // with findBlocks and mine whatever came back, which only ever worked
+    // because findBlocks saw through stone. Now the same call is the guard:
+    // a non-empty result means perception has stopped being line-of-sight.
+    const visible = executor.findBlocks({ names: ['coal_ore'], maxDistance: 32, limit: 5 })
+    console.log(`coal_ore visible from the start: ${visible.length} (the wall is in the way)`)
+    if (visible.length > 0) {
+      console.error(
+        `FAIL: ${visible.length} coal_ore visible through a solid wall — perception is ` +
+          `no longer limited to line of sight`,
+      )
       return 1
     }
 
-    console.log('mining it…')
-    const mined = await executor.mineBlock(found[0].position, 32, { timeoutMs: 90_000 })
+    // Mined at the coordinate this demo placed it at. Phase 2's subject is
+    // pathing around the obstacle and mining with the right tool; finding it
+    // is Phase 4's, and needs the bot to go and look.
+    console.log('mining it at its known coordinate…')
+    const mined = await executor.mineBlock(ORE, 32, { timeoutMs: 90_000 })
     if (!mined.ok) {
       console.error(`FAIL: ${mined.reason}: ${mined.detail}`)
       return 1
