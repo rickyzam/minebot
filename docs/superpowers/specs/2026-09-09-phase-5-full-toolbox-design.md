@@ -1,7 +1,7 @@
 # Phase 5 (Track A): the full toolbox — reflex, follow, building
 
 **Date:** 2026-09-09
-**Status:** DRAFT. Not agreed, not started. Three decisions below need answers before implementation, and one of them needs Ricky.
+**Status:** DRAFT. Not agreed, not started. Decision 2 was answered on 2026-09-09; two remain, and one of them needs Ricky.
 **Affects:** `packages/executor/` (four stubs), `packages/bot/` (the arbiter), `packages/contract/` (one doc-comment gap, §7.1)
 **Blocked by:** nothing. Phase 4 Track A is merged; the
 [work split](../../notes/Phase%20Plan%20and%20Parallel%20Work%20Split.md) runs
@@ -91,22 +91,53 @@ and that is confirmed against the running server rather than taken from the doc
 removed immediately**, including ones placed with `/summon`. So today there is no
 way to exercise a single line of combat code against the live server.
 
-This is the phase's biggest practical constraint and it is not a code problem.
-Options, none of which Track A can choose unilaterally:
+**RESOLVED 2026-09-09: Dorel granted standing permission to change the difficulty
+and restart the server as needed.** So the constraint is not permission. What
+remains is a set of measured facts about what a hostile mob actually does once
+summoned, and those change the arena design rather than the plan.
 
-| Option | Cost |
+### 4.1 Measured on the live server, 2026-09-09
+
+| Measurement | Result |
 |---|---|
-| **A. Raise difficulty to `easy` on the dev backend** | Changes shared state. Hostiles would then spawn around anyone playing, and around every other integration test's bot. `/difficulty` is per-world and immediate |
-| **B. Raise difficulty only for the duration of combat tests, restore after** | The arena is at y=199 in the open; mobs need light level and space, so spawning is not guaranteed where we want it. A test that silently gets no mob is the vacuous-fixture trap this repo has been bitten by twice |
-| **C. Summon a specific mob at a known coordinate under `easy`, then restore** | Deterministic placement, which B lacks. Still needs the difficulty change, still shared state |
-| **D. Test the reflex layer against synthetic events only** | No server change at all. The trigger rules are pure and the arbiter can be driven by a `MockExecutor` emitting `damaged`. Proves the arbitration, proves nothing about `attack`/`flee` actually working in-world |
+| `difficulty` before any change | **Peaceful** |
+| `difficulty easy` then `summon zombie` at the y=199 arena | Summoned, present at 3s |
+| The same zombie 30s later | **Gone** |
+| Re-run with `{PersistenceRequired:1b}` and a name, watching the console | **`"TestZed" burned to death` at 21 seconds** |
 
-**Track A's recommendation: D now, C later.** D covers the arbiter — the part
-that is genuinely hard and genuinely ours — with no server change and no shared
-state. C is what `attack`/`flee` eventually need, and it needs the server
-decision in §7 Decision 2 before it can be planned honestly.
+So the failure is **daylight**, not despawn, and `PersistenceRequired` does not
+help — it prevents despawn, not fire. An undead mob on an open-sky platform is
+dead in about twenty seconds, which is shorter than a single pathfinding leg.
 
-Doing D first also means the phase is not blocked on that decision at all.
+This was nearly misdiagnosed. `time query daytime` returned 14806 — night — a few
+minutes before the summon, so the first disappearance was written off as despawn.
+The clock had simply advanced into daylight by the time the second zombie was
+summoned. **Read the death message, not the clock**: the server states the cause
+outright, and it is the only thing here that distinguished burning from despawn.
+
+### 4.2 What this means for the arena
+
+Combat tests need a hostile that survives long enough to be fought. Options:
+
+| Option | Verdict |
+|---|---|
+| **Roof the combat arena** | **Recommended.** Local, deterministic, changes no global state, and `buildArena` already fills a volume — a ceiling is one more `/fill`. Nothing outside the arena is affected |
+| `time set midnight` + `doDaylightCycle false` | Works, but it is global: it changes the sky for anyone playing, and any test that assumes daylight |
+| Use a mob that does not burn (spider, creeper) | Spiders are neutral in daylight, so the trigger being tested would not fire. Creepers do not burn but explode, which destroys the arena |
+| Fire resistance / `NoAI` on the summoned mob | `NoAI` stops it attacking, so it cannot exercise the reflex layer at all |
+
+**A roofed arena plus `difficulty easy` for the duration of the test, restored
+after.** That gives a deterministic mob at a known coordinate, no daylight, and
+no lasting change to the shared world.
+
+### 4.3 Sequencing still favours synthetic events first
+
+Even with combat now testable, the arbiter should still be built against
+`MockExecutor` events emitting `damaged` on demand. Not because the server is
+blocked — it is not — but because the arbiter is concurrency (§10 risk 2) and
+deserves exhaustive, instant, deterministic tests before a live mob with its own
+AI is added to the picture. Live combat then tests `attack`/`flee`, not the
+arbitration.
 
 ## 5. `followPlayer`
 
@@ -156,11 +187,12 @@ a flag on the goal outcome; or the arbiter re-invoking the planner itself so the
 distinction never reaches it. Track A's lean is the third — the arbiter owns the
 handback, and the planner just sees a fresh state.
 
-### Decision 2 — the dev server's difficulty (needs Dorel; it is shared state)
+### Decision 2 — the dev server's difficulty — ANSWERED 2026-09-09
 
-Per §4 and CLAUDE.md's standing rule not to reconfigure the server without
-asking. Recommendation: leave it peaceful, build the arbiter against synthetic
-events, and revisit when `attack`/`flee` are actually being written.
+Dorel granted standing permission to change difficulty and restart the server.
+No longer a blocker. §4.1 replaces it with measured facts: the real constraint
+was never permission, it was that an undead mob burns to death in 21 seconds on
+an open-sky arena. §4.2 settles that with a roof.
 
 ### Decision 3 — when does `followPlayer` return? (needs Ricky; shared surface)
 
@@ -175,7 +207,8 @@ rather than a signature change, but it still needs agreement.
    with no live mobs and no server change.
 3. **`followPlayer`**, once Decision 3 lands.
 4. **`placeBlock` + schematic loader** — the largest, and independent of the rest.
-5. **`attack` / `flee`**, once Decision 2 lands.
+5. **`attack` / `flee`** against a roofed arena under `difficulty easy`,
+   restored to `peaceful` after. No longer gated on anything.
 
 ## 9. Testing strategy
 
@@ -196,8 +229,9 @@ best property and the plan should lean on it.
 
 ## 10. Risks
 
-1. **Combat is untestable on the current server** (§4). The largest risk, and it
-   is environmental rather than technical.
+1. **Combat needs a roofed arena** (§4.2). Measured, not assumed: an undead mob
+   on the open y=199 platform burns to death in 21 seconds. A combat test built
+   on the existing arena would lose its mob mid-run and read as the bot failing.
 2. **The arbiter is concurrency**, which this repo has already been bitten by —
    `connect()`/`disconnect()` races produced the `pendingConnect` machinery. Two
    signals, a handback, and a reflex firing *during* recovery all need explicit
