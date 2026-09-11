@@ -1261,14 +1261,34 @@ export class MineflayerExecutor implements BotExecutor {
         ): { face: MineflayerVec3; ref: MineflayerVec3 } | null
       }
       /**
-       * The face to place against from where the bot stands now, or null. The
-       * same test the pathfinder applies to decide it has arrived — floored
-       * position, and the node above for a bot on a partial block
-       * (index.js:590) — so arrival and placement never disagree.
+       * The face to place against from where the bot stands now, or null.
+       * Used for both the arrival check and the placement, so they never
+       * disagree.
+       *
+       * The bot's own cell — plus the cell above only when it stands on a
+       * partial block. That is the pathfinder's own rule for which node a
+       * standing bot occupies (index.js:78-84: the floored position, offset by
+       * one when the block there is solid, not full height, and the bot is on
+       * the ground).
+       *
+       * Review round 1, Important 2 — MEASURED 2026-09-11. This used to try
+       * the cell above unconditionally, copying the post-walk check at
+       * index.js:590. On the floor right against a two-high ledge the bot's
+       * own eye (y+1.62) is below the ledge top and cannot see the face beside
+       * the target, but an eye one block higher can. A zero-length path then
+       * passed as arrival, and the server — which does not check line of
+       * sight — accepted a placement on a surface the bot could not see:
+       * {"ok":true} where `unreachable` is right.
        */
       const faceFromHere = (): { face: MineflayerVec3; ref: MineflayerVec3 } | null => {
         const node = bot.entity.position.floored()
-        for (const n of [node, node.offset(0, 1, 0)]) {
+        const standingIn = bot.blockAt(node)
+        const onPartialBlock =
+          standingIn !== null &&
+          standingIn.boundingBox === 'block' &&
+          bot.entity.position.y - node.y > 0.001 &&
+          bot.entity.onGround
+        for (const n of onPartialBlock ? [node, node.offset(0, 1, 0)] : [node]) {
           if (placeGoal.isEnd(n)) return placeGoal.getFaceAndRef(n.offset(0.5, 1.6, 0.5))
         }
         return null
@@ -1301,9 +1321,19 @@ export class MineflayerExecutor implements BotExecutor {
       try {
         approach = await this.gotoGoal(bot, signal, goal, () => faceFromHere() !== null)
       } finally {
-        // Only if nothing replaced it meanwhile: restoring over someone
-        // else's movements would be a second surprise, not a cleanup.
         try {
+          // Clear the goal FIRST, whatever the outcome. Review round 1,
+          // Important 1 — MEASURED 2026-09-11. A failed approach (NoPath, or a
+          // zero-length path `reached()` rejects) leaves the goal set, and
+          // setMovements runs resetPath, which re-arms re-planning
+          // (`pathUpdated = false`, index.js:123-139). The pathfinder then
+          // re-planned the same GoalPlaceBlock with the SHARED movements —
+          // dirt allowed again — and pillared on the dirt within 8s of this
+          // call returning `unreachable` with the dirt still held. On success
+          // the same restart could move the bot while it equips and places.
+          bot.pathfinder.setGoal(null)
+          // Only if nothing replaced it meanwhile: restoring over someone
+          // else's movements would be a second surprise, not a cleanup.
           if (guarded && bot.pathfinder.movements === guarded) bot.pathfinder.setMovements(shared)
         } catch {
           // disconnected mid-approach

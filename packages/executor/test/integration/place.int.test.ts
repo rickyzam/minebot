@@ -55,6 +55,8 @@ const RAMP_STEP = { x: 1867, y: FLOOR, z: 7 }
  * route, and the unguarded bot took the ramp: a test that could not fail.)
  */
 const LEDGE_TARGET = { x: 1861, y: FLOOR + 2, z: 3 }
+/** On the floor, directly against the ledge's front face, in line with LEDGE_TARGET. */
+const LEDGE_FRONT = { x: 1857, y: FLOOR, z: 3 }
 /** Standing on the ledge's near corner, with a view across its top. */
 const LEDGE_VIEW = { x: 1858, y: FLOOR + 2, z: 0 }
 
@@ -259,12 +261,55 @@ describe('MineflayerExecutor.placeBlock', () => {
     await confirmFrom(LEDGE_VIEW, 'dirt', LEDGE_TARGET)
   })
 
+  /**
+   * After a failed placement on the no-ramp ledge, prove nothing is still
+   * working on it: the dirt stays held, the bot stays where the call left it,
+   * and a second connection sees no dirt anywhere.
+   *
+   * Review round 1, Important 1: a failed approach leaves the pathfinder's goal
+   * set, and anything that resets the path — restoring the shared movements
+   * does — re-plans it with dirt allowed as scaffolding. That walk plus a
+   * pillar jump takes a few seconds, so a check straight after the call cannot
+   * see it; 8s can.
+   */
+  async function expectNothingBuiltAfterwards(e: MineflayerExecutor): Promise<void> {
+    const settled = e.getState().self.position
+    await sleep(8_000)
+    const now = e.getState().self.position
+    expect(itemCount(e, 'dirt'), 'the dirt was spent after the call returned').toBe(1)
+    expect(flatDistance(now, settled), 'the bot moved after the call returned').toBeLessThan(0.5)
+    expect(Math.abs(now.y - settled.y), 'the bot climbed after the call returned').toBeLessThan(0.5)
+
+    const w = (watcher = new MineflayerExecutor({ username: WATCH }))
+    expect((await w.connect()).ok).toBe(true)
+    await teleportAndWait(w, WATCH, LEDGE_VIEW)
+    await waitForOnGround(w, { expectedY: LEDGE_VIEW.y })
+    // Positive control: this viewpoint can see the floor in front of the
+    // ledge, where a pillar would stand. Without it, "no dirt visible" could be
+    // a connection whose chunks had not loaded.
+    await waitForBlockVisible(w, 'stone', { x: 1855, y: ARENA.floorY, z: 1 })
+    expect(w.findBlocks({ names: ['dirt'], maxDistance: 16, limit: 8 })).toEqual([])
+  }
+
   it('fails unreachable and keeps the block, when building is the only way up', async () => {
     const e = await placerAt(START, { item: 'dirt', count: 1 }, buildLedge)
     await waitForBlockVisible(e, 'stone', { x: 1858, y: FLOOR + 1, z: 4 })
 
     expectReason(await e.placeBlock('dirt', LEDGE_TARGET, { timeoutMs: 45_000 }), 'unreachable')
-    await sleep(500)
-    expect(itemCount(e, 'dirt')).toBe(1)
+    await expectNothingBuiltAfterwards(e)
+  })
+
+  // Review round 1, Important 2. Standing on the floor right against the
+  // ledge, the bot's eye (y 201.62) is below the ledge top and cannot see the
+  // target's face. The cell ABOVE the bot could: from an eye at 202.6 the face
+  // is ~4.05 away with a clear ray. A viewpoint the bot does not occupy must
+  // not count as arrival — the server does not check line of sight, so it
+  // would accept a placement on a surface the bot cannot see.
+  it('fails unreachable from the floor against the ledge, not from a viewpoint a block higher', async () => {
+    const e = await placerAt(LEDGE_FRONT, { item: 'dirt', count: 1 }, buildLedge)
+    await waitForBlockVisible(e, 'stone', { x: 1858, y: FLOOR + 1, z: 3 })
+
+    expectReason(await e.placeBlock('dirt', LEDGE_TARGET, { timeoutMs: 45_000 }), 'unreachable')
+    await expectNothingBuiltAfterwards(e)
   })
 })
