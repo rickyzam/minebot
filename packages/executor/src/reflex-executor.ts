@@ -35,11 +35,19 @@
  * with a detail naming the reflex and the trigger, even if the inner action
  * managed to resolve `ok` — the recovery moved the bot, and `ok` would let the
  * planner continue from a stale snapshot. The caller's own abort is the
- * exception: it returns at once, and cancels the recovery too.
+ * exception: it returns at once.
  *
- * **An action that starts while a recovery is running waits for it** before
- * calling the inner executor. It is not preempted by the recovery it is
- * waiting on; it has lost nothing.
+ * **A caller abort never cancels a recovery.** Cancelling a goal is a plan
+ * decision, and the recovery may be the flee keeping the bot alive: reflex
+ * beats plan. Only `stop()` and `disconnect()` cancel one.
+ *
+ * **An action that starts while a recovery is running waits for it, then
+ * returns `interrupted` without ever running.** It was chosen from a snapshot
+ * taken before the recovery moved the bot; run, it could walk straight back to
+ * the hostile, and `ok` would stop the planner re-observing. The exception is
+ * a caller action that outranks the recovery — in practice a caller `flee`
+ * during an attack recovery. It supersedes the recovery and runs, because
+ * waiting would hand back a flee that never fled.
  *
  * **`stop()` wins.** It cancels the recovery, halts every action, and
  * suppresses the reflex until the next wrapped action starts.
@@ -52,8 +60,8 @@
  * row, attack triggers are ignored until an attack succeeds or nothing
  * triggers, and likewise for flee. A string of failed attacks never stops a
  * flee — the cap stops futile repetition, it does not veto a different safety
- * action. A recovery cancelled by a supersede, `stop()`, `disconnect()` or the
- * caller is neither a success nor a failure and does not count.
+ * action. A recovery cancelled by a supersede, `stop()` or `disconnect()` is
+ * neither a success nor a failure and does not count.
  */
 import {
   fail,
@@ -248,7 +256,10 @@ export class ReflexExecutor implements BotExecutor {
     return this.guard('attack', 1, opts, (signal) => this.inner.attack(entityId, { ...opts, signal }))
   }
 
-  /** Occupies the reflex at flee priority: nothing preempts it. */
+  /**
+   * Occupies the reflex at flee priority: nothing preempts it. Called during an
+   * attack recovery, it supersedes that recovery instead of waiting behind it.
+   */
   flee(opts?: ActionOptions): Promise<Result<{ fled: boolean }>> {
     return this.guard('flee', 2, opts, (signal) => this.inner.flee({ ...opts, signal }))
   }
@@ -405,8 +416,18 @@ export class ReflexExecutor implements BotExecutor {
     opts?.signal?.addEventListener('abort', onCallerAbort, { once: true })
 
     try {
-      if (this.recovery !== null) await this.untilRecovered(action)
-      if (action.halted !== null) return haltedResult(action.halted)
+      const running = this.recovery
+      if (running !== null && priority > running.priority) {
+        // Outranks the recovery: supersede it, as a higher trigger would.
+        // Aborted, it occupies nothing and releases its own latch.
+        running.controller.abort()
+      } else if (running !== null) {
+        // Chosen from a snapshot the recovery has since made stale: wait it
+        // out, then hand back `interrupted` without running.
+        const by = await this.untilRecovered(action)
+        if (action.halted !== null) return haltedResult(action.halted)
+        return preemptedResult(by ?? running.preemption.trigger)
+      }
 
       // No await between here and the inner call, so an event emitted right
       // after this method returns already sees the action as started.
@@ -422,8 +443,7 @@ export class ReflexExecutor implements BotExecutor {
       if (action.preemptedBy !== null) {
         await this.untilRecovered(action)
         if (action.halted !== null) return haltedResult(action.halted)
-        const by: ReflexTrigger = action.preemptedBy
-        return fail('interrupted', `preempted by reflex: ${by.kind} — ${by.reason}`)
+        return preemptedResult(action.preemptedBy)
       }
       return result
     } finally {
@@ -435,27 +455,35 @@ export class ReflexExecutor implements BotExecutor {
   private halt(action: Action, cause: 'caller' | 'stop'): void {
     if (action.halted !== null) return
     action.halted = cause
+    // Ends any wait for a recovery, so the caller hears back at once. It does
+    // NOT cancel the recovery: that is for stop() and disconnect(), never for
+    // a caller's abort (see the header).
     action.halt.abort()
     action.controller.abort()
-    // Any recovery running now is the one this action is waiting on. stop()
-    // cancels the recovery itself, before halting actions.
-    if (cause === 'caller') this.recovery?.controller.abort()
   }
 
   /**
    * Wait until no recovery is running — including any that supersedes the one
-   * running when the wait began — or until the action is halted.
+   * running when the wait began — or until the action is halted. Resolves to
+   * the trigger of the last recovery waited on, or `null` if there was none.
    */
-  private async untilRecovered(action: Action): Promise<void> {
+  private async untilRecovered(action: Action): Promise<ReflexTrigger | null> {
     const halted = new Promise<void>((resolve) => {
       if (action.halt.signal.aborted) resolve()
       else action.halt.signal.addEventListener('abort', () => resolve(), { once: true })
     })
+    let last: ReflexTrigger | null = null
     while (this.recovery !== null && !action.halt.signal.aborted) {
+      last = this.recovery.preemption.trigger
       await Promise.race([this.recovery.done, halted])
     }
+    return last
   }
 }
 
 const haltedResult = (cause: 'caller' | 'stop'): Result<never> =>
   fail('interrupted', cause === 'stop' ? 'stopped via stop()' : 'aborted by the caller')
+
+/** Names the reflex and its trigger, so the planner can read why. */
+const preemptedResult = (by: ReflexTrigger): Result<never> =>
+  fail('interrupted', `preempted by reflex: ${by.kind} — ${by.reason}`)
