@@ -85,6 +85,15 @@ const DIG_REACH = 5
  */
 const PATHFINDER_SEARCH_RADIUS = 128
 
+/**
+ * How close `followPlayer` keeps to its target, in blocks — `GoalFollow`'s
+ * range. The pathfinder re-plans only once the target has moved further than
+ * this from where the current path was aimed, and considers the bot there
+ * once within it. Close enough to read as following; far enough that the bot
+ * is not forever shuffling into the player's own block.
+ */
+const FOLLOW_RANGE = 2
+
 /** Default wall-clock a single exploreFor call may spend. Design §3.2. */
 const DEFAULT_EXPLORE_BUDGET_MS = 20_000
 
@@ -738,11 +747,17 @@ export class MineflayerExecutor implements BotExecutor {
    * passes one, and a non-finite effective timeout (`Infinity`, `NaN`) means
    * none at all: the timer is simply not armed. It must never be expressed as
    * `setTimeout(fn, Infinity)`, which fires after ~1ms — see MAX_TIMER_MS.
+   *
+   * `onElapsed`, when given, replaces `fail('timeout')` as the result of the
+   * timer firing. Only `followPlayer` passes it: for an action that runs until
+   * stopped, running for the whole time it was asked to is success. Every other
+   * action leaves it out, and a timer abort stays a `timeout` failure.
    */
   private async runAction<T>(
     opts: ActionOptions | undefined,
     defaultTimeoutMs: number | null,
     body: (bot: Bot, signal: AbortSignal) => Promise<Result<T>>,
+    onElapsed?: () => Result<T>,
   ): Promise<Result<T>> {
     if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
     const bot = this.bot
@@ -779,7 +794,7 @@ export class MineflayerExecutor implements BotExecutor {
     /** The single mapping from "this run was aborted" to a failure reason. */
     const abortedResult = (): Result<T> =>
       cause === 'timeout'
-        ? fail('timeout', `did not finish within ${timeoutMs}ms`)
+        ? (onElapsed?.() ?? fail('timeout', `did not finish within ${timeoutMs}ms`))
         : fail('interrupted', cause === 'stop' ? 'stopped via stop()' : 'aborted mid-action')
 
     try {
@@ -869,9 +884,83 @@ export class MineflayerExecutor implements BotExecutor {
     )
   }
 
-  async followPlayer(_playerName: string, opts?: ActionOptions): Promise<Result> {
-    return this.runAction(opts, 30_000, async () =>
-      fail('internal', 'followPlayer arrives in Phase 5'),
+  /**
+   * Follow a player until aborted (signal or `stop()`), or until a passed
+   * `timeoutMs` elapses — which resolves `ok`. No default timeout. Agreed
+   * 2026-09-11, Phase 5 spec §7; see the contract's doc comment.
+   *
+   * Consequence recorded at Ricky's request: the planning loop dispatches with
+   * a signal only (`loop.ts:143`), so a follow issued there does not return
+   * until something aborts it. Bounding it is Track B's.
+   *
+   * Fails `not_found` when the named player has no entity this bot is tracking
+   * at call start, or when that entity goes away mid-follow — the player logged
+   * off, left range, or died. Ruling R5: executor behaviour, not yet in the
+   * agreed contract. Without the mid-follow half the call would never return:
+   * `GoalFollow.isValid()` only checks that it holds an entity reference, which
+   * a departed player's stale entity still is, so the pathfinder carries on
+   * chasing its last known position.
+   */
+  async followPlayer(playerName: string, opts?: ActionOptions): Promise<Result> {
+    return this.runAction(
+      opts,
+      null,
+      async (bot, signal) => {
+        const entity = bot.players[playerName]?.entity
+        if (!entity) {
+          return fail('not_found', `no player named "${playerName}" is in sight`)
+        }
+
+        // Following, not arriving. `goto(new GoalFollow(...))` resolves as soon
+        // as the bot is within range, which is arrival. A dynamic goal stays
+        // set as the target moves, and this call settles only on an abort, the
+        // target leaving, or the connection ending.
+        bot.pathfinder.setGoal(new goals.GoalFollow(entity, FOLLOW_RANGE), true)
+
+        let detach = (): void => undefined
+        try {
+          return await new Promise<Result>((resolve) => {
+            // An aborted run is relabelled by runAction — `interrupted`, or
+            // `ok` for an elapsed timeoutMs — so ok here is safe.
+            const onAbort = (): void => resolve(ok(undefined))
+            const onEntityGone = (gone: typeof entity): void => {
+              if (gone === entity) {
+                resolve(fail('not_found', `${playerName} is no longer in sight`))
+              }
+            }
+            const onPlayerLeft = (player: { username: string }): void => {
+              if (player.username === playerName) {
+                resolve(fail('not_found', `${playerName} left the game`))
+              }
+            }
+            const onEnd = (): void => resolve(fail('disconnected', 'connection ended mid-follow'))
+
+            signal.addEventListener('abort', onAbort, { once: true })
+            bot.on('entityGone', onEntityGone)
+            bot.on('playerLeft', onPlayerLeft)
+            bot.once('end', onEnd)
+            detach = () => {
+              signal.removeEventListener('abort', onAbort)
+              bot.removeListener('entityGone', onEntityGone)
+              bot.removeListener('playerLeft', onPlayerLeft)
+              bot.removeListener('end', onEnd)
+            }
+            // Checked after subscribing, so an abort in between is not missed.
+            if (signal.aborted) onAbort()
+          })
+        } finally {
+          detach()
+          // Clear the goal whatever ended the call. Left set, the bot would keep
+          // walking after the caller was told the action had ended.
+          try {
+            bot.pathfinder.stop()
+            bot.pathfinder.setGoal(null)
+          } catch {
+            // disconnected mid-follow
+          }
+        }
+      },
+      () => ok(undefined),
     )
   }
 

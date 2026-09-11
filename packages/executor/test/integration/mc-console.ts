@@ -124,6 +124,68 @@ export async function waitForOnGround(
   }
 }
 
+/**
+ * Polls `executor`'s own snapshot until it reports a player named `playerName`
+ * among its nearby entities, or throws if it has not within `timeoutMs`.
+ *
+ * A second bot connecting and teleporting is not the same as the first bot
+ * having received the spawn packet for it. A follow fixture that returned
+ * before this would hand `followPlayer` a name the executor cannot see yet,
+ * and the test would measure the fixture's race instead of the action.
+ */
+export async function waitForPlayerVisible(
+  executor: MineflayerExecutor,
+  playerName: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 10_000
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const seen = executor
+      .getState()
+      .nearbyEntities.some((e) => e.kind === 'player' && e.name === playerName)
+    if (seen) return
+    if (Date.now() >= deadline) {
+      const p = executor.getState().self.position
+      throw new Error(
+        `waitForPlayerVisible: ${playerName} never appeared among the bot's nearby entities ` +
+          `within ${timeoutMs}ms (bot at (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})). ` +
+          `Either the second connection failed to land near it, or it was placed beyond ` +
+          `the snapshot's entity radius.`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+}
+
+/**
+ * The inverse of {@link waitForPlayerVisible}: polls until `executor` no longer
+ * reports `playerName` nearby, or throws. A fixture that sends a player "out of
+ * range" must prove it left, or a later `not_found` assertion would be
+ * checking against a player the bot can still see.
+ */
+export async function waitForPlayerGone(
+  executor: MineflayerExecutor,
+  playerName: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 10_000
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const seen = executor
+      .getState()
+      .nearbyEntities.some((e) => e.kind === 'player' && e.name === playerName)
+    if (!seen) return
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `waitForPlayerGone: ${playerName} was still among the bot's nearby entities ` +
+          `${timeoutMs}ms after being sent away`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+}
+
 export interface ArenaBounds {
   /** Inclusive world-space bounds of the platform, in blocks. */
   x0: number

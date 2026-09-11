@@ -1,4 +1,8 @@
-import { runContractSuite, type VisibilityFixture } from '@minebot/mock-executor/contract-suite'
+import {
+  runContractSuite,
+  type FollowFixture,
+  type VisibilityFixture,
+} from '@minebot/mock-executor/contract-suite'
 import { MineflayerExecutor } from '../../src/index.js'
 import {
   buildArena,
@@ -6,6 +10,7 @@ import {
   sendConsoleCommand,
   teleportAndWait,
   waitForOnGround,
+  waitForPlayerVisible,
   type ArenaBounds,
 } from './mc-console.js'
 
@@ -26,6 +31,14 @@ const CONTROL = { x: 1400, y: ARENA.floorY + 1, z: 4 }
  * block placed here rather than something the terrain happened to contain.
  */
 const MARKER = 'emerald_block'
+
+/**
+ * The follow fixture's target: a second connection, standing on the arena
+ * floor 3 blocks from START. Its own name, distinct from every other
+ * integration bot, and under Minecraft's 16-character username cap.
+ */
+const FOLLOW_TARGET = 'ITContractTgt'
+const FOLLOW_TARGET_START = { x: 1402, y: ARENA.floorY + 1, z: 4 }
 
 /** What the suite's findBlocks assertions are declared against. */
 const FINDABLE = ['grass_block', 'short_grass']
@@ -142,6 +155,37 @@ runContractSuite('MineflayerExecutor', async () => {
         // No release: buildArena rebuilds the floor and the air above it on
         // every call, which removes both markers and the shell.
       }
+    },
+    prepareFollowFixture: async (): Promise<FollowFixture> => {
+      // The arena, not SURFACE_START, for the visibility fixture's reason: a
+      // flat stone floor makes "a player standing near the bot" independent of
+      // whatever terrain the surface start happens to have beside it.
+      await buildArena(ARENA)
+      await teleportAndWait(executor, 'ITContract', START)
+      await waitForOnGround(executor, { expectedY: ARENA.floorY + 1 })
+
+      const target = new MineflayerExecutor({ username: FOLLOW_TARGET })
+      try {
+        const connected = await target.connect()
+        if (!connected.ok) {
+          throw new Error(
+            `prepareFollowFixture: ${FOLLOW_TARGET} could not connect: ` +
+              `${connected.reason} ${connected.detail}`,
+          )
+        }
+        await teleportAndWait(target, FOLLOW_TARGET, FOLLOW_TARGET_START)
+        await waitForOnGround(target, { expectedY: ARENA.floorY + 1 })
+        // Not optional. Without it the follow guarantees would run against a
+        // name the executor cannot see yet, and a not_found would read as the
+        // executor breaking the contract rather than the fixture racing.
+        await waitForPlayerVisible(executor, FOLLOW_TARGET)
+      } catch (e) {
+        // The suite calls release only on a fixture that was returned, so a
+        // failure here must disconnect for itself or it leaks a bot.
+        await target.disconnect()
+        throw e
+      }
+      return { playerName: FOLLOW_TARGET, release: () => target.disconnect() }
     },
   }
 })
