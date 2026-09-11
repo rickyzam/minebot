@@ -222,6 +222,171 @@ describe('ReflexExecutor', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toBe('interrupted')
   })
+
+  // ---- Rulings the tests above do not pin on their own. Each was proven to
+  // ---- catch a deliberate break of its rule before it was committed.
+
+  it('a superseded attack recovery does not release the flee latch', async () => {
+    // Without the identity check, the attack recovery's cleanup clears the
+    // flee's latch, and the next same-priority trigger aborts a running flee.
+    const inner = new MockExecutor({ actionDelayMs: 300, entities: [zombie(3)] })
+    const reflex = new ReflexExecutor(inner)
+    await reflex.connect()
+    const pending = reflex.moveTo({ x: 99, y: 64, z: 99 })
+    inner.emit('damaged', { health: 20, source: null })   // attack recovery
+    await settle()                                         // attack is running
+    inner.setHealth(2)
+    inner.emit('damaged', { health: 2, source: null })     // flee supersedes
+    await settle()                                         // superseded attack has wound down
+    inner.emit('damaged', { health: 2, source: null })     // same priority: must be ignored
+    await pending
+    expect(reflex.preemptions.map((p) => p.trigger.kind)).toEqual(['attack', 'flee'])
+    expect(inner.calls.filter((c) => c.name === 'flee')).toHaveLength(1)
+  })
+
+  it('names the escalated trigger in the detail, and records both recoveries', async () => {
+    const inner = new MockExecutor({ actionDelayMs: 300, entities: [zombie(3)] })
+    const reflex = new ReflexExecutor(inner)
+    await reflex.connect()
+    const pending = reflex.moveTo({ x: 99, y: 64, z: 99 })
+    inner.emit('damaged', { health: 20, source: null })
+    await settle()
+    inner.setHealth(2)
+    inner.emit('damaged', { health: 2, source: null })
+    const r = await pending
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.detail).toMatch(/^preempted by reflex: flee — health 2/)
+    expect(reflex.preemptions[0]?.recovery).toMatchObject({ ok: false, reason: 'interrupted' })
+    expect(reflex.preemptions[1]?.recovery).toEqual({ ok: true, value: { fled: true } })
+  })
+
+  it('makes an action started during an idle recovery wait for it, then run', async () => {
+    const inner = new MockExecutor({ actionDelayMs: 50, entities: [zombie(3)] })
+    const reflex = new ReflexExecutor(inner)
+    await reflex.connect()
+    inner.emit('damaged', { health: 20, source: null })    // idle recovery
+    const r = await reflex.moveTo({ x: 5, y: 64, z: 5 })
+    expect(r.ok).toBe(true)
+    const names = inner.calls.map((c) => c.name)
+    expect(names.indexOf('attack')).toBeGreaterThanOrEqual(0)
+    expect(names.indexOf('attack')).toBeLessThan(names.indexOf('moveTo'))
+    expect(reflex.preemptions[0]?.action).toBe('idle')
+  })
+
+  it('returns interrupted promptly when the caller aborts while waiting on an idle recovery', async () => {
+    const inner = new MockExecutor({ actionDelayMs: 300, entities: [zombie(3)] })
+    const reflex = new ReflexExecutor(inner)
+    await reflex.connect()
+    inner.emit('damaged', { health: 20, source: null })
+    const c = new AbortController()
+    const pending = reflex.moveTo({ x: 5, y: 64, z: 5 }, { signal: c.signal })
+    await settle()
+    c.abort()
+    const r = await Promise.race([pending, settle().then(() => 'pending' as const)])
+    expect(r).not.toBe('pending')
+    if (r !== 'pending') expect(r.ok).toBe(false)
+    expect(inner.calls.map((x) => x.name)).not.toContain('moveTo')
+  })
+
+  it('suppresses the reflex after stop() only until the next wrapped action starts', async () => {
+    const inner = new MockExecutor({ actionDelayMs: 0, entities: [zombie(3)] })
+    const reflex = new ReflexExecutor(inner)
+    await reflex.connect()
+    reflex.stop()
+    inner.emit('damaged', { health: 20, source: null })
+    await settle()
+    expect(reflex.preemptions).toHaveLength(0)
+    await reflex.moveTo({ x: 1, y: 64, z: 1 })
+    inner.emit('damaged', { health: 20, source: null })
+    await settle()
+    expect(reflex.preemptions).toHaveLength(1)
+  })
+
+  it('forwards the INTERNAL signal even when the caller passes one', async () => {
+    // A spread in the wrong order hands the inner action the caller's signal,
+    // which a preemption never aborts: the action and the recovery then run
+    // at the same time.
+    const inner = new MockExecutor({ actionDelayMs: 300, entities: [zombie(3)] })
+    const spy = vi.spyOn(inner, 'moveTo')
+    const reflex = new ReflexExecutor(inner)
+    await reflex.connect()
+    const c = new AbortController()
+    const pending = reflex.moveTo({ x: 99, y: 64, z: 99 }, { signal: c.signal })
+    inner.emit('damaged', { health: 20, source: null })
+    const passed = spy.mock.calls[0]?.[1]?.signal
+    expect(passed).not.toBe(c.signal)
+    expect(passed?.aborted).toBe(true)
+    await pending
+  })
+
+  it('does not count a cancelled recovery toward the failure cap', async () => {
+    // Cancelled by stop(), not superseded: a superseding flee that succeeds
+    // resets the count anyway and would hide the miscount.
+    const inner = new MockExecutor({ actionDelayMs: 100, entities: [zombie(3)] })
+    const reflex = new ReflexExecutor(inner, { maxConsecutiveFailures: 1 })
+    await reflex.connect()
+    inner.emit('damaged', { health: 20, source: null })   // attack recovery
+    await settle()                                        // attack is running
+    reflex.stop()                                         // cancelled: ends interrupted
+    await settle()
+    expect(reflex.preemptions[0]?.recovery).toMatchObject({ ok: false, reason: 'interrupted' })
+    await reflex.moveTo({ x: 1, y: 64, z: 1 })            // lifts the stop() suppression
+    inner.emit('damaged', { health: 20, source: null })   // must still fire
+    await settle()
+    expect(reflex.preemptions).toHaveLength(2)
+  })
+
+  it('still flees at low health after attack recoveries have hit the failure cap', async () => {
+    // The cap stops futile repetition. It must never veto a different,
+    // higher-priority safety action: a hostile the bot cannot reach is exactly
+    // the one it should run from.
+    const inner = new MockExecutor({ actionDelayMs: 0, entities: [zombie(3)], failures: { attack: { reason: 'unreachable' } } })
+    const reflex = new ReflexExecutor(inner)   // default cap: 3
+    await reflex.connect()
+    for (let i = 0; i < 3; i++) { inner.emit('damaged', { health: 20, source: null }); await settle() }
+    expect(inner.calls.filter((c) => c.name === 'attack')).toHaveLength(3)
+    inner.emit('damaged', { health: 20, source: null })   // attack is capped now
+    await settle()
+    expect(inner.calls.filter((c) => c.name === 'attack')).toHaveLength(3)
+    inner.setHealth(2)
+    inner.emit('damaged', { health: 2, source: null })
+    await settle()
+    expect(inner.calls.map((c) => c.name)).toContain('flee')
+  })
+
+  it('stops fleeing after repeated flee recovery failures', async () => {
+    const inner = new MockExecutor({ actionDelayMs: 0, health: 2, entities: [zombie(3)], failures: { flee: { reason: 'internal' } } })
+    const reflex = new ReflexExecutor(inner, { maxConsecutiveFailures: 2 })
+    await reflex.connect()
+    for (let i = 0; i < 5; i++) { inner.emit('damaged', { health: 2, source: null }); await settle() }
+    expect(reflex.preemptions).toHaveLength(2)
+    expect(inner.calls.filter((c) => c.name === 'flee')).toHaveLength(2)
+  })
+
+  it('passes recoveryTimeoutMs to the inner recovery call', async () => {
+    const inner = new MockExecutor({ entities: [zombie(3)] })
+    const spy = vi.spyOn(inner, 'attack')
+    const reflex = new ReflexExecutor(inner, { recoveryTimeoutMs: 4321 })
+    await reflex.connect()
+    inner.emit('damaged', { health: 20, source: null })
+    await settle()
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0]?.[1]).toMatchObject({ timeoutMs: 4321 })
+  })
+
+  it('disconnect() aborts a running recovery before delegating', async () => {
+    // The mock's simulated attack does not notice a disconnect, so without the
+    // abort the recovery would run on, unrecorded, against a dead connection.
+    const inner = new MockExecutor({ actionDelayMs: 300, entities: [zombie(3)] })
+    const reflex = new ReflexExecutor(inner)
+    await reflex.connect()
+    inner.emit('damaged', { health: 20, source: null })
+    await settle()                                        // attack recovery is running
+    expect(inner.calls.map((c) => c.name)).toContain('attack')
+    await reflex.disconnect()
+    await settle()
+    expect(reflex.preemptions[0]?.recovery).toMatchObject({ ok: false, reason: 'interrupted' })
+  })
 })
 
 // Copied verbatim from packages/mock-executor/test/mock-executor.test.ts. Two

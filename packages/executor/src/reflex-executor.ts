@@ -44,10 +44,16 @@
  * **`stop()` wins.** It cancels the recovery, halts every action, and
  * suppresses the reflex until the next wrapped action starts.
  *
- * **Repeated failure disarms it.** After `maxConsecutiveFailures` recoveries
- * fail in a row, triggers are ignored until one succeeds or nothing triggers.
- * A recovery cancelled by a supersede, `stop()` or the caller is neither a
- * success nor a failure and does not count.
+ * **`disconnect()` cancels the recovery** before delegating. An inner action
+ * need not notice the connection going away, and must not run on against it.
+ *
+ * **Repeated failure disarms that kind, not the reflex.** Failures are counted
+ * per trigger kind: after `maxConsecutiveFailures` attack recoveries fail in a
+ * row, attack triggers are ignored until an attack succeeds or nothing
+ * triggers, and likewise for flee. A string of failed attacks never stops a
+ * flee — the cap stops futile repetition, it does not veto a different safety
+ * action. A recovery cancelled by a supersede, `stop()`, `disconnect()` or the
+ * caller is neither a success nor a failure and does not count.
  */
 import {
   fail,
@@ -88,7 +94,10 @@ export interface ReflexExecutorOptions {
   readonly onPreempt?: (p: ReflexPreemption) => void
   /** Bounds a recovery so it cannot inherit an action's 30s default. */
   readonly recoveryTimeoutMs?: number
-  /** After this many consecutive failed recoveries, stop preempting. */
+  /**
+   * After this many consecutive failed recoveries of one kind, ignore triggers
+   * of that kind. Counted per kind, so failed attacks never disarm flee.
+   */
   readonly maxConsecutiveFailures?: number
 }
 
@@ -144,7 +153,8 @@ export class ReflexExecutor implements BotExecutor {
   /** The latch. */
   private recovery: Recovery | null = null
   private suppressed = false
-  private consecutiveFailures = 0
+  /** Per trigger kind, so a run of failed attacks cannot disarm flee. */
+  private readonly consecutiveFailures: Record<ReflexTrigger['kind'], number> = { attack: 0, flee: 0 }
   private readonly records: LivePreemption[] = []
 
   constructor(inner: BotExecutor, opts: ReflexExecutorOptions = {}) {
@@ -172,7 +182,9 @@ export class ReflexExecutor implements BotExecutor {
     return this.inner.connect()
   }
 
+  /** Not pure pass-through: cancels a running recovery first (see the header). */
   disconnect(): Promise<void> {
+    this.recovery?.controller.abort()
     return this.inner.disconnect()
   }
 
@@ -269,10 +281,11 @@ export class ReflexExecutor implements BotExecutor {
     }
     const trigger = evaluateReflex(snapshot, this.thresholds)
     if (trigger === null) {
-      this.consecutiveFailures = 0
+      this.consecutiveFailures.attack = 0
+      this.consecutiveFailures.flee = 0
       return
     }
-    if (this.consecutiveFailures >= this.maxConsecutiveFailures) return
+    if (this.consecutiveFailures[trigger.kind] >= this.maxConsecutiveFailures) return
     const priority = priorityOf(trigger)
     if (priority <= this.occupiedPriority()) return
     this.preempt(trigger, priority)
@@ -357,9 +370,9 @@ export class ReflexExecutor implements BotExecutor {
     } finally {
       preemption.recovery = result
       // `flee` resolving ok with `fled: false` — the hostile went away between
-      // trigger and call — is a race, not a failure, and resets the count.
-      if (result.ok) this.consecutiveFailures = 0
-      else if (!controller.signal.aborted) this.consecutiveFailures += 1
+      // trigger and call — is a race, not a failure, and resets flee's count.
+      if (result.ok) this.consecutiveFailures[trigger.kind] = 0
+      else if (!controller.signal.aborted) this.consecutiveFailures[trigger.kind] += 1
       // Only if still ours: a superseding flee owns the latch now.
       if (this.recovery === recovery) this.recovery = null
       release()
