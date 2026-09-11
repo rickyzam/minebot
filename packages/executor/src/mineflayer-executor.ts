@@ -34,6 +34,7 @@ import {
   type SearchState,
 } from './explore.js'
 import { isPerceivable, observe, type PerceptionWorld } from './visibility.js'
+import { placementOrder, type Schematic } from './schematic.js'
 
 // VERIFIED 2026-09-07: `goals` is not an ESM named export of this CJS package
 // — Node's named-export detection finds only `Movements`, `pathfinder` and
@@ -158,6 +159,19 @@ const EXPLORE_TIMEOUT_HEADROOM_MS = 15_000
  * expressed by not arming a timer, and a very long timeout by clamping to this.
  */
 const MAX_TIMER_MS = 2_147_483_647
+
+/**
+ * Per-block share of `buildSchematic`'s default timeout, so the default scales
+ * with the structure instead of a fixed number that is absurd for one block and
+ * far too tight for fifty.
+ *
+ * `placeBlock` already bounds each placement at 30s of its own, so a build can
+ * never hang indefinitely on a single block — this only turns that per-block
+ * bound into an honest whole-call one. The margin above 30s covers the equip
+ * and the server's placement acknowledgement after the approach has used its
+ * budget.
+ */
+const BUILD_PER_BLOCK_BUDGET_MS = 45_000
 
 /** Straight-line distance from the bot to a point, in blocks. */
 const distanceFrom = (bot: Bot, p: { x: number; y: number; z: number }): number => {
@@ -1365,6 +1379,92 @@ export class MineflayerExecutor implements BotExecutor {
       await bot.placeBlock(reference, placement.face.scaled(-1))
       return ok(undefined)
     })
+  }
+
+  /**
+   * Build `s` with its origin at `origin`: one `placeBlock` per block, in
+   * `placementOrder` — ascending `dy`, so every block already has something
+   * beneath it to place against by the time its turn comes. That ordering is
+   * not a nicety: `placeBlock` refuses a cell with no adjacent solid block, so
+   * a top-down build fails `invalid_target` on its very first block.
+   *
+   * Executor-only, and deliberately NOT on `BotExecutor`. Adding it there is a
+   * change to the shared surface Track B builds against, and the planning loop
+   * does not need it yet.
+   *
+   * Stops at the first failure and reports that failure's own reason, with a
+   * detail naming the offending block, its absolute position, and how many
+   * blocks were already placed. A bare reason would leave the caller unable to
+   * tell a build that died on block 1 from one that died on block 8 — the first
+   * is "this plan was wrong", the second "something interfered halfway", and
+   * they call for different recoveries. The count is in the detail because a
+   * failed `Result` carries no value.
+   *
+   * Verification is `placeBlock`'s, not re-implemented here: it already checks
+   * the cell, and confirms the placement against the SERVER's block update
+   * rather than the bot's own world model.
+   */
+  async buildSchematic(
+    s: Schematic,
+    origin: Vec3,
+    opts?: ActionOptions,
+  ): Promise<Result<{ placed: number }>> {
+    const order = placementOrder(s)
+    return this.runAction(
+      opts,
+      // Scaled, not fixed — see BUILD_PER_BLOCK_BUDGET_MS.
+      //
+      // The empty schematic is `null` ("no timeout"), not the 0 the
+      // multiplication would give. runAction treats only `null` and a
+      // non-finite delay as "no timeout", so 0 arms a real `setTimeout(fn, 0)`
+      // — which this body survives only because an empty loop has no `await`
+      // and so settles on the microtask queue before any macrotask can run.
+      // That is correct by accident; say what is meant instead.
+      order.length === 0 ? null : order.length * BUILD_PER_BLOCK_BUDGET_MS,
+      async (_bot, signal) => {
+        let placed = 0
+        for (const block of order) {
+          // Between blocks, so a long build is cancellable even while no single
+          // placement is in flight. Returning ok with the honest count is safe:
+          // runAction relabels an aborted run as `interrupted` (caller abort or
+          // stop()) or `timeout`, and keeping that mapping in one place is the
+          // whole reason runAction exists.
+          if (signal.aborted) return ok({ placed })
+
+          const at: Vec3 = {
+            x: origin.x + block.dx,
+            y: origin.y + block.dy,
+            z: origin.z + block.dz,
+          }
+          // Our signal is passed down, so an abort settles the placement in
+          // flight too rather than waiting for it to walk and place first.
+          //
+          // This nests a runAction inside a runAction, the first place in this
+          // class that does. It buys each placement its own 30s bound and its
+          // own goal/movements cleanup. It costs `stop()` coverage BETWEEN
+          // blocks: placeBlock's runAction overwrites `inFlightStop` and clears
+          // it on the way out, so a stop() landing between two placements halts
+          // the pathfinder but does not abort this loop — the next placeBlock
+          // then re-registers and a stop() during it works normally. Nothing
+          // calls stop() on a build today (this is not a contract action, so
+          // the reflex layer never dispatches it); if that changes, this loop
+          // needs its own stop registration rather than borrowing placeBlock's.
+          const result = await this.placeBlock(block.block, at, { signal })
+          if (!result.ok) {
+            // An aborted run's failure is the abort, not the block — let
+            // runAction label it rather than blaming whatever placeBlock said.
+            if (signal.aborted) return ok({ placed })
+            return fail(
+              result.reason,
+              `${s.name}: ${block.block} at (${at.x}, ${at.y}, ${at.z}) failed after ` +
+                `${placed} of ${order.length} placed — ${result.detail}`,
+            )
+          }
+          placed += 1
+        }
+        return ok({ placed })
+      },
+    )
   }
 
   async attack(_entityId: number, opts?: ActionOptions): Promise<Result> {

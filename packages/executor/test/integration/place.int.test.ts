@@ -1,6 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import type { Result } from '@minebot/contract'
-import { MineflayerExecutor } from '../../src/index.js'
+import {
+  MineflayerExecutor,
+  parseSchematic,
+  placementOrder,
+  type Schematic,
+} from '../../src/index.js'
 import {
   buildArena,
   clearInventory,
@@ -113,7 +118,9 @@ describe('MineflayerExecutor.placeBlock', () => {
     await waitForBlockVisible(w, blockName, position)
   }
 
-  const expectReason = (r: Result, reason: string): void => {
+  // `Result<unknown>`, not `Result`: buildSchematic reports a `{ placed }`
+  // value, and a failure's reason is the same shape whatever the success type.
+  const expectReason = (r: Result<unknown>, reason: string): void => {
     expect(r.ok, JSON.stringify(r)).toBe(false)
     if (!r.ok) expect(r.reason, r.detail).toBe(reason)
   }
@@ -311,5 +318,222 @@ describe('MineflayerExecutor.placeBlock', () => {
 
     expectReason(await e.placeBlock('dirt', LEDGE_TARGET, { timeoutMs: 45_000 }), 'unreachable')
     await expectNothingBuiltAfterwards(e)
+  })
+
+  /**
+   * Task 5b. `buildSchematic` joins Task 5a's pure loader to Task 4's
+   * `placeBlock`: without it the loader is dead code and the bottom-up
+   * ordering constraint is never exercised against a real world.
+   *
+   * Nested here rather than in its own file so it shares this arena, the
+   * placer/watcher fixtures, and the `afterEach` that disconnects both.
+   */
+  describe('buildSchematic', () => {
+    /**
+     * Where the 2x2x2 cube goes: eight blocks east of START, so the bot walks
+     * to it instead of standing in it. Ruling R8 — Minecraft refuses to place
+     * into a cell an entity occupies, so a bot inside the footprint cannot
+     * finish the layer it is standing in. The cube spans x 1862-1863,
+     * y 200-201, z 4-5; START is at x 1854 and the approach comes in from the
+     * west, clear of every cell.
+     */
+    const CUBE_ORIGIN = { x: 1862, y: FLOOR, z: 4 }
+
+    /** A 2x2x2 cube of `block`, built through the real loader. */
+    function cubeSchematic(block: string): Schematic {
+      const blocks: Array<{ dx: number; dy: number; dz: number; block: string }> = []
+      for (const dy of [0, 1]) {
+        for (const dx of [0, 1]) {
+          for (const dz of [0, 1]) blocks.push({ dx, dy, dz, block })
+        }
+      }
+      return parseSchematic({ name: 'cube2', blocks })
+    }
+
+    const absolute = (b: { dx: number; dy: number; dz: number }): Pos => ({
+      x: CUBE_ORIGIN.x + b.dx,
+      y: CUBE_ORIGIN.y + b.dy,
+      z: CUBE_ORIGIN.z + b.dz,
+    })
+    const key = (p: Pos): string => `${p.x},${p.y},${p.z}`
+
+    /**
+     * One floor viewpoint on each of the cube's four sides, each with a nearby
+     * floor block to use as a positive control.
+     *
+     * No single viewpoint can see all eight: every block of a 2x2x2 cube is a
+     * corner, the far ones present only faces pointing away, and perception is
+     * line-of-sight limited — "not visible from here" is the honest answer.
+     *
+     * MEASURED 2026-09-11: two viewpoints on OPPOSITE DIAGONAL corners are not
+     * enough either. They saw 6 of 8, missing both blocks of the x=1862/z=5
+     * column — a diagonal view grazes the far column of each face rather than
+     * facing it. Cardinal viewpoints face each of the four columns head-on, and
+     * both blocks of a column are exposed on that side.
+     */
+    const CUBE_VIEWS = [
+      // West of the cube, facing the x=1862 columns.
+      { at: { x: 1858, y: FLOOR, z: 4 }, control: { x: 1859, y: ARENA.floorY, z: 4 } },
+      // East, facing the x=1863 columns.
+      { at: { x: 1867, y: FLOOR, z: 5 }, control: { x: 1866, y: ARENA.floorY, z: 5 } },
+      // South (-z), facing the z=4 columns.
+      { at: { x: 1863, y: FLOOR, z: 1 }, control: { x: 1863, y: ARENA.floorY, z: 2 } },
+      // North (+z), facing the z=5 columns.
+      { at: { x: 1862, y: FLOOR, z: 8 }, control: { x: 1862, y: ARENA.floorY, z: 7 } },
+    ]
+
+    /**
+     * Every dirt a SECOND connection can see from `CUBE_VIEWS`, as sorted
+     * position keys. One connection, teleported between viewpoints — connecting
+     * is the slow part, teleporting is not.
+     *
+     * The building bot's own world model is precisely what cannot be trusted
+     * here; this is the same rule `bot.dig()` taught the hard way.
+     */
+    async function dirtSeenFromCorners(): Promise<string[]> {
+      const w = (watcher = new MineflayerExecutor({ username: WATCH }))
+      expect((await w.connect()).ok).toBe(true)
+      const seen = new Set<string>()
+      for (const view of CUBE_VIEWS) {
+        await teleportAndWait(w, WATCH, view.at)
+        await waitForOnGround(w, { expectedY: view.at.y })
+        // Positive control: without it, "no dirt visible" cannot be told apart
+        // from a connection whose chunks have not loaded yet.
+        await waitForBlockVisible(w, 'stone', view.control)
+        for (const b of w.findBlocks({ names: ['dirt'], maxDistance: 16, limit: 64 })) {
+          seen.add(key(b.position))
+        }
+      }
+      return [...seen].sort()
+    }
+
+    /** Poll `predicate` until true, or throw `what` after `timeoutMs`. */
+    async function waitUntil(
+      predicate: () => boolean,
+      timeoutMs: number,
+      what: string,
+    ): Promise<void> {
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        if (predicate()) return
+        if (Date.now() >= deadline) throw new Error(`waitUntil: ${what} (within ${timeoutMs}ms)`)
+        await sleep(100)
+      }
+    }
+
+    it(
+      'builds a 2x2x2 cube bottom-up, and a second connection sees all eight',
+      async () => {
+        const s = cubeSchematic('dirt')
+        const order = placementOrder(s)
+        // The constraint this task exists to exercise against a real world: the
+        // whole bottom layer goes down before any of the top one, or the top
+        // has nothing to place against and fails invalid_target.
+        expect(order.map((b) => b.dy)).toEqual([0, 0, 0, 0, 1, 1, 1, 1])
+
+        const e = await placerAt(START, { item: 'dirt', count: 8 })
+        // The approach is part of what is under test, so it must be needed.
+        expect(flatDistance(e.getState().self.position, CUBE_ORIGIN)).toBeGreaterThan(6)
+
+        const started = Date.now()
+        const r = await e.buildSchematic(s, CUBE_ORIGIN, { timeoutMs: 240_000 })
+        const elapsed = Date.now() - started
+        expect(r, JSON.stringify(r)).toEqual({ ok: true, value: { placed: 8 } })
+        console.log(
+          `buildSchematic: 8 blocks in ${elapsed}ms (${Math.round(elapsed / 8)}ms per block)`,
+        )
+
+        // Exactly eight spent — not one over, which would mean the approach
+        // spent a block as scaffolding somewhere.
+        await waitForItemCount(e, 'dirt', 0)
+        expect(await dirtSeenFromCorners()).toEqual(order.map((b) => key(absolute(b))).sort())
+      },
+      300_000,
+    )
+
+    it(
+      'stops at the first failure, naming the block and how far it got',
+      async () => {
+        const s = cubeSchematic('dirt')
+        const order = placementOrder(s)
+        // The fourth block in placement order — last of the bottom layer. Made
+        // unplaceable by filling it in advance, so the build fails on a block
+        // it can name rather than by running out of material.
+        const blocked = absolute(order[3]!)
+
+        const e = await placerAt(START, { item: 'dirt', count: 8 }, () =>
+          placeArenaBlock(blocked, 'stone'),
+        )
+        await waitForBlockVisible(e, 'stone', blocked)
+
+        const r = await e.buildSchematic(s, CUBE_ORIGIN, { timeoutMs: 240_000 })
+        expect(r.ok, JSON.stringify(r)).toBe(false)
+        if (!r.ok) {
+          expect(r.reason).toBe('invalid_target')
+          // Which block, where, and how far it got — a caller cannot otherwise
+          // tell a build that died on block 1 from one that died on block 8.
+          expect(r.detail).toContain('dirt')
+          expect(r.detail).toContain(`(${blocked.x}, ${blocked.y}, ${blocked.z})`)
+          expect(r.detail).toContain('after 3 of 8')
+        }
+
+        // It stopped there: three spent, five still held.
+        await waitForItemCount(e, 'dirt', 5)
+        await sleep(3_000)
+        expect(itemCount(e, 'dirt'), 'the build kept going after it reported a failure').toBe(5)
+      },
+      300_000,
+    )
+
+    it(
+      'aborts between blocks as interrupted, and leaves what it already built standing',
+      async () => {
+        const s = cubeSchematic('dirt')
+        const order = placementOrder(s)
+        const e = await placerAt(START, { item: 'dirt', count: 8 })
+
+        const controller = new AbortController()
+        const build = e.buildSchematic(s, CUBE_ORIGIN, { signal: controller.signal })
+        // Abort only once at least one block is genuinely down, so this tests
+        // cancelling a build in progress rather than one that never started.
+        await waitUntil(
+          () => itemCount(e, 'dirt') <= 7,
+          120_000,
+          'no dirt was placed before the abort',
+        )
+        controller.abort()
+        expectReason(await build, 'interrupted')
+
+        const atReturn = 8 - itemCount(e, 'dirt')
+        expect(atReturn).toBeGreaterThanOrEqual(1)
+
+        // MEASURED 2026-09-11: the count can still tick up by exactly one after
+        // the call reports `interrupted`. An abort landing inside
+        // `bot.placeBlock` cannot recall a placement packet already sent — the
+        // block lands, and the inventory update arrives after the promise has
+        // settled. That is an honest `interrupted`, not a runaway loop, and one
+        // committed placement is the whole of the window: the abort check
+        // before the equip catches everything earlier.
+        await sleep(8_000)
+        const settled = 8 - itemCount(e, 'dirt')
+        expect(settled).toBeGreaterThanOrEqual(atReturn)
+        expect(settled).toBeLessThanOrEqual(atReturn + 1)
+        // It stopped well short of the whole cube — the point of aborting.
+        expect(settled).toBeLessThan(8)
+
+        // And the loop really is finished, not merely slow: a running build
+        // places a block every couple of seconds, so another 8s would show it.
+        await sleep(8_000)
+        expect(8 - itemCount(e, 'dirt'), 'the build kept going after it was aborted').toBe(settled)
+
+        // What it did build is still standing. order[0] is placed first, so it
+        // is there whenever anything is.
+        const first = absolute(order[0]!)
+        const seen = await dirtSeenFromCorners()
+        expect(seen).toContain(key(first))
+        expect(seen.length).toBe(settled)
+      },
+      300_000,
+    )
   })
 })
