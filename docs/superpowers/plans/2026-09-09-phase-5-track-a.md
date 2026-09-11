@@ -10,7 +10,7 @@
 
 **Spec:** [docs/superpowers/specs/2026-09-09-phase-5-full-toolbox-design.md](../specs/2026-09-09-phase-5-full-toolbox-design.md)
 
-**Status:** Task 0's decisions agreed 2026-09-11 (Ricky, PR #22), recorded in spec §7 — with `flee` counter-proposed and adopted, and `followPlayer`'s default timeout removed. **One detail still open:** flee's distance and timeout, gating only Task 6b. No task started.
+**Status:** Task 0's decisions agreed 2026-09-11 (Ricky, PR #22), recorded in spec §7 — with `flee` counter-proposed and adopted, and `followPlayer`'s default timeout removed. **One detail still open:** flee's distance and timeout, gating only Task 6b. **Task 0 implemented 2026-09-11** on `phase-5-task-0`; Tasks 1–7 not started.
 
 ---
 
@@ -109,9 +109,9 @@ Separation must exceed the largest radius anything might **search**, not the are
 
   **A correction to the rationale v2 gave for `not_found`.** It cited Track B's probe answering `give_up` 5/5 after `missing_tool`. That scenario (`after missing_tool, inventory empty`) has an **empty inventory** and a `hoped` answer of `give_up` — it measures the model giving up with `missing_tool` *and* nothing to work with, which is what it was written to want. It does not isolate `missing_tool`. The row stands on its reasoning; the citation was weaker than it read. **Do not re-cite it as evidence.**
 
-- [ ] **Step 3: Write the contract doc comments** for the four methods, stating the agreed guarantees. These are the only record Track B reads. **`flee` changes type as well as documentation:** `flee(opts?: ActionOptions): Promise<Result<{ fled: boolean }>>`. That touches `packages/contract/src/index.ts:250`, `mock-executor.ts:313-316` and the executor stub — nothing else, since `packages/agent` never dispatches `flee` (verified 2026-09-11). Ricky owns the `prompt.ts` renderer that stops `{ fled }` reaching the model as `[object Object]`, the bug `ExplorationReport` hit, so do not add one here. `followPlayer`'s comment must state the consequence he asked to have recorded: without `timeoutMs` it does not return until aborted, and `runGoal` passes no timeout (`loop.ts:143`).
+- [x] **Step 3: Write the contract doc comments** for the four methods, stating the agreed guarantees. These are the only record Track B reads. **`flee` changes type as well as documentation:** `flee(opts?: ActionOptions): Promise<Result<{ fled: boolean }>>`. That touches `packages/contract/src/index.ts:250`, `mock-executor.ts:313-316` and the executor stub — nothing else, since `packages/agent` never dispatches `flee` (verified 2026-09-11). Ricky owns the `prompt.ts` renderer that stops `{ fled }` reaching the model as `[object Object]`, the bug `ExplorationReport` hit, so do not add one here. `followPlayer`'s comment must state the consequence he asked to have recorded: without `timeoutMs` it does not return until aborted, and `runGoal` passes no timeout (`loop.ts:143`).
 
-- [ ] **Step 4: Teach `MockExecutor` the same semantics, and add suite guarantees.**
+- [x] **Step 4: Teach `MockExecutor` the same semantics, and add suite guarantees.**
 
 ```ts
 // mock-executor.ts — placeBlock becomes inventory-aware
@@ -185,11 +185,17 @@ setHealth(health: number): void {
 
   Add to `runContractSuite`, in a new `describe('the Phase 5 toolbox')`: `placeBlock` with an empty inventory resolves `not_found`; `flee` with no hostile resolves **`ok` with `value.fled === false`**; `followPlayer` with a short `timeoutMs` resolves **`ok`** within a bounded time; `followPlayer` with **no** `timeoutMs` is still pending after a short delay, then resolves `interrupted` once its signal aborts. Each needs a context declaration so it skips loudly rather than passing vacuously — follow the `prepareVisibilityFixture` pattern (`contract-suite.ts:193-205`), which reports SKIPPED rather than green.
 
-  **Before committing, search the suite and `packages/agent`'s tests for any `followPlayer` call that neither aborts nor passes `timeoutMs`.** Under the agreed rule it now never returns. That is correct behaviour: such a call is a test to update, not a mock to "fix" by adding a default back.
+  **Before committing, search the suite and `packages/agent`'s tests for any `followPlayer` call that neither aborts nor passes `timeoutMs`.** Under the agreed rule it now never returns. That is correct behaviour: such a call is a test to update, not a mock to "fix" by adding a default back. *(Searched 2026-09-11: the only call anywhere is the suite's pre-aborted one. `packages/agent` and `scripts/` never call `followPlayer`, `placeBlock` or `flee`.)*
 
-- [ ] **Step 5: Correct spec §2.1.** It justifies `packages/bot` because the arbiter needs "the planner's `AbortController`". The decorator needs no planner. Change the placement to `packages/executor` and the rationale with it.
+  **As implemented, 2026-09-11 — four things the sketch above did not say.**
+  - **The fixtures are thunks, one per action**, beside `prepareVisibilityFixture`: `prepareFollowFixture` → `{ playerName }`; `preparePlaceFixture` → `{ blockName, position }`, and the suite *verifies* the inventory holds none of it; `prepareFleeFixture` → `{}`, and the suite *verifies* no hostile is near. **`MineflayerExecutor` supplies none of them yet, so its integration run reports these four guarantees as SKIPPED.** Tasks 3, 4 and 6b each add theirs to `contract.int.test.ts` as they land — a task that ships without doing so leaves its guarantee unchecked against the real executor, which is the vacuous-fixture trap in another form.
+  - **A non-finite `timeoutMs` is treated as none**, in the mock and in `followPlayer`'s doc comment. The sketch passed any defined `timeoutMs` to `wait()`, so `timeoutMs: Infinity` would have "finished" in ~2ms. Same rule as Task 3 Step 3 gives `runAction`.
+  - **The mock reports an occupied position as `invalid_target`**, checked after the inventory — the order Task 4 Step 4 uses. It has no geometry for the no-adjacent-face half; injection covers that.
+  - **The timeout guarantee asserts a lower bound on elapsed time**, not only `ok`. A follow that returns `ok` early is exactly the setTimeout-overflow failure, and only the bound can see it. Proved: it failed against the old mock, which returned `ok` after 20ms.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 5: Correct spec §2.1.** It justifies `packages/bot` because the arbiter needs "the planner's `AbortController`". The decorator needs no planner. Change the placement to `packages/executor` and the rationale with it.
+
+- [x] **Step 6: Verify and commit** — 2026-09-11: 324 unit, typecheck clean, invariants 2 of 2, integration 103 passed + 4 skipped (the toolbox guarantees, as expected).
 
 ```bash
 npm test && npm run typecheck && node scripts/check-invariants.mjs && npm run test:integration
@@ -618,11 +624,17 @@ runContractSuite('ReflexExecutor over MockExecutor', async () => {
       control: { name: 'coal_ore', position: visibilityBlocks[1]!.position },
       maxDistance: 16,
     }),
+    // Task 0's toolbox fixtures — copy from mock-executor.test.ts as well.
+    prepareFollowFixture: () => Promise.resolve({ playerName: 'SomePlayer' }),
+    preparePlaceFixture: () => Promise.resolve({ blockName: 'dirt', position: { x: 1, y: 64, z: 1 } }),
+    prepareFleeFixture: () => Promise.resolve({}),
   }
 })
 ```
 
-  **Seed no entities here, deliberately.** A hostile would preempt every action in the suite and the run would be meaningless. This factory verifies that the decorator is a faithful `BotExecutor` — delegation, throw-when-disconnected, the eight abort cases; arbitration is covered by Step 3's dedicated tests. Confirm the run reports **zero skipped** tests: omitting the fixture thunk yields four SKIPPED, not failures (`contract-suite.ts:193-205`).
+  **Seed no entities here, deliberately.** A hostile would preempt every action in the suite and the run would be meaningless. This factory verifies that the decorator is a faithful `BotExecutor` — delegation, throw-when-disconnected, the eight abort cases; arbitration is covered by Step 3's dedicated tests. Confirm the run reports **zero skipped** tests: omitting a fixture thunk yields SKIPPED, not failures — four for visibility (`contract-suite.ts:193-205`) and four for the Phase 5 toolbox.
+
+  **`followPlayer` is wrapped, and its no-timeout guarantee passes through the decorator.** The suite asserts it is still pending after 1.5s and resolves `interrupted` on abort — so the wrapper must forward the caller's abort to the internal controller, and must not impose a timeout of its own.
 
 - [ ] **Step 8: Export, verify, commit.** Export `ReflexExecutor` and its types from `packages/executor/src/index.ts`. Then `npm test && npm run typecheck && node scripts/check-invariants.mjs`.
 
@@ -633,7 +645,7 @@ runContractSuite('ReflexExecutor over MockExecutor', async () => {
 **Files:** Modify `packages/executor/src/mineflayer-executor.ts`; create `packages/executor/test/integration/follow.int.test.ts`.
 
 - [x] **Step 1: The agreed rule — recorded 2026-09-11 (PR #22).** Follows **until aborted**. `timeoutMs` honoured **when passed**, with **no default**. Elapsing resolves **`ok`**.
-- [ ] **Step 2: Write the integration test** in the Task 4 arena (`x 1850-1870`), two bots: the follower and a `ITFollowTarget` teleported twice. Assert the follower closes to within 4 blocks of each new position; an aborted call resolves `interrupted` promptly (<2s); an elapsed `timeoutMs` resolves **`ok`**; and a call with **no** `timeoutMs` is still pending after 10s, then resolves `interrupted` once aborted.
+- [ ] **Step 2: Write the integration test** in the Task 4 arena (`x 1850-1870`), two bots: the follower and a `ITFollowTarget` teleported twice. Assert the follower closes to within 4 blocks of each new position; an aborted call resolves `interrupted` promptly (<2s); an elapsed `timeoutMs` resolves **`ok`**; and a call with **no** `timeoutMs` is still pending after 10s, then resolves `interrupted` once aborted. **Also supply `prepareFollowFixture` in `contract.int.test.ts`** — a second connection as the target, released in `release` — so the suite's two follow guarantees stop skipping against the real executor (Task 0 Step 4).
 - [ ] **Step 3: Make `runAction` accept "no timeout" — first, on its own.** It arms `setTimeout(…, opts?.timeoutMs ?? defaultTimeoutMs)` unconditionally (`mineflayer-executor.ts:747-751`), and **`setTimeout(fn, Infinity)` fires after ~2ms in Node** (measured 2026-09-11: the delay overflows and clamps, with only a `TimeoutOverflowWarning`). So the obvious implementation — a default of `Infinity` — would make `followPlayer` report `timeout` almost at once, and the same bug already reaches any action whose caller passes `timeoutMs: Infinity`. Let `defaultTimeoutMs` be `number | null`, and skip arming the timer when the effective timeout is `null` or not finite. Prove it with an action called as `timeoutMs: Infinity` that must not time out.
 - [ ] **Step 4: Implement** with the pathfinder's `GoalFollow` via `runAction(opts, null, …)`, clearing the goal in a `finally`. **Map this action's own elapsed `timeoutMs` to `ok`, not `timeout`:** `runAction` maps a timer abort to `fail('timeout')` (`mineflayer-executor.ts:757-760`), which is right for every other action and wrong for this one.
 - [ ] **Step 5: Verify and commit.** The message must repeat the consequence Ricky asked to have recorded: without `timeoutMs`, `followPlayer` does not return until aborted, and `runGoal` passes none (`loop.ts:143`) — so a peaceful follow blocks the planner, and bounding it is Track B's.
@@ -650,7 +662,7 @@ Failure mapping is Task 0's agreed table: `not_found` (not in inventory), `inval
 
 **Freestanding mid-air placement is out of scope for Phase 5** (agreed, PR #22) — a named limitation, not something half-built. `placeBlock` requires a neighbour, and Task 5b's bottom-up ordering is what stops the case arising for real structures.
 
-- [ ] **Step 1: Write the integration test.** Cover: places a block on the arena floor and a **second connection** confirms it (the placing bot's world model updates optimistically — the same trap `bot.dig()` has); an empty inventory gives `not_found`; a position with no adjacent solid neighbour gives `invalid_target`; an already-occupied position gives `invalid_target`.
+- [ ] **Step 1: Write the integration test.** Cover: places a block on the arena floor and a **second connection** confirms it (the placing bot's world model updates optimistically — the same trap `bot.dig()` has); an empty inventory gives `not_found`; a position with no adjacent solid neighbour gives `invalid_target`; an already-occupied position gives `invalid_target`. **Also supply `preparePlaceFixture` in `contract.int.test.ts`** — clear the inventory, return an empty arena position with a floor beneath it — so the suite's `not_found` guarantee stops skipping against the real executor (Task 0 Step 4).
 - [ ] **Step 2: Measure the scaffolding hazard before guarding against it.** Build a target reachable only by gaining height the bot cannot step or jump — a raised ledge with no ramp — give the bot exactly one dirt, and record whether the approach consumes it. **If it does**, that geometry is the regression test: assert the dirt ends up **at the target** and the inventory holds **zero**, not a tower and a `not_found`. **If no geometry provokes a tower**, record that in CLAUDE.md and ask before adding a guard nobody can make fire — this project's rule is that such a guard is not known to work.
 - [ ] **Step 3: Run and confirm the tests fail** with the stub's `internal`.
 - [ ] **Step 4: Implement** — find and `equip` the block; reject early when absent; pick an adjacent solid neighbour as the reference face and reject when there is none; `gotoGoal` within reach — if Step 2 showed the hazard is real, **using a `Movements` whose `scafoldingBlocks` excludes the material being placed**, restoring the shared movements in a `finally` — then `bot.placeBlock(reference, faceVector)`. Correct the comment at `mineflayer-executor.ts:425` to say what is true: movement does not dig, but it can build. Do **not** set `allow1by1towers = false` globally: that changes which targets every other action can reach, and would need measuring against the integration suite and `bench:explore` first.
@@ -707,7 +719,7 @@ Without this the loader is dead code and the blueprint deliverable does not exis
 Agreed return shape (PR #22): **`Result<{ fled: boolean }>`, `ok` either way.** `fled: false` when there was no hostile — the safest outcome, not a failure.
 
 - [ ] **Step 0: GATE — agree flee's distance and timeout with Ricky.** He answered the shape but asked for these to be pinned before 6b: spec §3 says only "at least N blocks from the nearest hostile, bounded by a timeout", and unagreed, the implementation picks them. Track A's proposal is the algorithm in Step 3 — a 12-block candidate circle, success when the bot ends further from the hostile than it started, a 10_000ms bound. Record the answer in spec §7. This blocks only 6b.
-- [ ] **Step 1: Write the integration test** in the same arena — with a hostile present, `flee()` resolves `ok` with **`fled: true`** and the bot ends **further from the mob than it started**; with no hostile, it resolves `ok` with **`fled: false`**.
+- [ ] **Step 1: Write the integration test** in the same arena — with a hostile present, `flee()` resolves `ok` with **`fled: true`** and the bot ends **further from the mob than it started**; with no hostile, it resolves `ok` with **`fled: false`**. **Also supply `prepareFleeFixture` in `contract.int.test.ts`** so the suite's `fled: false` guarantee stops skipping against the real executor (Task 0 Step 4); the suite itself verifies no hostile is near.
 - [ ] **Step 2: Run and confirm it fails.**
 - [ ] **Step 3: Implement.** Candidate generation, explicitly: take the snapshot's nearest hostile; generate 8 candidate points on a circle of radius 12 around the bot; discard any whose distance to that hostile is not greater than the bot's current distance; sort by descending distance from the hostile; `gotoGoal` to each in turn until one succeeds. Return `ok` with `fled: false` when there is no hostile — including the race where one existed at trigger time and died or despawned before the call; `ok` with `fled: true` on verified arrival; `unreachable` when every candidate fails. **The 12 blocks and 10_000ms are Step 0's proposal, not the answer** — use what was agreed.
 - [ ] **Step 4: Verify arrival against the world** — `goto()` resolves ok on a zero-length path, so a resolved promise is not evidence the bot moved. Compare start and end positions.

@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-09
 **Status:** AGREED 2026-09-11 (Ricky, PR #22), with `flee` counter-proposed and adopted. One detail is still open — flee's distance and timeout, blocking only Task 6b. Not started.
-**Affects:** `packages/executor/` (four stubs), `packages/bot/` (the arbiter), `packages/contract/` (one doc-comment gap, §7.1)
+**Affects:** `packages/executor/` (four stubs, and the arbiter — §2.1), `packages/contract/` and `packages/mock-executor/` (Task 0 only: the four methods' guarantees, and `flee`'s return type)
 **Blocked by:** nothing. Phase 4 Track A is merged; the
 [work split](../../notes/Phase%20Plan%20and%20Parallel%20Work%20Split.md) runs
 `P4A → P5A` and `P4B → P5B` as separate chains that rejoin only at Phase 6.
@@ -18,7 +18,8 @@ Four executor methods are stubs returning `fail('internal', '… arrives in Phas
 | `placeBlock(blockName, position)` | Building, plus a schematic loader |
 
 They already have contract signatures, and `runAction()` already gives each of
-them the pre-abort check the contract suite asserts for all six actions. So this
+them the pre-abort check the contract suite asserts for all eight abortable cases,
+across seven actions. So this
 phase adds behaviour behind an interface that already exists — the same shape as
 `explore_for`, which worked.
 
@@ -54,7 +55,14 @@ why it goes first — and doing it first fixes the interrupt semantics *before*
 |---|---|---|
 | Trigger rules — pure predicates over `WorldSnapshot` | `packages/executor/` | Design §5 already plans them as pure functions over a fake snapshot: no Minecraft, no model, exhaustively testable |
 | Recovery actions (`attack`, `flee`) | `packages/executor/` | Ordinary executor methods |
-| **The arbiter** — subscribes, decides, preempts, hands back | `packages/bot/` | It needs the executor's event stream *and* the planner's `AbortController`, and `packages/bot/` is the only package allowed to depend on both. Putting it in `agent` would pull Mineflayer into the planning track transitively, which `check-invariants.mjs` fails on |
+| **The arbiter** — subscribes, decides, preempts, hands back | `packages/executor/` | A `BotExecutor` decorator: it wraps another executor, subscribes to its event stream, aborts its own internal controller for the in-flight action, and returns `interrupted`. It depends only on contract types and the trigger rules. It never touches the planner — `loop.ts` already re-plans on an `interrupted` result without an outer abort (§7 Decision 1) |
+
+*Corrected 2026-09-11.* The arbiter row said `packages/bot/`, on the grounds that
+the arbiter needs "the planner's `AbortController`" and `bot` is the only package
+allowed to depend on both tracks. Decision 1's answer made that false: a decorator
+preempts through the signal it passes to the inner executor, and needs no planner
+at all. The invariant that motivated the old placement still holds — nothing here
+puts Mineflayer into `packages/agent`.
 
 ### 2.2 The one semantic that does not exist yet
 
@@ -314,8 +322,8 @@ directly and are worth stating before they are re-learned:
   run, not assumed.
 - **Prove each guard can fire.** Every new reflex trigger needs a test that shows
   it firing, and the contract suite's existing "resolves interrupted when
-  pre-aborted" assertion must keep passing for all six actions as they stop being
-  stubs.
+  pre-aborted" assertion must keep passing for all eight abortable cases, across
+  seven actions, as they stop being stubs.
 
 The reflex layer specifically is testable without a server at all: trigger rules
 are pure, and `MockExecutor` can emit `damaged` on demand. That is the phase's

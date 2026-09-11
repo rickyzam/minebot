@@ -1050,7 +1050,7 @@ export class MineflayerExecutor implements BotExecutor {
     return this.runAction(opts, 30_000, async () => fail('internal', 'attack arrives in Phase 5'))
   }
 
-  async flee(opts?: ActionOptions): Promise<Result> {
+  async flee(opts?: ActionOptions): Promise<Result<{ fled: boolean }>> {
     return this.runAction(opts, 30_000, async () => fail('internal', 'flee arrives in Phase 5'))
   }
 

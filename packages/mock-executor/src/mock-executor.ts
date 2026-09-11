@@ -249,9 +249,20 @@ export class MockExecutor implements BotExecutor {
     return ok(undefined)
   }
 
+  /**
+   * Follows until aborted. `timeoutMs` is honoured when passed, with no
+   * default, and elapsing resolves `ok` — it followed as asked. Agreed
+   * 2026-09-11, Phase 5 spec §7. The mock has no players, so any name follows.
+   */
   async followPlayer(playerName: string, opts?: ActionOptions): Promise<Result> {
     this.record('followPlayer', playerName)
-    return this.simulate('followPlayer', opts)
+    const r = await this.simulate('followPlayer', opts)
+    if (!r.ok) return r
+    // Non-finite means "never elapses", and must not reach wait(): see
+    // untilAborted() for what setTimeout does with Infinity.
+    const timeoutMs = opts?.timeoutMs
+    if (timeoutMs !== undefined && Number.isFinite(timeoutMs)) return this.wait(timeoutMs, opts)
+    return this.untilAborted(opts)
   }
 
   async mineBlock(
@@ -295,9 +306,43 @@ export class MockExecutor implements BotExecutor {
     return ok({ position: match.position, collected: true })
   }
 
+  /**
+   * Inventory-aware, agreed 2026-09-11 (Phase 5 spec §7). The mock has no
+   * geometry, so of the real failures it can produce `not_found` and the
+   * occupied half of `invalid_target`; "no adjacent face" and `unreachable`
+   * are reachable through failure injection.
+   */
   async placeBlock(blockName: string, position: Vec3, opts?: ActionOptions): Promise<Result> {
     this.record('placeBlock', blockName, position)
-    return this.simulate('placeBlock', opts)
+    const r = await this.simulate('placeBlock', opts)
+    if (!r.ok) return r
+
+    // Inventory before target, the order the real executor checks in.
+    // not_found, NOT missing_tool: "no material to place" and "no tool to
+    // harvest" are different facts, and the planner will need different
+    // policies for them once acquiring actions exist.
+    if (!this.inventory.some((i) => i.name === blockName)) {
+      return fail('not_found', `${blockName} is not in the inventory`)
+    }
+    // Occupancy is a fact about the world, not about perception, so a block
+    // seeded invisible still occupies its position.
+    const occupant = this.blocks.find(
+      (b) => b.position.x === position.x && b.position.y === position.y && b.position.z === position.z,
+    )
+    if (occupant) {
+      return fail('invalid_target', `${describeVec(position)} is occupied by ${occupant.name}`)
+    }
+
+    this.inventory = this.inventory
+      .map((i) => (i.name === blockName ? { ...i, count: i.count - 1 } : i))
+      .filter((i) => i.count > 0)
+    const distance = Math.hypot(
+      position.x - this.position.x,
+      position.y - this.position.y,
+      position.z - this.position.z,
+    )
+    this.blocks = [...this.blocks, { name: blockName, position: { ...position }, distance }]
+    return ok(undefined)
   }
 
   async attack(entityId: number, opts?: ActionOptions): Promise<Result> {
@@ -310,9 +355,16 @@ export class MockExecutor implements BotExecutor {
     return ok(undefined)
   }
 
-  async flee(opts?: ActionOptions): Promise<Result> {
+  /**
+   * `ok` either way, agreed 2026-09-11 (Phase 5 spec §7): `fled: false` when
+   * there is no hostile. Nothing to flee from is the safest outcome, not a
+   * failure.
+   */
+  async flee(opts?: ActionOptions): Promise<Result<{ fled: boolean }>> {
     this.record('flee')
-    return this.simulate('flee', opts)
+    const r = await this.simulate('flee', opts)
+    if (!r.ok) return r
+    return ok({ fled: this.entities.some((e) => e.kind === 'hostile') })
   }
 
   /**
@@ -393,6 +445,16 @@ export class MockExecutor implements BotExecutor {
     else this.failures.delete(action)
   }
 
+  /**
+   * Change the health a snapshot reports, so a test can drive the state a
+   * reflex layer escalates on (e.g. low health while a hostile is near).
+   * Emits nothing: pair it with `emit('damaged' | 'health', …)` when the test
+   * needs the push stream too. Agreed 2026-09-11, Phase 5 spec §7.
+   */
+  setHealth(health: number): void {
+    this.health = health
+  }
+
   private record(name: string, ...args: unknown[]): void {
     this.calls.push({ name, args })
   }
@@ -443,6 +505,34 @@ export class MockExecutor implements BotExecutor {
       const stopThisAction = (): void => finish(fail('interrupted', 'stopped via stop()'))
       this.inFlightStop = stopThisAction
       const timer = setTimeout(() => finish(ok(undefined)), ms)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+
+  /**
+   * Settles only on abort or `stop()` — never on its own.
+   *
+   * Deliberately NOT `this.wait(Infinity, opts)`. `wait` arms a setTimeout,
+   * and setTimeout(fn, Infinity) fires after ~2ms in Node (measured
+   * 2026-09-11): the delay overflows and clamps. A mock built that way would
+   * report a follow that never ends as one that finished instantly.
+   */
+  private untilAborted(opts?: ActionOptions): Promise<Result> {
+    // Same re-check as wait(): the caller awaited simulate() first.
+    if (opts?.signal?.aborted) return Promise.resolve(fail('interrupted', 'aborted mid-action'))
+    return new Promise<Result>((resolve) => {
+      let settled = false
+      const signal = opts?.signal
+      const finish = (result: Result): void => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        if (this.inFlightStop === stopThisAction) this.inFlightStop = null
+        resolve(result)
+      }
+      const onAbort = (): void => finish(fail('interrupted', 'aborted mid-action'))
+      const stopThisAction = (): void => finish(fail('interrupted', 'stopped via stop()'))
+      this.inFlightStop = stopThisAction
       signal?.addEventListener('abort', onAbort, { once: true })
     })
   }

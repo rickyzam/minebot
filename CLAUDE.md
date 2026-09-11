@@ -15,9 +15,9 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 ## Commands
 
 ```bash
-npm test                  # 310 unit tests. No network, no model. Fast. Run these constantly.
+npm test                  # 324 unit tests. No network, no model. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
-npm run test:integration  # 103 tests. Requires the live dev server.
+npm run test:integration  # 103 tests + 4 SKIPPED. Requires the live dev server. The skips are the Phase 5 toolbox guarantees, until Tasks 3/4/6b supply their fixtures
 npm run smoke             # Minimal "can a bot connect at all" check.
 npm run demo              # Connect, print snapshot, walk. The Phase 1 deliverable.
 npm run demo:phase2       # Connect, path around a wall, mine coal. The Phase 2 deliverable.
