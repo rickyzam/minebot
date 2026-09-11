@@ -46,3 +46,5 @@ export { nextWaypoint, searchedRadius, DEFAULT_PERCEPTION_RADIUS } from './explo
 export type { SearchState } from './explore.js'
 export { isExposed, isPerceivable, observe } from './visibility.js'
 export type { BlockView, PerceptionWorld, Observation } from './visibility.js'
+export { evaluateReflex, DEFAULT_REFLEX_THRESHOLDS } from './reflex.js'
+export type { ReflexThresholds, ReflexTrigger } from './reflex.js'
