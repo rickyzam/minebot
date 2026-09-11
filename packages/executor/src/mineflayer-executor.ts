@@ -118,6 +118,16 @@ const WAYPOINT_ARRIVAL_TOLERANCE = 4
  */
 const EXPLORE_TIMEOUT_HEADROOM_MS = 15_000
 
+/**
+ * The longest delay `setTimeout` honours: a signed 32-bit millisecond count.
+ *
+ * MEASURED 2026-09-11 in Node 24: any delay past this — `Infinity`, `NaN`, and
+ * a perfectly finite `3e9` alike — is clamped to 1ms with only a
+ * `TimeoutOverflowWarning`, and fired after 2ms. So "no timeout" must be
+ * expressed by not arming a timer, and a very long timeout by clamping to this.
+ */
+const MAX_TIMER_MS = 2_147_483_647
+
 /** Straight-line distance from the bot to a point, in blocks. */
 const distanceFrom = (bot: Bot, p: { x: number; y: number; z: number }): number => {
   const o = bot.entity.position
@@ -723,10 +733,15 @@ export class MineflayerExecutor implements BotExecutor {
    * Exists because `moveTo` carried ~40 lines of this scaffolding that
    * `mineBlock`'s four cancellable steps would each have repeated, and every
    * repetition is a chance to get the resolve-never-throw rule subtly wrong.
+   *
+   * `defaultTimeoutMs: null` means the action has no timeout unless the caller
+   * passes one, and a non-finite effective timeout (`Infinity`, `NaN`) means
+   * none at all: the timer is simply not armed. It must never be expressed as
+   * `setTimeout(fn, Infinity)`, which fires after ~1ms — see MAX_TIMER_MS.
    */
   private async runAction<T>(
     opts: ActionOptions | undefined,
-    defaultTimeoutMs: number,
+    defaultTimeoutMs: number | null,
     body: (bot: Bot, signal: AbortSignal) => Promise<Result<T>>,
   ): Promise<Result<T>> {
     if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
@@ -745,10 +760,18 @@ export class MineflayerExecutor implements BotExecutor {
       controller.abort()
     }
     const timeoutMs = opts?.timeoutMs ?? defaultTimeoutMs
-    const timer = setTimeout(() => {
-      cause ??= 'timeout'
-      controller.abort()
-    }, timeoutMs)
+    const timer =
+      timeoutMs === null || !Number.isFinite(timeoutMs)
+        ? undefined
+        : setTimeout(
+            () => {
+              cause ??= 'timeout'
+              controller.abort()
+            },
+            // Clamped, not passed through: a finite delay past the 32-bit limit
+            // overflows exactly as Infinity does. The clamp is ~24.8 days.
+            Math.min(timeoutMs, MAX_TIMER_MS),
+          )
 
     opts?.signal?.addEventListener('abort', onCallerAbort, { once: true })
     this.inFlightStop = stopThisAction
