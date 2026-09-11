@@ -1,14 +1,17 @@
 import {
   runContractSuite,
   type FollowFixture,
+  type PlaceFixture,
   type VisibilityFixture,
 } from '@minebot/mock-executor/contract-suite'
 import { MineflayerExecutor } from '../../src/index.js'
 import {
   buildArena,
+  clearInventory,
   placeArenaBlock,
   sendConsoleCommand,
   teleportAndWait,
+  waitForItemCount,
   waitForOnGround,
   waitForPlayerVisible,
   type ArenaBounds,
@@ -39,6 +42,14 @@ const MARKER = 'emerald_block'
  */
 const FOLLOW_TARGET = 'ITContractTgt'
 const FOLLOW_TARGET_START = { x: 1402, y: ARENA.floorY + 1, z: 4 }
+
+/**
+ * The place fixture: a block the contract bot is made to hold none of, and an
+ * empty arena cell two blocks from START with the stone floor beneath it — a
+ * valid target in every respect except the missing material.
+ */
+const PLACE_BLOCK = 'dirt'
+const PLACE_TARGET = { x: 1407, y: ARENA.floorY + 1, z: 4 }
 
 /** What the suite's findBlocks assertions are declared against. */
 const FINDABLE = ['grass_block', 'short_grass']
@@ -186,6 +197,21 @@ runContractSuite('MineflayerExecutor', async () => {
         throw e
       }
       return { playerName: FOLLOW_TARGET, release: () => target.disconnect() }
+    },
+    preparePlaceFixture: async (): Promise<PlaceFixture> => {
+      // The arena, for the same reason as the fixtures above: an empty cell
+      // with a solid floor beneath it is then a fact of the fixture, not of
+      // whatever terrain the surface start has beside it.
+      await buildArena(ARENA)
+      await teleportAndWait(executor, 'ITContract', START)
+      await waitForOnGround(executor, { expectedY: ARENA.floorY + 1 })
+      clearInventory('ITContract')
+      // Waited for, not assumed: /clear has no acknowledgement. The suite
+      // re-checks the inventory itself and throws, but a fixture that raced
+      // would then fail as a broken fixture on some runs and not others.
+      await waitForItemCount(executor, PLACE_BLOCK, 0)
+      // No release: buildArena rebuilds the floor and clears the air above it.
+      return { blockName: PLACE_BLOCK, position: PLACE_TARGET }
     },
   }
 })

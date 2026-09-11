@@ -1,6 +1,6 @@
 import mineflayer, { type Bot } from 'mineflayer'
 import pathfinderPkg from 'mineflayer-pathfinder'
-import type { goals as PathfinderGoals } from 'mineflayer-pathfinder'
+import type { GoalPlaceBlockOptions, goals as PathfinderGoals } from 'mineflayer-pathfinder'
 import {
   ok,
   fail,
@@ -78,6 +78,28 @@ const ARRIVAL_TOLERANCE = 2.5
  * the block whatever the local world model says afterwards.
  */
 const DIG_REACH = 5
+
+/**
+ * How far from the bot's eye a face may be and still be placed against, as
+ * `GoalPlaceBlock` measures it: from the standing node's eye to the centre of
+ * the reference block's face. 4.5 is vanilla survival's block interaction
+ * range — the bot stands where a player could have placed from, rather than at
+ * the edge of whatever the server might tolerate.
+ */
+const PLACE_REACH = 4.5
+
+/** Blocks that count as an empty cell for `placeBlock`. Anything else occupies it. */
+const EMPTY_BLOCKS: ReadonlySet<string> = new Set(['air', 'cave_air', 'void_air'])
+
+/** The six neighbours of a cell, as offsets. */
+const NEIGHBOUR_OFFSETS: ReadonlyArray<readonly [number, number, number]> = [
+  [0, -1, 0],
+  [0, 1, 0],
+  [0, 0, -1],
+  [0, 0, 1],
+  [-1, 0, 0],
+  [1, 0, 0],
+]
 
 /**
  * A* detour budget, in path cost. See the measurement table at the call site
@@ -441,11 +463,22 @@ export class MineflayerExecutor implements BotExecutor {
         // semantics the explicit spawned emit below already relies on.
         this.watchForUnexpectedDisconnect(bot)
         this.wireBotEvents(bot)
-        // Movement is non-destructive by design: canDig false means the
-        // pathfinder never tunnels. The only blocks this executor breaks are
-        // the ones mineBlock was explicitly asked to break — a pathfinder
-        // allowed to dig would quietly rewrite the terrain the integration
-        // tests depend on.
+        // Movement does not dig: canDig false means the pathfinder never
+        // tunnels. The only blocks this executor breaks are the ones mineBlock
+        // was explicitly asked to break — a pathfinder allowed to dig would
+        // quietly rewrite the terrain the integration tests depend on.
+        //
+        // But movement CAN BUILD, and this does not stop it. Movements defaults
+        // scafoldingBlocks to [dirt, cobblestone] and allow1by1towers to true,
+        // so a bot carrying either may pillar, bridge a gap, or place a step
+        // while pathing, and leave those blocks behind. Only pillaring is gated
+        // on allow1by1towers; bridging and stepping up (getMoveForward,
+        // getMoveJumpUp) spend scaffolding regardless. MEASURED 2026-09-11 in
+        // place.int.test.ts: told to place its only dirt on a ledge, the bot
+        // pillared on that dirt and failed not_found. placeBlock guards its own
+        // material (see there); towers built from other scaffolding are still
+        // possible. Not switched off globally, because that changes which
+        // targets every other action can reach.
         bot.loadPlugin(pathfinder)
         const movements = new Movements(bot)
         movements.canDig = false
@@ -1152,10 +1185,156 @@ export class MineflayerExecutor implements BotExecutor {
     return bot.entity.position.offset(0, 0, 0).set(x, y, z)
   }
 
-  async placeBlock(_blockName: string, _position: Vec3, opts?: ActionOptions): Promise<Result> {
-    return this.runAction(opts, 30_000, async () =>
-      fail('internal', 'placeBlock arrives in Phase 5'),
-    )
+  /**
+   * Place one `blockName` from the inventory at `position`. Agreed 2026-09-11,
+   * Phase 5 spec §7; see the contract's doc comment for the failure table.
+   *
+   * Checks run cheapest and least invasive first, the order the mock uses:
+   * inventory, then the target cell, then the approach. Nothing moves until
+   * the call is known to be answerable.
+   */
+  async placeBlock(blockName: string, position: Vec3, opts?: ActionOptions): Promise<Result> {
+    return this.runAction(opts, 30_000, async (bot, signal) => {
+      // --- Step 1: the material ---
+      if (!bot.inventory.items().some((i) => i.name === blockName)) {
+        return fail('not_found', `no ${blockName} in the inventory`)
+      }
+      // Executor behaviour, not in the agreed table: an item that is not a
+      // block (a stick) would otherwise walk into reach and then be refused by
+      // the server as `internal`. `invalid_target` is what mineBlock and
+      // exploreFor already answer for an unknown block name.
+      if (!bot.registry.blocksByName[blockName]) {
+        return fail('invalid_target', `"${blockName}" is not a placeable block`)
+      }
+
+      // --- Step 2: the target cell ---
+      const target = this.toBlockPos(
+        bot,
+        Math.floor(position.x),
+        Math.floor(position.y),
+        Math.floor(position.z),
+      )
+      const where = `(${target.x}, ${target.y}, ${target.z})`
+      const existing = bot.blockAt(target)
+      if (!existing) return fail('unreachable', `${where} is not in a loaded chunk`)
+      if (!EMPTY_BLOCKS.has(existing.name)) {
+        return fail('invalid_target', `${where} is occupied by ${existing.name}`)
+      }
+      const supported = NEIGHBOUR_OFFSETS.some(
+        ([dx, dy, dz]) => bot.blockAt(target.offset(dx, dy, dz))?.boundingBox === 'block',
+      )
+      if (!supported) {
+        // Freestanding mid-air placement is out of scope (PR #22): build bottom-up.
+        return fail('invalid_target', `nothing solid beside ${where} to place against`)
+      }
+      if (signal.aborted) return ok(undefined)
+
+      // --- Step 3: approach ---
+      // GoalPlaceBlock, not GoalNear (ruling R8). Its end condition is a
+      // standing node whose eye has LINE OF SIGHT to a reference face within
+      // PLACE_REACH, and it refuses any node whose feet or head would be in
+      // the target cell — Minecraft will not place a block into a cell an
+      // entity occupies, and the bot counts. GoalNear would happily park the
+      // bot on the very cell it was asked to fill.
+      //
+      // The line-of-sight requirement is our honesty rule, not the server's.
+      // MEASURED 2026-09-11: with LOS off, the bot placed into the empty centre
+      // of a sealed stone box from outside it, and the server accepted it. LOS
+      // keeps the bot from building through a wall it cannot see through, as
+      // perception already refuses to look through one.
+      //
+      // The .d.ts marks `faces` and `facing` required; the implementation
+      // (lib/goals.js:383) defaults both — every face, any facing — and that
+      // default is what is wanted. Built fresh per call: the constructor
+      // mutates its options object.
+      const goal = new goals.GoalPlaceBlock(target, bot.world, {
+        range: PLACE_REACH,
+        LOS: true,
+      } as unknown as GoalPlaceBlockOptions)
+      // Runtime methods of the pinned 2.4.5 goal. `isEnd` is typed for the
+      // pathfinder's own Move nodes and `getFaceAndRef` is not declared at
+      // all; both only read x/y/z and Vec3 arithmetic off what they are given.
+      const placeGoal = goal as unknown as {
+        isEnd(node: MineflayerVec3): boolean
+        getFaceAndRef(
+          eye: MineflayerVec3,
+        ): { face: MineflayerVec3; ref: MineflayerVec3 } | null
+      }
+      /**
+       * The face to place against from where the bot stands now, or null. The
+       * same test the pathfinder applies to decide it has arrived — floored
+       * position, and the node above for a bot on a partial block
+       * (index.js:590) — so arrival and placement never disagree.
+       */
+      const faceFromHere = (): { face: MineflayerVec3; ref: MineflayerVec3 } | null => {
+        const node = bot.entity.position.floored()
+        for (const n of [node, node.offset(0, 1, 0)]) {
+          if (placeGoal.isEnd(n)) return placeGoal.getFaceAndRef(n.offset(0.5, 1.6, 0.5))
+        }
+        return null
+      }
+
+      // The approach must not spend the material it is walking over to place.
+      //
+      // MEASURED 2026-09-11 (place.int.test.ts, the ledge tests): with one
+      // dirt and the shared movements, the bot reached a ledge target by
+      // pillaring on that dirt, then had nothing left to place — not_found for
+      // a block the caller did have, and a pillar left behind. So for this
+      // approach the pathfinder gets a copy of the shared movements whose
+      // scafoldingBlocks leaves out the material.
+      //
+      // A shallow copy, not `new Movements(bot)`: a fresh instance would
+      // silently drop every setting made on the shared one, including
+      // canDig = false. And swapped only when the material IS scaffolding,
+      // because setMovements resets any path in progress.
+      const shared = bot.pathfinder.movements
+      const materialId = bot.registry.itemsByName[blockName]?.id
+      const spare = shared.scafoldingBlocks.filter((id) => id !== materialId)
+      const guarded =
+        spare.length === shared.scafoldingBlocks.length
+          ? null
+          : Object.assign(Object.create(Object.getPrototypeOf(shared)) as typeof shared, shared, {
+              scafoldingBlocks: spare,
+            })
+      if (guarded) bot.pathfinder.setMovements(guarded)
+      let approach: Result
+      try {
+        approach = await this.gotoGoal(bot, signal, goal, () => faceFromHere() !== null)
+      } finally {
+        // Only if nothing replaced it meanwhile: restoring over someone
+        // else's movements would be a second surprise, not a cleanup.
+        try {
+          if (guarded && bot.pathfinder.movements === guarded) bot.pathfinder.setMovements(shared)
+        } catch {
+          // disconnected mid-approach
+        }
+      }
+      if (!approach.ok) return approach
+      if (signal.aborted) return ok(undefined)
+
+      // --- Step 4: equip and place ---
+      const placement = faceFromHere()
+      if (!placement) return fail('unreachable', `lost sight of a face beside ${where}`)
+      const reference = bot.blockAt(placement.ref)
+      if (!reference) return fail('unreachable', `the block beside ${where} is not loaded`)
+      // Looked up again rather than reused: the approach took time, and the
+      // equip needs the item as it is now.
+      const item = bot.inventory.items().find((i) => i.name === blockName)
+      if (!item) return fail('not_found', `no ${blockName} left in the inventory after the approach`)
+      await bot.equip(item, 'hand')
+      if (signal.aborted) return ok(undefined)
+
+      // `face` points from the target to the reference block; Mineflayer wants
+      // the vector from the reference to the cell being filled.
+      //
+      // Verified against the server, not the bot's own view: in mineflayer
+      // 4.39 placeBlock (lib/plugins/place_block.js) sends the packet and then
+      // waits for the SERVER's block update at the destination, rejecting with
+      // "Server refused to place …" if the type did not change. It does not
+      // write the block into the local world model first, unlike bot.dig().
+      await bot.placeBlock(reference, placement.face.scaled(-1))
+      return ok(undefined)
+    })
   }
 
   async attack(_entityId: number, opts?: ActionOptions): Promise<Result> {

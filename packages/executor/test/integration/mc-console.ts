@@ -186,6 +186,81 @@ export async function waitForPlayerGone(
   }
 }
 
+/** How many of `itemName` the executor's own snapshot says it holds, across all slots. */
+export function itemCount(executor: MineflayerExecutor, itemName: string): number {
+  return executor
+    .getState()
+    .self.inventory.filter((i) => i.name === itemName)
+    .reduce((n, i) => n + i.count, 0)
+}
+
+/**
+ * Polls until the executor holds exactly `count` of `itemName`, or throws.
+ *
+ * `/give` and `/clear` are console commands with no acknowledgement, and the
+ * inventory reaches the bot as later slot packets. A test that gives an item
+ * and calls an action straight away measures that race, not the action — and
+ * a `not_found` read against an inventory that has not arrived yet looks
+ * exactly like a correct guard.
+ */
+export async function waitForItemCount(
+  executor: MineflayerExecutor,
+  itemName: string,
+  count: number,
+  opts: { timeoutMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 8_000
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const held = itemCount(executor, itemName)
+    if (held === count) return
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `waitForItemCount: expected ${count} ${itemName} in the inventory within ${timeoutMs}ms, ` +
+          `last saw ${held}. The /give or /clear did not land, or something spent the item.`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+}
+
+/**
+ * Polls `executor`'s own `findBlocks` until it reports `blockName` at exactly
+ * `position`, or throws.
+ *
+ * `findBlocks` is line-of-sight limited, so this proves two things at once:
+ * the console command that built the block landed, and this connection can
+ * actually see it. Use it on a SECOND connection to confirm what another bot
+ * did — the acting bot's own world model is not evidence (see `bot.dig()`).
+ */
+export async function waitForBlockVisible(
+  executor: MineflayerExecutor,
+  blockName: string,
+  position: { x: number; y: number; z: number },
+  opts: { timeoutMs?: number; maxDistance?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 10_000
+  const maxDistance = opts.maxDistance ?? 16
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const seen = executor
+      .findBlocks({ names: [blockName], maxDistance, limit: 64 })
+      .map((b) => b.position)
+    if (seen.some((p) => p.x === position.x && p.y === position.y && p.z === position.z)) return
+    if (Date.now() >= deadline) {
+      const me = executor.getState().self.position
+      throw new Error(
+        `waitForBlockVisible: no ${blockName} visible at (${position.x}, ${position.y}, ` +
+          `${position.z}) within ${timeoutMs}ms from (${me.x.toFixed(1)}, ${me.y.toFixed(1)}, ` +
+          `${me.z.toFixed(1)}). Saw ${seen.length} other(s): ` +
+          `${JSON.stringify(seen.slice(0, 8))}. Either the block is not there, or this ` +
+          `viewpoint has no line of sight to it.`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+}
+
 export interface ArenaBounds {
   /** Inclusive world-space bounds of the platform, in blocks. */
   x0: number
