@@ -236,7 +236,7 @@ describe('the stuck guard is a nudge before it is an executioner', () => {
 })
 
 describe('the budget notice', () => {
-  it('reaches the model before the budget runs out', async () => {
+  it('reaches the model before the budget runs out, counting down to exactly 1', async () => {
     const m = await connected()
     const llm = new FakeLlmClient([CHAT], { repeatLast: true })
     // stuckThreshold: 99 so this measures the BUDGET notice and nothing else —
@@ -244,6 +244,20 @@ describe('the budget notice', () => {
     await run(m, llm, { maxSteps: 5, stuckThreshold: 99 })
 
     const prompts = llm.requests.map((r) => r.messages.map((x) => x.content).join('\n'))
-    expect(prompts.some((p) => p.includes('Steps remaining'))).toBe(true)
+    const remaining = prompts
+      .map((p) => p.match(/Steps remaining: (\d+)\./)?.[1])
+      .filter((v): v is string => v !== undefined)
+      .map(Number)
+
+    // Not a membership check: the exact descending run for maxSteps: 5 and
+    // BUDGET_WARN_AT: 3 is [3, 2, 1] — one notice per remaining step from the
+    // warning threshold down to the last turn that can still act. A
+    // stepsTaken off-by-one (counting the in-flight step as already taken)
+    // shifts every count one early, producing [3, 2, 1, 0] instead: an extra,
+    // wrong notice claiming zero steps remain while a turn is still live, and
+    // a genuine last turn that reads "1" arriving un-warned. Asserting the
+    // literal ordered list — not `.some(...includes(...))` — catches that
+    // shift; a substring-presence check would pass under either sequence.
+    expect(remaining).toEqual([3, 2, 1])
   })
 })
