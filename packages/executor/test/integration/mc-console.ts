@@ -29,6 +29,65 @@ export function sendConsoleCommand(command: string): void {
 }
 
 /**
+ * Sends `command` and returns the server's own reply to it, matched by
+ * `pattern`.
+ *
+ * Some facts can only be had from the server itself. Mob health is one:
+ * MEASURED 2026-09-12 by reading mineflayer 4.x, `entity.health` is populated
+ * for the bot (`plugins/health.js`) and for boss bars, and **nowhere else** —
+ * no plugin reads the `health` metadata key of another entity, so
+ * `WorldSnapshot.nearbyEntities[].health` is always `undefined` for a mob, on
+ * every connection. A second bot therefore cannot witness that a mob lost hit
+ * points. The console can (`data get entity … Health`), and it is the server's
+ * own record rather than any client's view of it — strictly stronger evidence
+ * than a second connection, which is what the "never trust the acting bot's
+ * world model" rule is actually asking for.
+ *
+ * Correlating the reply with the command is the whole difficulty, because the
+ * pane holds every earlier reply too — and a before/after health check sends
+ * the *same* command twice, so "the last matching line" would happily return
+ * the previous call's answer. Counting the echoes of the command and waiting
+ * for a new one closes that: tmux echoes the typed line, so once the count has
+ * risen we know the reply we then read follows our own command.
+ */
+export async function queryConsole(
+  command: string,
+  pattern: RegExp,
+  opts: { timeoutMs?: number } = {},
+): Promise<RegExpMatchArray> {
+  const timeoutMs = opts.timeoutMs ?? 8_000
+  const capture = (): string[] =>
+    execFileSync('tmux', ['capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-400'], {
+      encoding: 'utf8',
+    }).split('\n')
+  const echoes = (lines: string[]): number[] =>
+    lines.flatMap((line, i) => (line.trim() === command ? [i] : []))
+
+  const before = echoes(capture()).length
+  sendConsoleCommand(command)
+
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const lines = capture()
+    const at = echoes(lines)
+    if (at.length > before) {
+      // Everything the server printed after our own echo of the command.
+      for (const line of lines.slice(at[at.length - 1]! + 1)) {
+        const m = line.match(pattern)
+        if (m) return m
+      }
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `queryConsole: "${command}" produced no line matching ${pattern} within ${timeoutMs}ms. ` +
+          `Last 5 console lines: ${JSON.stringify(lines.slice(-6, -1))}`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+}
+
+/**
  * Teleports `username` to a fixed coordinate via the server console, then
  * polls the bot's own reported position until it reflects the teleport
  * (or throws if it hasn't within `timeoutMs`). Polling the bot's own state —
@@ -274,6 +333,41 @@ export interface ArenaBounds {
    * a jump plus margin.
    */
   clearance?: number
+  /**
+   * Wall the platform in on all six sides: four walls around the perimeter of
+   * the cleared volume, and a **glowstone ceiling** as its top layer.
+   * Off by default, so every existing caller keeps the open platform it was
+   * written against.
+   *
+   * Both halves are required by the combat tests, and each answers a measured
+   * failure (Phase 5 spec §4.1-4.2):
+   *
+   *  - **The ceiling** is what keeps an undead mob alive. Under open sky a
+   *    named, `PersistenceRequired` zombie on the y=199 platform *burned to
+   *    death at 21 seconds* — shorter than a single pathfinding leg. Roofing it
+   *    removes the sky light locally, instead of `time set midnight` +
+   *    `doDaylightCycle false`, which would change the sky for anyone playing.
+   *  - **The walls** are what keeps it on the platform. A hostile paths straight
+   *    at the bot, and the platform floats ~130 blocks above real terrain: a mob
+   *    (or a bot backing away from one) that walks off the edge dies on impact,
+   *    and the test reads that as the action failing.
+   *
+   * The ceiling is glowstone rather than stone to **prevent natural spawns**.
+   * A sealed, unlit box on any difficulty above peaceful is a mob spawner: it
+   * would make combat tests flaky (someone else's zombie in the arena) and
+   * leave hostiles behind afterwards. Hostile spawning needs block light 0;
+   * glowstone emits 15, which still reaches 10 at the floor of a 6-high box.
+   * Done locally rather than by touching the `doMobSpawning` gamerule, which is
+   * global shared state.
+   *
+   * The walls and ceiling are built INSIDE the cleared volume, so the usable
+   * interior is `x0+1..x1-1` by `z0+1..z1-1`, from `floorY + 1` up to
+   * `floorY + clearance - 1`. Keeping them inside is what makes the enclosure
+   * self-healing: every block it writes sits in the volume the air fill just
+   * cleared, so a rebuild cannot leave a stale block from a previous test
+   * standing in a wall.
+   */
+  enclosed?: boolean
 }
 
 /**
@@ -326,6 +420,19 @@ export async function buildArena(bounds: ArenaBounds): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 500))
   sendConsoleCommand(`fill ${x0} ${floorY + 1} ${z0} ${x1} ${floorY + clearance} ${z1} air`)
   sendConsoleCommand(`fill ${x0} ${floorY} ${z0} ${x1} ${floorY} ${z1} stone`)
+
+  if (bounds.enclosed) {
+    // See ArenaBounds.enclosed for why each of these exists. Order matters only
+    // in that all of it lands after the air fill above — which is what makes a
+    // rebuild restore a wall an earlier test knocked a hole in.
+    const ceilingY = floorY + clearance
+    const wallTop = ceilingY - 1
+    sendConsoleCommand(`fill ${x0} ${ceilingY} ${z0} ${x1} ${ceilingY} ${z1} glowstone`)
+    sendConsoleCommand(`fill ${x0} ${floorY + 1} ${z0} ${x1} ${wallTop} ${z0} stone`)
+    sendConsoleCommand(`fill ${x0} ${floorY + 1} ${z1} ${x1} ${wallTop} ${z1} stone`)
+    sendConsoleCommand(`fill ${x0} ${floorY + 1} ${z0} ${x0} ${wallTop} ${z1} stone`)
+    sendConsoleCommand(`fill ${x1} ${floorY + 1} ${z0} ${x1} ${wallTop} ${z1} stone`)
+  }
 
   // VERIFIED 2026-09-07, the hard way: a coal drop left in the arena by an
   // earlier run was silently picked up by a later one, so a case that should

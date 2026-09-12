@@ -60,6 +60,8 @@ type PathfinderGoal = PathfinderGoals.Goal
  */
 type MineflayerBlock = NonNullable<ReturnType<Bot['blockAt']>>
 type MineflayerVec3 = MineflayerBlock['position']
+/** One of the entities Mineflayer tracks, derived for the same reason as above. */
+type MineflayerEntity = NonNullable<Bot['entities'][number]>
 
 /**
  * How close counts as having arrived, for `moveTo`.
@@ -88,6 +90,28 @@ const DIG_REACH = 5
  * the edge of whatever the server might tolerate.
  */
 const PLACE_REACH = 4.5
+
+/**
+ * How close the bot must be to an entity before a swing is believable, and how
+ * close the approach asks to get.
+ *
+ * Vanilla's survival attack range is 3 blocks, and the server rejects an
+ * interaction beyond 6 — so anything past 3 was never a swing a player could
+ * have made, whatever the server would tolerate. The same reasoning as
+ * `DIG_REACH`: the bot stands where a player could have struck from.
+ *
+ * The follow range is one block tighter than the reach, so arriving at the
+ * goal leaves margin for a mob that is still moving when the swing goes out.
+ *
+ * NOTE the reach check is what makes ruling R9's `unreachable` honest, and it
+ * is not redundant with the pathfinder: **the server does not check line of
+ * sight for an attack**, only distance. A bot that could stand within 3 blocks
+ * of a mob sealed behind a thin wall would land a swing through it. The
+ * enclosure in `combat.int.test.ts` is three blocks thick for exactly that
+ * reason.
+ */
+const ATTACK_REACH = 3
+const ATTACK_FOLLOW_RANGE = 2
 
 /** Blocks that count as an empty cell for `placeBlock`. Anything else occupies it. */
 const EMPTY_BLOCKS: ReadonlySet<string> = new Set(['air', 'cave_air', 'void_air'])
@@ -1467,8 +1491,87 @@ export class MineflayerExecutor implements BotExecutor {
     )
   }
 
-  async attack(_entityId: number, opts?: ActionOptions): Promise<Result> {
-    return this.runAction(opts, 30_000, async () => fail('internal', 'attack arrives in Phase 5'))
+  /**
+   * Swing once at an entity, then resolve `ok`. Agreed 2026-09-11, Phase 5
+   * spec §7; see the contract's doc comment. `ok` says the swing happened, not
+   * that the entity died — call again to keep attacking.
+   *
+   * The default timeout is **10s, not the 30s the stub carried**. This is what
+   * the reflex layer dispatches as its recovery when a hostile closes
+   * (`ReflexExecutor`, whose own `recoveryTimeoutMs` default is the same 10s),
+   * and a reflex that can run for thirty seconds is not a reflex — it is an
+   * action the planner cannot get out of.
+   *
+   * Fails:
+   * - `not_found` — no entity with that id, at call time or by the time the
+   *   approach finishes. Agreed; it died, despawned, or left the loaded world.
+   * - `unreachable` — the bot cannot get within reach of it. **Ruling R9,
+   *   executor behaviour only**, mirroring `placeBlock`'s agreed row; it is
+   *   deliberately NOT in the contract's doc comment, which is shared surface
+   *   and not yet agreed with Track B.
+   *
+   * `GoalFollow`, not `GoalNear`: the target is a mob with its own AI, so it
+   * moves while the bot walks at it, and a fixed point would be stale before
+   * the bot arrived. This is the case spec §3 asks about.
+   */
+  async attack(entityId: number, opts?: ActionOptions): Promise<Result> {
+    return this.runAction(opts, 10_000, async (bot, signal) => {
+      /** The entity as Mineflayer tracks it now, or null once it is gone. */
+      const live = (): MineflayerEntity | null => {
+        const e = bot.entities[entityId]
+        // Both halves matter: on `entity_destroy` Mineflayer sets `isValid`
+        // false and then deletes the entry, so a caller holding an id can be
+        // looking at either state depending on when it asks.
+        return e === undefined || e.isValid === false ? null : e
+      }
+
+      const target = live()
+      if (!target) return fail('not_found', `no entity ${entityId} is in sight`)
+
+      let approach: Result
+      try {
+        approach = await this.gotoGoal(
+          bot,
+          signal,
+          new goals.GoalFollow(target, ATTACK_FOLLOW_RANGE),
+          () => {
+            const now = live()
+            return now !== null && distanceFrom(bot, now.position) <= ATTACK_REACH
+          },
+        )
+      } finally {
+        // Whatever the outcome, and BEFORE returning. GoalFollow is dynamic:
+        // left set, the pathfinder keeps chasing the mob long after the caller
+        // was told the action had ended — the same failure Task 4 measured
+        // when a failed `placeBlock` approach left its goal in place.
+        try {
+          bot.pathfinder.stop()
+          bot.pathfinder.setGoal(null)
+        } catch {
+          // disconnected mid-approach
+        }
+      }
+      if (!approach.ok) return approach
+      if (signal.aborted) return ok(undefined)
+
+      // Re-read rather than reusing `target`: the approach took time, and the
+      // mob may have died to something else — its own fall, another mob, a
+      // player — while the bot walked at it.
+      const now = live()
+      if (!now) return fail('not_found', `entity ${entityId} was gone before the swing`)
+      const reach = distanceFrom(bot, now.position)
+      if (reach > ATTACK_REACH) {
+        return fail('unreachable', `entity ${entityId} is ${reach.toFixed(1)} blocks away`)
+      }
+
+      // Face it before swinging. Not required by the server, which checks only
+      // distance — which is precisely why it is here: a swing that lands while
+      // the bot faces the other way is not something a player could have done.
+      await bot.lookAt(now.position.offset(0, now.height / 2, 0), true)
+      if (signal.aborted) return ok(undefined)
+      bot.attack(now)
+      return ok(undefined)
+    })
   }
 
   async flee(opts?: ActionOptions): Promise<Result<{ fled: boolean }>> {
