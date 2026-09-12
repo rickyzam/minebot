@@ -1,5 +1,6 @@
 import type { BlockInfo, EntityInfo, ItemStack, Vec3, WorldSnapshot } from '@minebot/contract'
 import { ACTION_MENU, type ActionRequest } from './actions.js'
+import type { Advice } from './advice.js'
 import type { ChatMessage } from './llm.js'
 import type { Step, StepOutcome } from './step.js'
 
@@ -153,6 +154,30 @@ const SYSTEM = [
 ].join('\n')
 
 /**
+ * What the loop knows and the model cannot see, as a notices block.
+ *
+ * Conditional on purpose. Rendering "Steps remaining: 14" every turn is noise
+ * the model has to read past on every one of sixteen prompts.
+ *
+ * States facts and gives no instruction. Spec §5: if the bare fact measurably
+ * does nothing, guidance is added then, with the measurement as its
+ * justification. Instructing first would bake in the early-give_up risk
+ * before knowing whether it exists.
+ */
+export const renderAdvice = (a: Advice): string | null => {
+  const lines: string[] = []
+  if (a.warnRepeat) {
+    lines.push(
+      `- You have already tried this exact action and got the same result ${a.repeatedTimes} times.`,
+    )
+  }
+  if (a.warnBudget) {
+    lines.push(`- Steps remaining: ${a.stepsRemaining}.`)
+  }
+  return lines.length === 0 ? null : ['Notices:', ...lines].join('\n')
+}
+
+/**
  * Built fresh every turn rather than appended to a transcript. Token cost stays
  * flat, and — more importantly — a transcript would carry stale world state the
  * model can anchor on. After the reflex layer has fled a mob, the bot's old
@@ -162,18 +187,27 @@ export const renderPrompt = (
   goal: string,
   snapshot: WorldSnapshot,
   steps: readonly Step[],
+  advice: Advice,
 ): ChatMessage[] => {
   const window = steps.slice(-HISTORY_WINDOW)
   const history =
     window.length === 0
       ? 'Recent actions: (none yet)'
       : ['Recent actions:', ...window.map(renderStep)].join('\n')
+  const notices = renderAdvice(advice)
 
   return [
     { role: 'system', content: SYSTEM },
     {
       role: 'user',
-      content: [`Goal: ${goal}`, '', renderSnapshot(snapshot), '', history].join('\n'),
+      content: [
+        `Goal: ${goal}`,
+        '',
+        renderSnapshot(snapshot),
+        '',
+        ...(notices === null ? [] : [notices, '']),
+        history,
+      ].join('\n'),
     },
   ]
 }

@@ -1,5 +1,5 @@
 import type { BotExecutor, WorldSnapshot } from '@minebot/contract'
-import { repeatCounts } from './advice.js'
+import { advise, repeatCounts } from './advice.js'
 import type { DecideResult, Decider } from './decide.js'
 import { dispatch } from './dispatch.js'
 import { isAbortError } from './llm.js'
@@ -91,7 +91,11 @@ export async function runGoal(goal: string, opts: RunGoalOptions): Promise<GoalO
     try {
       let decided: DecideResult
       try {
-        decided = await decider.decide(renderPrompt(goal, snapshot, steps), controller.signal)
+        const advice = advise(steps, { stepsTaken: steps.length, maxSteps, stuckThreshold })
+        decided = await decider.decide(
+          renderPrompt(goal, snapshot, steps, advice),
+          controller.signal,
+        )
       } catch (e) {
         return isAbortError(e)
           ? { status: 'interrupted', detail: 'the model call was aborted', steps }

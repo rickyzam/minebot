@@ -18,7 +18,9 @@ import { fileURLToPath } from 'node:url'
 import type { ItemStack, Vec3, WorldSnapshot } from '@minebot/contract'
 import { ok, fail } from '@minebot/contract'
 import { ACTION_SCHEMA, type ActionName } from './actions.js'
+import { advise } from './advice.js'
 import { decode } from './decide.js'
+import { DEFAULT_MAX_STEPS, DEFAULT_STUCK_THRESHOLD } from './loop.js'
 import { OllamaClient } from './ollama.js'
 import { renderPrompt } from './prompt.js'
 import type { Step } from './step.js'
@@ -213,10 +215,16 @@ async function runReplicate(attempts: number): Promise<ReplicateResult[]> {
   const results: ReplicateResult[] = []
 
   for (const scenario of SCENARIOS) {
+    const advice = advise(scenario.history, {
+      stepsTaken: scenario.history.length,
+      maxSteps: DEFAULT_MAX_STEPS,
+      stuckThreshold: DEFAULT_STUCK_THRESHOLD,
+    })
     const messages = renderPrompt(
       scenario.goal,
       snapshot(scenario.inventory, scenario.position),
       scenario.history,
+      advice,
     )
     const chose: Record<string, number> = {}
     const latencies: number[] = []

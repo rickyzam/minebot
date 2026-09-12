@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import type { WorldSnapshot } from '@minebot/contract'
 import { ok, fail } from '@minebot/contract'
-import { renderAction, renderOutcome, renderPrompt, HISTORY_WINDOW } from '../src/prompt.js'
+import { renderAction, renderAdvice, renderOutcome, renderPrompt, HISTORY_WINDOW } from '../src/prompt.js'
+import type { Advice } from '../src/advice.js'
 import type { Step } from '../src/step.js'
 
 const snapshot: WorldSnapshot = {
@@ -18,6 +19,13 @@ const snapshot: WorldSnapshot = {
   nearbyEntities: [
     { id: 7, name: 'zombie', kind: 'hostile', position: { x: 14, y: 64, z: -28 }, distance: 2.83 },
   ],
+}
+
+const quiet: Advice = {
+  repeatedTimes: 0,
+  stepsRemaining: 16,
+  warnRepeat: false,
+  warnBudget: false,
 }
 
 const step = (n: number, over: Partial<Step> = {}): Step => ({
@@ -77,7 +85,7 @@ describe('renderOutcome', () => {
 
 describe('renderPrompt', () => {
   it('states the goal and the current state', () => {
-    const text = renderPrompt('get me some coal', snapshot, []).map((m) => m.content).join('\n')
+    const text = renderPrompt('get me some coal', snapshot, [], quiet).map((m) => m.content).join('\n')
     expect(text).toContain('get me some coal')
     expect(text).toContain('(12, 64, -30)')
     expect(text).toContain('20/20')
@@ -87,14 +95,14 @@ describe('renderPrompt', () => {
   })
 
   it('offers the action menu in the system message', () => {
-    const [system] = renderPrompt('goal', snapshot, [])
+    const [system] = renderPrompt('goal', snapshot, [], quiet)
     expect(system?.role).toBe('system')
     expect(system?.content).toContain('find_blocks')
     expect(system?.content).toContain('mine_block_at')
   })
 
   it('says so explicitly when there is no history yet', () => {
-    const text = renderPrompt('goal', snapshot, []).map((m) => m.content).join('\n')
+    const text = renderPrompt('goal', snapshot, [], quiet).map((m) => m.content).join('\n')
     expect(text).toContain('(none yet)')
   })
 
@@ -112,7 +120,7 @@ describe('renderPrompt', () => {
         outcome: { kind: 'result', result: fail('missing_tool', 'no pickaxe in inventory') },
       }),
     ]
-    const text = renderPrompt('goal', snapshot, steps).map((m) => m.content).join('\n')
+    const text = renderPrompt('goal', snapshot, steps, quiet).map((m) => m.content).join('\n')
     expect(text).toContain('1. find_blocks(coal_ore within 32) -> 1 found')
     expect(text).toContain('2. mine_block_at(18, 60, -34) -> FAILED (missing_tool): no pickaxe in inventory')
   })
@@ -124,7 +132,7 @@ describe('renderPrompt', () => {
         decodeError: { kind: 'not_json', detail: 'could not parse JSON from: hmm' },
         outcome: { kind: 'undecodable' },
       }),
-    ]).map((m) => m.content).join('\n')
+    ], quiet).map((m) => m.content).join('\n')
     expect(text).toContain('invalid reply')
     expect(text).toContain('not_json')
   })
@@ -132,10 +140,56 @@ describe('renderPrompt', () => {
   // Prompt size must stay flat however long a goal runs (design §7.1).
   it('renders at most HISTORY_WINDOW entries even when handed more', () => {
     const many = Array.from({ length: HISTORY_WINDOW + 5 }, (_, i) => step(i + 1))
-    const text = renderPrompt('goal', snapshot, many).map((m) => m.content).join('\n')
+    const text = renderPrompt('goal', snapshot, many, quiet).map((m) => m.content).join('\n')
     expect(text).not.toContain(`\n  1. `)
     expect(text).toContain(`${HISTORY_WINDOW + 5}. `)
     const rendered = text.split('\n').filter((l) => /^ {2}\d+\. /.test(l))
     expect(rendered).toHaveLength(HISTORY_WINDOW)
+  })
+})
+
+describe('renderAdvice', () => {
+  it('renders nothing when there is nothing to say', () => {
+    expect(renderAdvice(quiet)).toBeNull()
+  })
+
+  it('states the repeat count, so the claim is checkable rather than vague', () => {
+    const out = renderAdvice({ ...quiet, repeatedTimes: 2, warnRepeat: true })
+    expect(out).toContain('2 times')
+  })
+
+  it('states the remaining budget as a fact and gives no instruction', () => {
+    const out = renderAdvice({ ...quiet, stepsRemaining: 2, warnBudget: true })!
+    expect(out).toContain('2')
+    // Minimal intervention (spec §5): if the bare fact measurably does nothing,
+    // guidance is added THEN, with the measurement as its justification.
+    // Instructing first would bake in the early-give_up risk of spec §4.3.
+    expect(out.toLowerCase()).not.toContain('give up')
+    expect(out.toLowerCase()).not.toContain('wrap up')
+  })
+
+  it('renders both notices together', () => {
+    const out = renderAdvice({
+      repeatedTimes: 3,
+      stepsRemaining: 1,
+      warnRepeat: true,
+      warnBudget: true,
+    })!
+    expect(out).toContain('3 times')
+    expect(out).toContain('1')
+  })
+})
+
+describe('renderPrompt with advice', () => {
+  it('omits the notices block entirely when there is nothing to say', () => {
+    const [, user] = renderPrompt('get coal', snapshot, [], quiet)
+    expect(user!.content).not.toContain('Notices')
+  })
+
+  it('puts the notices in the user message, not the system rules', () => {
+    const advice = { ...quiet, repeatedTimes: 2, warnRepeat: true }
+    const [system, user] = renderPrompt('get coal', snapshot, [], advice)
+    expect(user!.content).toContain('Notices')
+    expect(system!.content).not.toContain('Notices')
   })
 })

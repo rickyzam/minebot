@@ -16,6 +16,7 @@ export type { DecodeError, DecodeResult, DecideResult, Decider } from './decide.
 export {
   HISTORY_WINDOW,
   renderAction,
+  renderAdvice,
   renderOutcome,
   renderPrompt,
   renderSnapshot,
