@@ -883,6 +883,35 @@ export class MineflayerExecutor implements BotExecutor {
   }
 
   /**
+   * Stop the pathfinder and drop whatever goal it holds.
+   *
+   * Called wherever an action that set a goal finishes, however it finishes. A
+   * goal left set outlives the call that set it, and `GoalFollow` — which both
+   * `followPlayer` and `attack` use — is dynamic, so the bot keeps walking at
+   * a target that has moved on long after the caller was told the action had
+   * ended. Task 4 measured that failure for `placeBlock`.
+   *
+   * Swallowing the error is the point rather than a shortcut: the only way
+   * these throw is a bot that has already disconnected, and every caller is on
+   * a path where that is a normal outcome — the action is ending regardless,
+   * and there is no pathfinder left to stop.
+   *
+   * `placeBlock` deliberately does NOT use this. Its cleanup is a superset —
+   * it also restores the shared movements, and the goal must be cleared BEFORE
+   * that restore, because `setMovements` resets the path and would re-arm
+   * re-planning against a goal still in place. That ordering was Task 4's fix
+   * and factoring it away would regress it.
+   */
+  private clearPathfinderGoal(bot: Bot): void {
+    try {
+      bot.pathfinder.stop()
+      bot.pathfinder.setGoal(null)
+    } catch {
+      // Disconnected mid-action.
+    }
+  }
+
+  /**
    * Run a pathfinder goal under an AbortSignal, mapping the plugin's outcomes
    * onto the contract's failure reasons.
    *
@@ -899,14 +928,7 @@ export class MineflayerExecutor implements BotExecutor {
     goal: PathfinderGoal,
     reached: () => boolean,
   ): Promise<Result> {
-    const onAbort = (): void => {
-      try {
-        bot.pathfinder.stop()
-        bot.pathfinder.setGoal(null)
-      } catch {
-        // disconnected mid-path
-      }
-    }
+    const onAbort = (): void => this.clearPathfinderGoal(bot)
     signal.addEventListener('abort', onAbort, { once: true })
     try {
       await bot.pathfinder.goto(goal)
@@ -1023,12 +1045,7 @@ export class MineflayerExecutor implements BotExecutor {
           detach()
           // Clear the goal whatever ended the call. Left set, the bot would keep
           // walking after the caller was told the action had ended.
-          try {
-            bot.pathfinder.stop()
-            bot.pathfinder.setGoal(null)
-          } catch {
-            // disconnected mid-follow
-          }
+          this.clearPathfinderGoal(bot)
         }
       },
       () => ok(undefined),
@@ -1540,16 +1557,8 @@ export class MineflayerExecutor implements BotExecutor {
           },
         )
       } finally {
-        // Whatever the outcome, and BEFORE returning. GoalFollow is dynamic:
-        // left set, the pathfinder keeps chasing the mob long after the caller
-        // was told the action had ended — the same failure Task 4 measured
-        // when a failed `placeBlock` approach left its goal in place.
-        try {
-          bot.pathfinder.stop()
-          bot.pathfinder.setGoal(null)
-        } catch {
-          // disconnected mid-approach
-        }
+        // Whatever the outcome, and BEFORE returning — see clearPathfinderGoal.
+        this.clearPathfinderGoal(bot)
       }
       if (!approach.ok) return approach
       if (signal.aborted) return ok(undefined)

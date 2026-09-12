@@ -79,6 +79,54 @@ type Pos = { x: number; y: number; z: number }
 const dist = (a: Pos, b: Pos): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+/**
+ * Sweep the arena until the SERVER itself says nothing is left in it.
+ *
+ * Cleanup that fires commands and never reads the answer is precisely the
+ * fixture that can no-op without shouting, which this repo rates as worse than
+ * no fixture at all — and it is guarding shared world state that outlives the
+ * run. `sendConsoleCommand` throws only when tmux is unreachable, so a command
+ * the server rejected, or a drop that landed a moment too late, would leak in
+ * silence. Reading the kill back turns that into a loud failure.
+ *
+ * Loops rather than trusting one delay: a killed mob's loot spawns AFTER the
+ * kill that produced it (measured — see the `afterEach`), so the pass that
+ * removes the mob cannot also remove its flesh, and how long the drop takes to
+ * appear is not something a fixed sleep should be asked to guarantee.
+ */
+async function sweepArenaUntilEmpty(attempts = 4): Promise<void> {
+  let last = ''
+  for (let i = 0; i < attempts; i++) {
+    sendConsoleCommand(`kill @e[type=item,${ARENA_VOLUME}]`)
+    // An empty selector answers "No entity was found"; a non-empty one answers
+    // "Killed …". Either is a valid reply — only the former ends the sweep.
+    const m = await queryConsole(
+      `kill @e[type=!player,${ARENA_VOLUME}]`,
+      /No entity was found|Killed /,
+    )
+    last = m[0] ?? ''
+    if (last.includes('No entity was found')) return
+    await sleep(500)
+  }
+  expect(last, `the arena still held entities after ${attempts} sweeps`).toContain(
+    'No entity was found',
+  )
+}
+
+/**
+ * Read the difficulty back. It is the one piece of global, world-wide state
+ * this file changes, so "the restore command was sent" is not good enough —
+ * a restore that silently failed would leave the shared dev server on a combat
+ * difficulty for everyone.
+ */
+async function expectDifficultyPeaceful(): Promise<void> {
+  const m = await queryConsole('difficulty', /The difficulty is (\w+)/)
+  expect(
+    m[1],
+    'the difficulty was NOT restored — the shared server is left on a combat difficulty',
+  ).toBe('Peaceful')
+}
+
 describe('MineflayerExecutor.attack', () => {
   let attacker: MineflayerExecutor | null = null
   let watcher: MineflayerExecutor | null = null
@@ -120,7 +168,10 @@ describe('MineflayerExecutor.attack', () => {
       // of a run left its drop in the world. A drop is an entity, so `/fill`
       // would not have removed it either.
       await sleep(500)
-      sendConsoleCommand(`kill @e[type=item,${ARENA_VOLUME}]`)
+      // Both of these read the SERVER back rather than firing and hoping, so a
+      // cleanup that did not take fails the run instead of leaking quietly.
+      await sweepArenaUntilEmpty()
+      await expectDifficultyPeaceful()
     }
   })
 
@@ -161,14 +212,22 @@ describe('MineflayerExecutor.attack', () => {
    * The mob's hit points **as the server records them**, or null when it is
    * gone.
    *
-   * This has to come from the server. MEASURED 2026-09-12 by reading
-   * mineflayer 4.x: no plugin reads another entity's `health` metadata key —
-   * `entity.health` is set for the bot itself and for boss bars only — so
-   * `nearbyEntities[].health` is `undefined` for a mob on EVERY connection, and
-   * a second bot cannot witness that a mob lost hit points. The console is the
-   * server's own record, which is strictly stronger evidence than any client's
-   * view; the second connection below still provides independent confirmation
-   * that the mob is present and where the fight said it was.
+   * This has to come from the server. MEASURED 2026-09-12 against mineflayer
+   * 4.39.0: `entity.health` is assigned in exactly two places — the bot itself
+   * (`plugins/health.js:25`) and boss bars (`plugins/boss_bar.js:33`) — so
+   * `nearbyEntities[].health` is `undefined` for a mob on EVERY connection.
+   *
+   * That is a statement about what mineflayer *reports*, not about what
+   * arrives: the health metadata does reach the client and persists in
+   * `entity.metadata` (`entities.js:456-457`), keyed by metadata index. What is
+   * missing is any code surfacing it as `entity.health`, and the executor does
+   * not expose raw metadata.
+   *
+   * Either way no connection can witness that a mob lost hit points. The
+   * console is the server's own record, which is strictly stronger evidence
+   * than any client's view; the second connection below still provides
+   * independent confirmation that the mob is present and where the fight said
+   * it was.
    */
   async function serverMobHealth(): Promise<number | null> {
     const m = await queryConsole(
@@ -347,6 +406,22 @@ describe('MineflayerExecutor.attack', () => {
     const started = Date.now()
     const r = await e.attack(zombie.id, { timeoutMs: 10_000 })
     expectReason(r, 'unreachable')
+    // WHICH `unreachable` — three paths produce that one reason, and only the
+    // detail tells them apart:
+    //   'no path to the target'                     gotoGoal, A* reported NoPath
+    //   'the pathfinder stopped short of the goal'  gotoGoal, goto() resolved on
+    //                                               a zero-length path
+    //   'entity N is X blocks away'                 attack's own reach check
+    //
+    // MEASURED 2026-09-12: this is the FIRST — A* genuinely finds no path, in
+    // ~2.0s. Asserting the reason alone would not notice it changing.
+    //
+    // That distinction is worth a test because the failure mode is silent and
+    // bad: `searchRadius: 128` is what buys the honest NoPath here. Left
+    // unbounded (-1), an unreachable target instead burns the whole 5s
+    // thinkTimeout and reports `timeout` (CLAUDE.md), which tells the planner
+    // "retry" about a mob sealed inside three blocks of stone.
+    if (!r.ok) expect(r.detail).toBe('no path to the target')
     expect(Date.now() - started).toBeLessThan(10_000)
 
     // The mob is untouched — the swing must not have landed through three

@@ -33,15 +33,25 @@ export function sendConsoleCommand(command: string): void {
  * `pattern`.
  *
  * Some facts can only be had from the server itself. Mob health is one:
- * MEASURED 2026-09-12 by reading mineflayer 4.x, `entity.health` is populated
- * for the bot (`plugins/health.js`) and for boss bars, and **nowhere else** —
- * no plugin reads the `health` metadata key of another entity, so
- * `WorldSnapshot.nearbyEntities[].health` is always `undefined` for a mob, on
- * every connection. A second bot therefore cannot witness that a mob lost hit
- * points. The console can (`data get entity … Health`), and it is the server's
- * own record rather than any client's view of it — strictly stronger evidence
- * than a second connection, which is what the "never trust the acting bot's
- * world model" rule is actually asking for.
+ * MEASURED 2026-09-12 against mineflayer 4.39.0, `entity.health` is assigned in
+ * exactly two places — `plugins/health.js:25` (the bot itself) and
+ * `plugins/boss_bar.js:33` — so `WorldSnapshot.nearbyEntities[].health` is
+ * always `undefined` for a mob, on every connection.
+ *
+ * Note precisely what that does and does not say. The value DOES reach the
+ * client: `entities.js:456-457` stores every `entity_metadata` packet as
+ * `entity.metadata`, keyed by metadata index (`parseMetadata`, :936-943), and
+ * health is a standard `LivingEntity` metadata field. What mineflayer omits is
+ * surfacing it as `entity.health`; the raw value survives only in
+ * `entity.metadata`, which this executor does not expose. So the accurate
+ * claim is "no connection *reports* a mob's health", not "the data never
+ * arrives".
+ *
+ * Either way a second bot cannot witness that a mob lost hit points. The
+ * console can (`data get entity … Health`), and it is the server's own record
+ * rather than any client's view of it — strictly stronger evidence than a
+ * second connection, which is what the "never trust the acting bot's world
+ * model" rule is actually asking for.
  *
  * Correlating the reply with the command is the whole difficulty, because the
  * pane holds every earlier reply too — and a before/after health check sends
