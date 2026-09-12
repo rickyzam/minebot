@@ -1,4 +1,5 @@
 import type { BotExecutor, WorldSnapshot } from '@minebot/contract'
+import { repeatCounts } from './advice.js'
 import type { DecideResult, Decider } from './decide.js'
 import { dispatch } from './dispatch.js'
 import { isAbortError } from './llm.js'
@@ -21,25 +22,6 @@ export interface RunGoalOptions {
 
 const describeError = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
-/** Collapses an outcome to what "the same thing happened again" means. */
-const outcomeSignature = (o: StepOutcome): string => {
-  switch (o.kind) {
-    case 'blocks':
-      return `blocks:${o.blocks.length}`
-    case 'result':
-      return o.result.ok ? 'result:ok' : `result:${o.result.reason}`
-    case 'undecodable':
-      return 'undecodable'
-    case 'done':
-      return 'done'
-    case 'gave_up':
-      return 'gave_up'
-  }
-}
-
-const signatureOf = (s: Step): string | null =>
-  s.action === null ? null : `${JSON.stringify(s.action)}|${outcomeSignature(s.outcome)}`
-
 /**
  * Has the run stopped making progress?
  *
@@ -61,16 +43,14 @@ const signatureOf = (s: Step): string | null =>
  */
 const isStuck = (steps: readonly Step[], threshold: number): boolean => {
   if (threshold < 1 || steps.length < threshold) return false
-  const counts = new Map<string, number>()
-  for (const s of steps.slice(-threshold * 2)) {
-    const signature = signatureOf(s)
-    if (signature === null) continue
-    const seen = (counts.get(signature) ?? 0) + 1
-    if (seen >= threshold) return true
-    counts.set(signature, seen)
+  for (const count of repeatCounts(steps, threshold * 2).values()) {
+    if (count >= threshold) return true
   }
   return false
 }
+
+/** Exported for `advice.test.ts`, which asserts the guard and the notice agree. */
+export const isStuckForTest = isStuck
 
 /**
  * Observe, decide, dispatch, record — until the model says done or give_up, or
