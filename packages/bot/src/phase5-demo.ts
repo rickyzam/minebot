@@ -35,6 +35,7 @@
  * copy; the reasoning behind each command lives there.
  */
 import { execFileSync } from 'node:child_process'
+import type { WorldSnapshot } from '@minebot/contract'
 import {
   DEFAULT_REFLEX_THRESHOLDS,
   MineflayerExecutor,
@@ -164,6 +165,67 @@ async function queryConsole(
 }
 
 /**
+ * Asserts, from the SERVER's own answer, that `block` is at `position`.
+ *
+ * `execute if block` replies "Test passed" or "Test failed", so this turns a
+ * fixture command that quietly did nothing into a loud failure. It has to
+ * exist: `/fill` silently refuses a chunk that is not loaded — it answers
+ * "That position is not loaded" rather than failing — and `mc()` throws only
+ * when tmux is unreachable, so nothing else in this file would notice.
+ *
+ * Without it the demo misattributes its own broken fixture. A floor fill that
+ * never landed drops the bot ~130 blocks and trips the death guard ("the bot
+ * DIED during the run"); an ore that never landed ends the goal in two steps
+ * and trips "the run ended before a zombie was ever summoned… the demo's own
+ * timing at fault". Both would point at the wrong thing.
+ */
+async function expectBlockAt(
+  position: Pos,
+  block: string,
+  what: string,
+): Promise<void> {
+  const m = await queryConsole(
+    `execute if block ${position.x} ${position.y} ${position.z} ${block}`,
+    /Test passed|Test failed/,
+  )
+  if (!m[0]?.includes('Test passed')) {
+    throw new Error(
+      `fixture check failed: ${what} — the server reports no ${block} at (${position.x}, ` +
+        `${position.y}, ${position.z}). The command that should have built it silently did ` +
+        `nothing (an unloaded chunk answers "That position is not loaded"), so the run would ` +
+        `have measured a broken fixture rather than the reflex layer.`,
+    )
+  }
+}
+
+/**
+ * Polls until the bot reports standing on solid ground at the arena's height.
+ *
+ * `onGround` alone is not enough: a bot falling through a missing floor lands
+ * on real terrain ~130 blocks below, which satisfies it at the wrong place.
+ */
+async function waitForFooting(
+  reflex: { getState: () => WorldSnapshot },
+  expectedY: number,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const self = reflex.getState().self
+    if (self.onGround && Math.abs(self.position.y - expectedY) <= 1) return
+    if (Date.now() >= deadline) {
+      const p = self.position
+      throw new Error(
+        `the bot never settled onto the arena floor at y≈${expectedY} within ${timeoutMs}ms ` +
+          `(last at (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}), ` +
+          `onGround=${self.onGround})`,
+      )
+    }
+    await sleep(150)
+  }
+}
+
+/**
  * Builds the arena **enclosed** — floor, four walls and a glowstone ceiling.
  * Both halves are measured requirements (Phase 5 spec §4.1-4.2): under open sky
  * a named, `PersistenceRequired` zombie on the y=199 platform burned to death
@@ -192,6 +254,14 @@ async function buildEnclosedArena(): Promise<void> {
   // and a coal left by an earlier run would be collected by this one.
   mc(`kill @e[type=item,${ARENA_VOLUME}]`)
   await sleep(700)
+
+  // Read the fixture back before anything is measured against it.
+  await expectBlockAt({ x: START.x, y: FLOOR, z: START.z }, 'stone', 'the arena floor')
+  await expectBlockAt(
+    { x: ARENA.x0, y: FLOOR + CLEARANCE, z: START.z },
+    'glowstone',
+    'the glowstone ceiling (without it a zombie burns to death in 21s)',
+  )
 }
 
 /**
@@ -224,6 +294,18 @@ async function restoreWorld(): Promise<string[]> {
     if (!last.includes('No entity was found')) {
       problems.push(`the arena still held entities after 4 sweeps (last reply: ${last})`)
     }
+    // Release the chunks this run pinned. `forceload add` is how the arena's
+    // fills are guaranteed to land, but leaving the region resident afterwards
+    // is a standing cost on a shared server, and the arena is rebuilt from
+    // scratch every run anyway. Read back like everything else here.
+    const f = await queryConsole(
+      `forceload remove ${ARENA.x0} ${ARENA.z0} ${ARENA.x1} ${ARENA.z1}`,
+      /Unmarked \d+ chunk|No chunks were marked/,
+    )
+    if (f[0] === undefined) {
+      problems.push('the forceload could not be confirmed removed')
+    }
+
     const d = await queryConsole('difficulty', /The difficulty is (\w+)/)
     if (d[1] !== 'Peaceful') {
       problems.push(
@@ -285,6 +367,12 @@ async function main(): Promise<number> {
     mc(`setblock ${ORE.x} ${ORE.y} ${ORE.z} coal_ore`)
     await sleep(1_200)
 
+    // The bot is where the fixture says, on the floor the fixture built, and
+    // the ore it is being sent after actually exists. Each is read back from
+    // the world rather than assumed from a command having been sent.
+    await waitForFooting(reflex, START.y)
+    await expectBlockAt(ORE, 'coal_ore', 'the coal ore the goal is about')
+
     // Hostiles are removed instantly on Peaceful, so nothing combat-related can
     // run without this. Standing permission, Phase 5 spec §4.1 — and it is put
     // back in the `finally` below, verified against the server.
@@ -333,13 +421,23 @@ async function main(): Promise<number> {
     const llm = new OllamaClient()
     console.log(`\nasking ${llm.model} for decisions…\n`)
 
-    const outcome = await runBotGoal('get me some coal', {
-      executor: reflex,
-      decider: new SchemaDecider(llm),
-      maxSteps: MAX_STEPS,
-      signal: AbortSignal.timeout(RUN_BUDGET_MS),
-    })
-    goalRunning = false
+    let outcome
+    try {
+      outcome = await runBotGoal('get me some coal', {
+        executor: reflex,
+        decider: new SchemaDecider(llm),
+        maxSteps: MAX_STEPS,
+        signal: AbortSignal.timeout(RUN_BUDGET_MS),
+      })
+    } finally {
+      // In a `finally`, not after the await: if the goal THROWS, a watcher left
+      // running would keep polling and could summon a zombie during
+      // `restoreWorld` — the one path where this demo could put a mob into the
+      // shared world after having declared it clean. The watcher re-reads this
+      // flag with no await between the check and the summon, so clearing it
+      // synchronously here is enough to stop it.
+      goalRunning = false
+    }
     const summonResult = await summon
 
     console.log('\nStep log:')
