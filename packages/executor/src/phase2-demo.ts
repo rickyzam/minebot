@@ -4,7 +4,7 @@
  * than depending on terrain that may not contain surface coal.
  */
 import { execFileSync } from 'node:child_process'
-import { MineflayerExecutor } from './index.js'
+import {MineflayerExecutor, requireBackend } from './index.js'
 
 const USERNAME = 'Phase2Demo'
 const FLOOR = 199
@@ -18,6 +18,7 @@ const mc = (command: string): void => {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 async function main(): Promise<number> {
+  await requireBackend()
   const executor = new MineflayerExecutor({ username: USERNAME })
   try {
     console.log('connecting…')

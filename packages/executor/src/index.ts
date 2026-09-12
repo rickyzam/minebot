@@ -51,4 +51,6 @@ export type { ReflexThresholds, ReflexTrigger } from './reflex.js'
 export { ReflexExecutor } from './reflex-executor.js'
 export type { ReflexPreemption, ReflexExecutorOptions } from './reflex-executor.js'
 export { parseSchematic, placementOrder } from './schematic.js'
+
+export { requireBackend } from './require-backend.js'
 export type { Schematic, SchematicBlock } from './schematic.js'

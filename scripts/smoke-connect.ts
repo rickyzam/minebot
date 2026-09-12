@@ -8,6 +8,15 @@ import {
   type LoginClientLike,
 } from '../packages/executor/src/velocity-handshake.js'
 import { resolveForwardingSecret } from '../packages/executor/src/forwarding-secret.js'
+import { requireBackend } from '../packages/executor/src/require-backend.js'
+
+// Checked before the bot is built, so "the server is not running" is reported as
+// itself rather than as a login failure. This is the one script whose entire job
+// is to separate "my code is broken" from "the server is unreachable", so it
+// must not confuse the two in its own first step. What follows — the Fabric
+// registry sync and the Velocity forwarding handshake — is the part a bare port
+// check cannot prove.
+await requireBackend()
 
 const bot = mineflayer.createBot({
   host: 'localhost',

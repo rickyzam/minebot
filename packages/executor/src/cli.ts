@@ -19,7 +19,7 @@
  * established pattern in this package and this follows it.
  */
 import { execFileSync } from 'node:child_process'
-import { MineflayerExecutor } from './index.js'
+import { MineflayerExecutor, requireBackend } from './index.js'
 
 const USERNAME = 'MineBot'
 const FLOOR = 199
@@ -73,6 +73,9 @@ async function waitForFooting(
 }
 
 const main = async (): Promise<void> => {
+  // Names the fix when the backend is down — it is deliberately not autostarted,
+  // so that is the normal state after a reboot.
+  await requireBackend()
   const executor = new MineflayerExecutor({ username: USERNAME })
 
   console.log('connecting to localhost:25566 …')

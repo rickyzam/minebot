@@ -41,6 +41,7 @@ import {
   MineflayerExecutor,
   ReflexExecutor,
   type ReflexPreemption,
+  requireBackend,
 } from '@minebot/executor'
 import { OllamaClient, SchemaDecider, renderStep } from '@minebot/agent'
 import { runBotGoal } from './session.js'
@@ -399,6 +400,7 @@ function describePreemption(p: ReflexPreemption, i: number): string {
 }
 
 async function main(): Promise<number> {
+  await requireBackend()
   const inner = new MineflayerExecutor({ username: USERNAME })
   const reflex = new ReflexExecutor(inner, {
     // Printed as it happens, so the console shows the reflex reacting live
