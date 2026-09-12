@@ -2,7 +2,9 @@
 
 A tool-calling LLM agent that plays Minecraft as a bot — a "smarter NPC" that can navigate, mine, build from blueprints, fight or flee, and talk to players, all through one shared local model rather than a specialised model per behaviour.
 
-**Status: Phase 4 Track A complete — the bot finds coal it cannot see.** It connects, reports immutable world state, paths around obstacles, mines with the right tool, and collects the drop, all under cancellable control. `packages/agent/` turns that state into an LLM decision and back into an action; the two are wired together and run end to end. Perception is limited to line of sight, so the bot no longer sees ore through rock — which is what makes searching necessary and honest. Building and combat are later phases.
+**Status: Phase 5 Track A complete except `flee` — the reflex layer beats the plan, under a live mob.** It connects, reports immutable world state, paths around obstacles, mines with the right tool, collects the drop, follows a player, places blocks, builds a structure from a schematic, and swings at a hostile — all under cancellable control. `packages/agent/` turns that state into an LLM decision and back into an action; the two are wired together and run end to end. Perception is limited to line of sight, so the bot no longer sees ore through rock — which is what makes searching necessary and honest.
+
+The one deliberate gap is **`flee`, which is still a stub**: its distance and timeout are shared-surface decisions that have not been agreed, and guessing at them would be worse than leaving the gap visible. The reflex arbiter already routes a low-health trigger to it, so it will work the day that decision lands.
 
 ## The core idea
 
@@ -14,7 +16,7 @@ minebot skips it. A Minecraft bot library gives structured game telemetry direct
 
 | Layer | Runs | Job |
 |---|---|---|
-| **Reflex / safety** | Constantly, no LLM | Health checks, immediate danger. Always wins; can interrupt the current plan. |
+| **Reflex / safety** | Constantly, no LLM | Health checks, immediate danger. Always wins; can interrupt the current plan. Shipped in Phase 5 as `ReflexExecutor`, a `BotExecutor` decorator — see below. |
 | **LLM planning** | Periodically, or on state change | Picks the next goal or tool call given current state. |
 | **Execution** | Plain code | Carries out whatever was decided, via Mineflayer. |
 
@@ -67,6 +69,26 @@ Three properties are worth knowing:
   opposite answers in different runs, each run internally unanimous. A single
   run's "5/5" describes the run, not the prompt.
 
+### The reflex layer
+
+`ReflexExecutor` wraps any `BotExecutor` and is the layer-1 arbiter. It watches
+the inner executor's events; when a pure rule (`evaluateReflex`) fires, it
+aborts whatever the planner had in flight, runs its own recovery — `attack`, or
+`flee` once that exists — and hands the caller back `interrupted`. The planning
+loop already re-plans on an `interrupted` result that had no outer abort, so
+nothing above this layer needs to know it exists.
+
+Two properties are worth stating, because both were wrong in the first draft:
+triggers are **prioritised, not latched** (a flee supersedes an attack recovery
+already running, while an attack never preempts the planner's own attack), and
+a preempted action returns `interrupted` **even if the inner action resolved
+`ok`** — the recovery moved the bot, so `ok` would let the planner continue from
+a stale snapshot.
+
+`npm run demo:phase5` is the end-to-end proof: a real model pursues a mining
+goal, a zombie is summoned mid-run, and the demo fails unless a preemption
+actually occurred **and** its recovery returned `ok`.
+
 ### The cross-implementation test suite
 
 `runContractSuite` is a behavioural suite that runs against **any** `BotExecutor`. Both the mock and the real Mineflayer-backed executor must pass it, unmodified. That is what makes swapping the mock for the real implementation a verified step rather than a hopeful one — and it is why the mock can be developed against with no Minecraft server at all.
@@ -77,7 +99,7 @@ Three properties are worth knowing:
 
 ```bash
 npm install
-npm test        # 310 unit tests — no network, no Minecraft, no model
+npm test        # 427 unit tests — no network, no Minecraft, no model
 npm run typecheck
 ```
 
@@ -109,12 +131,17 @@ Then:
 
 ```bash
 npm run smoke            # Does a bot connect at all?
-npm run test:integration # 103 tests against the live server
+npm run test:integration # 133 tests against the live server (1 skipped: the `flee` guarantee)
 npm run demo             # Connect, print a snapshot, walk to a coordinate
 npm run demo:phase2      # Path around a wall, mine coal ore, collect the drop
 npm run demo:phase3      # The whole loop: real state, real model, real action
 npm run demo:phase4      # Find coal that is not visible, on real terrain
+npm run demo:phase5      # A zombie interrupts the plan; the reflex layer handles it
 ```
+
+`demo:phase5` briefly raises the server's difficulty to `easy` (nothing hostile
+survives on `peaceful`) and restores it in a `finally`, verifying against the
+server that it went back.
 
 **Biome no longer matters much.** Phase 1's movement was deliberately naive — look at the target, walk forward, jump when blocked — and had no answer to a tree. Phase 2 replaced it with `mineflayer-pathfinder`, which routes around obstacles, so a jungle spawn is now workable rather than a dead stop. Movement is non-destructive by design (`canDig` is off), so terrain the bot cannot climb or walk around still reports `unreachable`.
 
@@ -130,6 +157,7 @@ npm run demo:phase4      # Find coal that is not visible, on real terrain
 | `npm run demo:phase2` | Phase 2 deliverable | Yes |
 | `npm run demo:phase3` | Phase 3 deliverable | Yes — server **and** Ollama |
 | `npm run demo:phase4` | Phase 4 deliverable: find coal it cannot see | Yes — server **and** Ollama |
+| `npm run demo:phase5` | Phase 5 deliverable: the reflex layer preempts the plan under a live mob | Yes — server **and** Ollama |
 | `npm run agent:demo` | Track B deliverable: the loop against a fake model and a mock world | No |
 | `npm run agent:probe` | Ask a real model for one action across seven scenarios, replicated across processes | No (needs Ollama) |
 | `npm run bench:world` | Qualify, place and verify the benchmark world's terrain and ore | Yes |
@@ -147,7 +175,8 @@ npm run demo:phase4      # Find coal that is not visible, on real terrain
 | 4 (Track A) | Search: `exploreFor`, a scored benchmark, and the `explore_for` action | **Done** |
 | 4.5 | [Line-of-sight perception](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — stop `findBlocks` seeing through rock | **Done** |
 | 4 (rest) | Retry and recovery policy, against the step logs the loop now produces | Next |
-| 5 | Full toolbox: building, follow, chat, reflex combat | |
+| 5 (Track A) | Full toolbox: the reflex arbiter, `followPlayer`, `placeBlock`, schematics, `attack` | **Done except `flee`** |
+| 5 (`flee`) | Disengage on low health — gated on an unagreed distance and timeout | Blocked |
 | 6 | Multi-bot scaling against one shared model | |
 | 7 | [Memory and recall](docs/notes/Memory%20and%20Recall.md) — short-term spatial memory, durable landmarks | Roadmap only |
 
@@ -166,6 +195,7 @@ cave-following the next capability rather than a guess.
 - [Phase 1 plan](docs/superpowers/plans/2026-09-07-phase-1-track-a.md) — task breakdown plus verified environment facts
 - [Phase 2 design](docs/superpowers/specs/2026-09-07-phase-2-pathfinding-and-mining-design.md) and [plan](docs/superpowers/plans/2026-09-07-phase-2-track-a.md) — pathfinding and mining, with the measurements that shaped them
 - [Perception: line of sight](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — why `findBlocks` must not see through rock, and the contract change it needs
+- [Phase 5 design](docs/superpowers/specs/2026-09-09-phase-5-full-toolbox-design.md) and [plan](docs/superpowers/plans/2026-09-09-phase-5-track-a.md) — the reflex arbiter, `followPlayer`, `placeBlock`, schematics, and combat
 - [Memory and recall](docs/notes/Memory%20and%20Recall.md) — roadmap design for short-term spatial memory and durable landmarks
 - [Design notes](docs/notes/) — original architecture reasoning, phase plan, feasibility
 
