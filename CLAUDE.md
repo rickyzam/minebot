@@ -118,7 +118,7 @@ Two processes, two tmux sessions:
 
 | | Port | Session | Notes |
 |---|---|---|---|
-| **Velocity proxy** | `0.0.0.0:25565` | `velocity` | `online-mode=true` — real Mojang auth. Where **people** connect |
+| **Velocity proxy** | `0.0.0.0:25565` | `velocity`, on its **own tmux socket** | `online-mode=true` — real Mojang auth. Where **people** connect. **Autostarted at boot** — see below |
 | **Fabric backend** | `127.0.0.1:25566` | `mc` | 1.21.10, offline mode, survival + peaceful. Loopback only, so unreachable from the network |
 
 Players authenticate at the proxy and are forwarded to the backend with their
@@ -135,6 +135,12 @@ and is read via `resolveForwardingSecret()` (env `VELOCITY_FORWARDING_SECRET`
 first, then that file). **Never commit it** — `.gitignore` covers `*.secret`.
 
 - **Do not stop, restart, or reconfigure either without asking.** Someone may be logged in, and both are shared state outside the repo.
+- **The proxy autostarts at boot; the backend deliberately does not.** `~/.config/systemd/user/velocity.service` (enabled, with `loginctl enable-linger zman` so it comes up at boot rather than at login — no root needed for either). The proxy is stateless, holds no world and stores no player data, so restarting it is safe; the backend holds a world that must be flushed with the console `stop`, so starting it stays a deliberate act. After a reboot, **start the backend yourself** before any integration test, demo or bench — `npm run smoke` is the quickest check it is reachable:
+  ```bash
+  tmux new-session -d -s mc
+  tmux send-keys -t mc 'cd ~/minecraft/server/minebot && java -Xms16G -Xmx16G -jar fabric-server-mc.1.21.10-loader.0.19.2-launcher.1.1.1.jar nogui' Enter
+  ```
+- **The proxy runs on a DEDICATED tmux socket, so `tmux ls` does not list it.** Reach it with `tmux -L velocity attach -t velocity` or `tmux -L velocity send-keys -t velocity '<command>' Enter`; manage it with `systemctl --user {status,restart,stop} velocity`. The isolation is deliberate: on a shared socket the tmux server would sit inside the unit's cgroup, so `systemctl --user stop velocity` could take the **backend** down with it — an unclean kill of a live world, which the rule below forbids. VERIFIED 2026-09-12: stopping the unit logged the proxy's own graceful *"Shutting down the proxy…"* and left the `mc` session on the same PID.
 - Drive its console with `tmux send-keys -t mc '<command>' Enter`. This is how integration tests build reproducible scenarios.
 - Use `stop` for shutdown, never `kill` — the world needs to flush.
 - Mods are supported. A mod that registers content makes the server reject a *plain* Mineflayer client, but the executor completes Fabric's registry-sync handshake, so it connects anyway — see [`fabric-registry.ts`](packages/executor/src/fabric-registry.ts). Currently loaded: `fabric-api`, `nitwitmap` (adds an item), `fabrictailor` (skins, server-side only).
