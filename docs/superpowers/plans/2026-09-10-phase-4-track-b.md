@@ -468,20 +468,20 @@ describe('renderAdvice', () => {
 
 describe('renderPrompt with advice', () => {
   it('omits the notices block entirely when there is nothing to say', () => {
-    const [, user] = renderPrompt('get coal', SNAPSHOT, [], quiet)
+    const [, user] = renderPrompt('get coal', snapshot, [], quiet)
     expect(user!.content).not.toContain('Notices')
   })
 
   it('puts the notices in the user message, not the system rules', () => {
     const advice = { ...quiet, repeatedTimes: 2, warnRepeat: true }
-    const [system, user] = renderPrompt('get coal', SNAPSHOT, [], advice)
+    const [system, user] = renderPrompt('get coal', snapshot, [], advice)
     expect(user!.content).toContain('Notices')
     expect(system!.content).not.toContain('Notices')
   })
 })
 ```
 
-`SNAPSHOT` already exists in that file; reuse it rather than defining another.
+`snapshot` already exists in `prompt.test.ts` (line 7) — reuse it rather than defining another. Note it is lowercase.
 
 - [ ] **Step 2: Run to verify they fail**
 
