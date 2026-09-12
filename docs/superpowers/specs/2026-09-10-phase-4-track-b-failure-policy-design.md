@@ -285,3 +285,95 @@ the measurement of the prompt fix it replaces.
    ones.
 4. **Two turns may still be too few to recover from a repeat.** The probe
    measures one decision, not a run; only §7's live validation would show it.
+
+## 11. Baseline — measured 2026-09-12
+
+**Task 0, the measurement gate.** Recorded before any prompt or code change in
+this phase. Supersedes the Phase 4A numbers, which were taken with the old
+single-process probe and are not comparable to anything measured after it
+started replicating.
+
+Command run:
+
+```bash
+OLLAMA_HOST=http://100.96.8.28:11434 npm run agent:probe -- 6 5
+```
+
+Model reachability was confirmed first with `curl -s -m 5
+http://100.96.8.28:11434/api/version`, returning `{"version":"0.33.3"}`.
+
+Full probe output, verbatim:
+
+```
+Probing http://100.96.8.28:11434 with qwen3:14b
+6 replicates x 5 attempts, each replicate a FRESH PROCESS
+
+  replicate 1/6 done
+  replicate 2/6 done
+  replicate 3/6 done
+  replicate 4/6 done
+  replicate 5/6 done
+  replicate 6/6 done
+
+  no history
+     hoped for: find_blocks
+     chose:     find_blocks in 6/6 replicates
+     30/30 decoded
+
+  after a search
+     hoped for: mine_block_at
+     chose:     mine_block_at in 6/6 replicates
+     30/30 decoded
+
+  find_blocks found nothing
+     hoped for: explore_for
+     chose:     explore_for in 6/6 replicates
+     30/30 decoded
+
+  after missing_tool, inventory empty
+     hoped for: give_up
+     chose:     give_up in 6/6 replicates
+     30/30 decoded
+
+  mined but the drop was lost
+     hoped for: move_to
+     chose:     move_to in 6/6 replicates
+     30/30 decoded
+
+  mine_block_at already returned not_found
+     hoped for: explore_for or give_up
+     chose:     give_up in 6/6 replicates
+     30/30 decoded
+
+  goal met
+     hoped for: done
+     chose:     done in 6/6 replicates
+     30/30 decoded
+
+7/7 scenarios stable and on target; 0 stable but wrong; 0 UNSTABLE.
+median latency 279ms.
+```
+
+Summary table:
+
+| # | Scenario | Hoped | Modal answer | Agreement |
+|---|---|---|---|---|
+| 1 | no history | `find_blocks` | `find_blocks` | 6/6 |
+| 2 | after a search | `mine_block_at` | `mine_block_at` | 6/6 |
+| 3 | find_blocks found nothing | `explore_for` | `explore_for` | 6/6 |
+| 4 | after missing_tool, inventory empty | `give_up` | `give_up` | 6/6 |
+| 5 | mined but the drop was lost | `move_to` | `move_to` | 6/6 |
+| 6 | mine_block_at already returned not_found | `explore_for` or `give_up` | `give_up` | 6/6 |
+| 7 | goal met | `done` | `done` | 6/6 |
+
+**No scenario was flagged `UNSTABLE`.** All 7 scenarios were stable and on
+target, all 210 attempts (6 replicates x 5 attempts x 7 scenarios) decoded, and
+median latency was 279ms. Every scenario's modal answer agreed across all 6
+replicates, including scenario 6, whose `hoped` set has two acceptable
+answers — the model picked `give_up` unanimously rather than splitting between
+the two.
+
+This is the pre-change baseline this phase's later tasks compare against. Any
+regression introduced by a prompt or code change in this phase must be measured
+against these numbers, taken under the replicating probe, not against the
+Phase 4A figures.
