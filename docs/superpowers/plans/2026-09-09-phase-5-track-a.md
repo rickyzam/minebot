@@ -10,7 +10,7 @@
 
 **Spec:** [docs/superpowers/specs/2026-09-09-phase-5-full-toolbox-design.md](../specs/2026-09-09-phase-5-full-toolbox-design.md)
 
-**Status:** Task 0's decisions agreed 2026-09-11 (Ricky, PR #22), recorded in spec §7 — with `flee` counter-proposed and adopted, and `followPlayer`'s default timeout removed. **One detail still open:** flee's distance and timeout, gating only Task 6b. **Task 0 implemented 2026-09-11** on `phase-5-task-0`. **Tasks 1–7 all landed 2026-09-12 on that branch, except Task 6b (`flee`), which stays deliberately SKIPPED** pending the agreement above — `flee` is still a stub and is the single remaining integration skip. Task 7 took three fix rounds; a whole-branch review then found one Important defect at the `ReflexExecutor`/`MineflayerExecutor` seam, fixed with a regression test. **The per-step checkboxes below were NOT maintained during execution — do not read an unticked box as work outstanding.** `.superpowers/sdd/2026-09-09-phase-5-track-a/progress.md` is the authoritative ledger of every task, review, fix round and ruling.
+**Status:** Task 0's decisions agreed 2026-09-11 (Ricky, PR #22), recorded in spec §7 — with `flee` counter-proposed and adopted, and `followPlayer`'s default timeout removed. **One detail still open:** flee's distance and timeout, gating only Task 6b. **Task 0 implemented 2026-09-11** on `phase-5-task-0`. **Tasks 1–7 all landed 2026-09-12 on that branch, except Task 6b (`flee`), which stays deliberately SKIPPED** pending the agreement above — `flee` is still a stub and is the single remaining integration skip. Task 7 took three fix rounds; a whole-branch review then found one Important defect at the `ReflexExecutor`/`MineflayerExecutor` seam, fixed with a regression test. **The step checkboxes below were not maintained during execution and were reconciled afterwards, on 2026-09-12, against the deliverables actually in the tree** — `reflex.ts` and its 10 tests, `ReflexExecutor` and its 75 (its own plus the contract suite run against the decorator), `followPlayer` / `placeBlock` / `attack` and their integration files, the `prepareFollowFixture` and `preparePlaceFixture` fixtures, the scaffolding guard, `schematic.ts`, `buildSchematic`, `ArenaBounds.enclosed` and `demo:phase5`. **Task 6b's six steps are the only ones left unticked, and they are genuinely outstanding** — `flee` is still `fail('internal', 'flee arrives in Phase 5')`, there is no `prepareFleeFixture`, and that is the single integration skip. `.superpowers/sdd/2026-09-09-phase-5-track-a/progress.md` is the authoritative ledger of every task, review, fix round and ruling.
 
 ---
 
@@ -225,7 +225,7 @@ safest outcome, not a failure. followPlayer has no default timeout."
 - Consumes: `WorldSnapshot`, `EntityInfo` from `@minebot/contract`.
 - Produces: `evaluateReflex(snapshot, thresholds?) => ReflexTrigger | null`, `DEFAULT_REFLEX_THRESHOLDS`, types `ReflexThresholds`, `ReflexTrigger`. Task 2 consumes all four.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 import { describe, it, expect } from 'vitest'
@@ -281,9 +281,9 @@ describe('evaluateReflex', () => {
 })
 ```
 
-- [ ] **Step 2: Run and confirm they fail.** `npx vitest run --project unit packages/executor/test/reflex.test.ts` → FAIL, module not found.
+- [x] **Step 2: Run and confirm they fail.** `npx vitest run --project unit packages/executor/test/reflex.test.ts` → FAIL, module not found.
 
-- [ ] **Step 3: Implement** `packages/executor/src/reflex.ts`:
+- [x] **Step 3: Implement** `packages/executor/src/reflex.ts`:
 
 ```ts
 /**
@@ -333,16 +333,16 @@ export function evaluateReflex(
 }
 ```
 
-- [ ] **Step 4: Run and confirm they pass** — 10 tests (the `it.each` counts as four).
+- [x] **Step 4: Run and confirm they pass** — 10 tests (the `it.each` counts as four).
 
-- [ ] **Step 5: Export** from `packages/executor/src/index.ts`:
+- [x] **Step 5: Export** from `packages/executor/src/index.ts`:
 
 ```ts
 export { evaluateReflex, DEFAULT_REFLEX_THRESHOLDS } from './reflex.js'
 export type { ReflexThresholds, ReflexTrigger } from './reflex.js'
 ```
 
-- [ ] **Step 6: Verify and commit.** `npm test && npm run typecheck && node scripts/check-invariants.mjs`
+- [x] **Step 6: Verify and commit.** `npm test && npm run typecheck && node scripts/check-invariants.mjs`
 
 ---
 
@@ -373,7 +373,7 @@ if (outer?.aborted) { … }
 
 Track B built the planner half of §3.5 and left the arbiter-shaped hole. Re-read before starting; if it has changed, the design changes with it.
 
-- [ ] **Step 2: Write the type declarations**
+- [x] **Step 2: Write the type declarations**
 
 ```ts
 export interface ReflexPreemption {
@@ -396,7 +396,7 @@ export interface ReflexExecutorOptions {
 }
 ```
 
-- [ ] **Step 3: Write the failing tests.** These must cover **more than one interleaving** — v1's seven all emitted during a `MockExecutor.wait()` that aborts synchronously, so they exercised a single path.
+- [x] **Step 3: Write the failing tests.** These must cover **more than one interleaving** — v1's seven all emitted during a `MockExecutor.wait()` that aborts synchronously, so they exercised a single path.
 
 ```ts
 import { describe, it, expect, vi } from 'vitest'
@@ -582,9 +582,9 @@ describe('ReflexExecutor', () => {
 })
 ```
 
-- [ ] **Step 4: Run and confirm they fail.** The escalation test uses `inner.setHealth()`, agreed in PR #22 and added by Task 0 Step 4. It is shared surface: if Task 0 has not landed it, go back to Task 0 rather than adding it here.
+- [x] **Step 4: Run and confirm they fail.** The escalation test uses `inner.setHealth()`, agreed in PR #22 and added by Task 0 Step 4. It is shared surface: if Task 0 has not landed it, go back to Task 0 rather than adding it here.
 
-- [ ] **Step 5: Implement.** The state machine, explicitly — this is what v1 got wrong by writing prose:
+- [x] **Step 5: Implement.** The state machine, explicitly — this is what v1 got wrong by writing prose:
 
 ```ts
 type Priority = 1 | 2
@@ -601,9 +601,9 @@ const priorityOf = (t: ReflexTrigger): Priority => (t.kind === 'flee' ? 2 : 1)
 - **Pass-through**: `connect`, `disconnect`, `getState`, `findBlocks`, `on`, `chat`.
 - `erasableSyntaxOnly` forbids parameter properties — declare `private readonly inner: BotExecutor` and assign in the body.
 
-- [ ] **Step 6: Run and confirm they pass** — 15 tests.
+- [x] **Step 6: Run and confirm they pass** — 15 tests.
 
-- [ ] **Step 7: Run the contract suite against the decorator**
+- [x] **Step 7: Run the contract suite against the decorator**
 
 ```ts
 import { runContractSuite } from '@minebot/mock-executor/contract-suite'
@@ -636,7 +636,7 @@ runContractSuite('ReflexExecutor over MockExecutor', async () => {
 
   **`followPlayer` is wrapped, and its no-timeout guarantee passes through the decorator.** The suite asserts it is still pending after 1.5s and resolves `interrupted` on abort — so the wrapper must forward the caller's abort to the internal controller, and must not impose a timeout of its own.
 
-- [ ] **Step 8: Export, verify, commit.** Export `ReflexExecutor` and its types from `packages/executor/src/index.ts`. Then `npm test && npm run typecheck && node scripts/check-invariants.mjs`.
+- [x] **Step 8: Export, verify, commit.** Export `ReflexExecutor` and its types from `packages/executor/src/index.ts`. Then `npm test && npm run typecheck && node scripts/check-invariants.mjs`.
 
 ---
 
@@ -645,10 +645,10 @@ runContractSuite('ReflexExecutor over MockExecutor', async () => {
 **Files:** Modify `packages/executor/src/mineflayer-executor.ts`; create `packages/executor/test/integration/follow.int.test.ts`.
 
 - [x] **Step 1: The agreed rule — recorded 2026-09-11 (PR #22).** Follows **until aborted**. `timeoutMs` honoured **when passed**, with **no default**. Elapsing resolves **`ok`**.
-- [ ] **Step 2: Write the integration test** in the Task 4 arena (`x 1850-1870`), two bots: the follower and a `ITFollowTarget` teleported twice. Assert the follower closes to within 4 blocks of each new position; an aborted call resolves `interrupted` promptly (<2s); an elapsed `timeoutMs` resolves **`ok`**; and a call with **no** `timeoutMs` is still pending after 10s, then resolves `interrupted` once aborted. **Also supply `prepareFollowFixture` in `contract.int.test.ts`** — a second connection as the target, released in `release` — so the suite's two follow guarantees stop skipping against the real executor (Task 0 Step 4).
-- [ ] **Step 3: Make `runAction` accept "no timeout" — first, on its own.** It arms `setTimeout(…, opts?.timeoutMs ?? defaultTimeoutMs)` unconditionally (`mineflayer-executor.ts:747-751`), and **`setTimeout(fn, Infinity)` fires after ~2ms in Node** (measured 2026-09-11: the delay overflows and clamps, with only a `TimeoutOverflowWarning`). So the obvious implementation — a default of `Infinity` — would make `followPlayer` report `timeout` almost at once, and the same bug already reaches any action whose caller passes `timeoutMs: Infinity`. Let `defaultTimeoutMs` be `number | null`, and skip arming the timer when the effective timeout is `null` or not finite. Prove it with an action called as `timeoutMs: Infinity` that must not time out.
-- [ ] **Step 4: Implement** with the pathfinder's `GoalFollow` via `runAction(opts, null, …)`, clearing the goal in a `finally`. **Map this action's own elapsed `timeoutMs` to `ok`, not `timeout`:** `runAction` maps a timer abort to `fail('timeout')` (`mineflayer-executor.ts:757-760`), which is right for every other action and wrong for this one.
-- [ ] **Step 5: Verify and commit.** The message must repeat the consequence Ricky asked to have recorded: without `timeoutMs`, `followPlayer` does not return until aborted, and `runGoal` passes none (`loop.ts:143`) — so a peaceful follow blocks the planner, and bounding it is Track B's.
+- [x] **Step 2: Write the integration test** in the Task 4 arena (`x 1850-1870`), two bots: the follower and a `ITFollowTarget` teleported twice. Assert the follower closes to within 4 blocks of each new position; an aborted call resolves `interrupted` promptly (<2s); an elapsed `timeoutMs` resolves **`ok`**; and a call with **no** `timeoutMs` is still pending after 10s, then resolves `interrupted` once aborted. **Also supply `prepareFollowFixture` in `contract.int.test.ts`** — a second connection as the target, released in `release` — so the suite's two follow guarantees stop skipping against the real executor (Task 0 Step 4).
+- [x] **Step 3: Make `runAction` accept "no timeout" — first, on its own.** It arms `setTimeout(…, opts?.timeoutMs ?? defaultTimeoutMs)` unconditionally (`mineflayer-executor.ts:747-751`), and **`setTimeout(fn, Infinity)` fires after ~2ms in Node** (measured 2026-09-11: the delay overflows and clamps, with only a `TimeoutOverflowWarning`). So the obvious implementation — a default of `Infinity` — would make `followPlayer` report `timeout` almost at once, and the same bug already reaches any action whose caller passes `timeoutMs: Infinity`. Let `defaultTimeoutMs` be `number | null`, and skip arming the timer when the effective timeout is `null` or not finite. Prove it with an action called as `timeoutMs: Infinity` that must not time out.
+- [x] **Step 4: Implement** with the pathfinder's `GoalFollow` via `runAction(opts, null, …)`, clearing the goal in a `finally`. **Map this action's own elapsed `timeoutMs` to `ok`, not `timeout`:** `runAction` maps a timer abort to `fail('timeout')` (`mineflayer-executor.ts:757-760`), which is right for every other action and wrong for this one.
+- [x] **Step 5: Verify and commit.** The message must repeat the consequence Ricky asked to have recorded: without `timeoutMs`, `followPlayer` does not return until aborted, and `runGoal` passes none (`loop.ts:143`) — so a peaceful follow blocks the planner, and bounding it is Track B's.
 
 ---
 
@@ -662,12 +662,12 @@ Failure mapping is Task 0's agreed table: `not_found` (not in inventory), `inval
 
 **Freestanding mid-air placement is out of scope for Phase 5** (agreed, PR #22) — a named limitation, not something half-built. `placeBlock` requires a neighbour, and Task 5b's bottom-up ordering is what stops the case arising for real structures.
 
-- [ ] **Step 1: Write the integration test.** Cover: places a block on the arena floor and a **second connection** confirms it (the placing bot's world model updates optimistically — the same trap `bot.dig()` has); an empty inventory gives `not_found`; a position with no adjacent solid neighbour gives `invalid_target`; an already-occupied position gives `invalid_target`. **Also supply `preparePlaceFixture` in `contract.int.test.ts`** — clear the inventory, return an empty arena position with a floor beneath it — so the suite's `not_found` guarantee stops skipping against the real executor (Task 0 Step 4).
-- [ ] **Step 2: Measure the scaffolding hazard before guarding against it.** Build a target reachable only by gaining height the bot cannot step or jump — a raised ledge with no ramp — give the bot exactly one dirt, and record whether the approach consumes it. **If it does**, that geometry is the regression test: assert the dirt ends up **at the target** and the inventory holds **zero**, not a tower and a `not_found`. **If no geometry provokes a tower**, record that in CLAUDE.md and ask before adding a guard nobody can make fire — this project's rule is that such a guard is not known to work.
-- [ ] **Step 3: Run and confirm the tests fail** with the stub's `internal`.
-- [ ] **Step 4: Implement** — find and `equip` the block; reject early when absent; pick an adjacent solid neighbour as the reference face and reject when there is none; `gotoGoal` within reach — if Step 2 showed the hazard is real, **using a `Movements` whose `scafoldingBlocks` excludes the material being placed**, restoring the shared movements in a `finally` — then `bot.placeBlock(reference, faceVector)`. Correct the comment at `mineflayer-executor.ts:425` to say what is true: movement does not dig, but it can build. Do **not** set `allow1by1towers = false` globally: that changes which targets every other action can reach, and would need measuring against the integration suite and `bench:explore` first.
-- [ ] **Step 5: Verify arrival and placement against the world**, not the bot's own view.
-- [ ] **Step 6: Prove each failure guard fires**, then commit.
+- [x] **Step 1: Write the integration test.** Cover: places a block on the arena floor and a **second connection** confirms it (the placing bot's world model updates optimistically — the same trap `bot.dig()` has); an empty inventory gives `not_found`; a position with no adjacent solid neighbour gives `invalid_target`; an already-occupied position gives `invalid_target`. **Also supply `preparePlaceFixture` in `contract.int.test.ts`** — clear the inventory, return an empty arena position with a floor beneath it — so the suite's `not_found` guarantee stops skipping against the real executor (Task 0 Step 4).
+- [x] **Step 2: Measure the scaffolding hazard before guarding against it.** Build a target reachable only by gaining height the bot cannot step or jump — a raised ledge with no ramp — give the bot exactly one dirt, and record whether the approach consumes it. **If it does**, that geometry is the regression test: assert the dirt ends up **at the target** and the inventory holds **zero**, not a tower and a `not_found`. **If no geometry provokes a tower**, record that in CLAUDE.md and ask before adding a guard nobody can make fire — this project's rule is that such a guard is not known to work.
+- [x] **Step 3: Run and confirm the tests fail** with the stub's `internal`.
+- [x] **Step 4: Implement** — find and `equip` the block; reject early when absent; pick an adjacent solid neighbour as the reference face and reject when there is none; `gotoGoal` within reach — if Step 2 showed the hazard is real, **using a `Movements` whose `scafoldingBlocks` excludes the material being placed**, restoring the shared movements in a `finally` — then `bot.placeBlock(reference, faceVector)`. Correct the comment at `mineflayer-executor.ts:425` to say what is true: movement does not dig, but it can build. Do **not** set `allow1by1towers = false` globally: that changes which targets every other action can reach, and would need measuring against the integration suite and `bench:explore` first.
+- [x] **Step 5: Verify arrival and placement against the world**, not the bot's own view.
+- [x] **Step 6: Prove each failure guard fires**, then commit.
 
 ---
 
@@ -686,10 +686,10 @@ export interface Schematic { readonly name: string; readonly blocks: readonly Sc
 
 Input JSON is exactly that shape. `parseSchematic(json: unknown): Schematic` **throws** with a message naming the offending entry — it is a developer-supplied file, not model output, so a `Result` would only be unwrapped and thrown anyway.
 
-- [ ] **Step 1: Write failing tests** — rejects a missing `blocks`, a non-integer offset, an empty `block` name; `placementOrder` sorts **ascending by `dy`** so every block has support when placed; ties within a layer are ordered deterministically by `dx` then `dz`.
-- [ ] **Step 2: Run and confirm they fail.**
-- [ ] **Step 3: Implement**, pure.
-- [ ] **Step 4: Run, export, commit.**
+- [x] **Step 1: Write failing tests** — rejects a missing `blocks`, a non-integer offset, an empty `block` name; `placementOrder` sorts **ascending by `dy`** so every block has support when placed; ties within a layer are ordered deterministically by `dx` then `dz`.
+- [x] **Step 2: Run and confirm they fail.**
+- [x] **Step 3: Implement**, pure.
+- [x] **Step 4: Run, export, commit.**
 
 ### Task 5b — the builder
 
@@ -697,10 +697,10 @@ Input JSON is exactly that shape. `parseSchematic(json: unknown): Schematic` **t
 
 Without this the loader is dead code and the blueprint deliverable does not exist — the bottom-up ordering constraint is never exercised against a real world.
 
-- [ ] **Step 1: Write the integration test** — build a 2×2×2 cube from a schematic at a known origin in the Task 4 arena; verify all eight blocks from a second connection; assert a partial failure reports which block failed.
-- [ ] **Step 2: Run and confirm it fails.**
-- [ ] **Step 3: Implement `buildSchematic(s: Schematic, origin: Vec3, opts?: ActionOptions): Promise<Result<{ placed: number }>>`** — iterate `placementOrder`, call `placeBlock` per block, stop on the first failure and report it. Check `opts?.signal?.aborted` between blocks so a long build is cancellable.
-- [ ] **Step 4: Verify and commit.** `buildSchematic` is executor-only and **not** on `BotExecutor` — adding it to the contract would be a shared-surface change and it is not needed by Track B yet.
+- [x] **Step 1: Write the integration test** — build a 2×2×2 cube from a schematic at a known origin in the Task 4 arena; verify all eight blocks from a second connection; assert a partial failure reports which block failed.
+- [x] **Step 2: Run and confirm it fails.**
+- [x] **Step 3: Implement `buildSchematic(s: Schematic, origin: Vec3, opts?: ActionOptions): Promise<Result<{ placed: number }>>`** — iterate `placementOrder`, call `placeBlock` per block, stop on the first failure and report it. Check `opts?.signal?.aborted` between blocks so a long build is cancellable.
+- [x] **Step 4: Verify and commit.** `buildSchematic` is executor-only and **not** on `BotExecutor` — adding it to the contract would be a shared-surface change and it is not needed by Track B yet.
 
 ---
 
@@ -708,11 +708,11 @@ Without this the loader is dead code and the blueprint deliverable does not exis
 
 **Files:** Modify `packages/executor/src/mineflayer-executor.ts` and `mc-console.ts`; create `packages/executor/test/integration/combat.int.test.ts`. Arena `x 1950-1970, z 0-8`, floor y=199.
 
-- [ ] **Step 1: Add an enclosed-arena helper** to `mc-console.ts` — floor, four walls, **and** ceiling. Both are required: an undead mob burns to death in **21 seconds** under open sky (spec §4.1), and a mob pathing at the bot walks off a *floating* platform and dies on impact. Make it opt-in (`enclosed?: boolean` on `ArenaBounds`) so the ~10 existing files that use `buildArena` are unaffected.
-- [ ] **Step 2: Write the integration test.** In `beforeEach`: build the enclosed arena, `difficulty easy`, summon `zombie` with `{PersistenceRequired:1b}` at a known coordinate. In `afterEach`, **in a `finally`**: `kill @e[type=zombie,…]` and `difficulty peaceful`. Assert first that `getState().nearbyEntities` reports the zombie with `kind: 'hostile'` — the whole reflex chain depends on `classifyEntity` (`snapshot.ts:59-64`) keying on `'Hostile'`, which is plausible but unmeasured. Then assert the mob is **still alive at the assertion point**, not only at the start.
-- [ ] **Step 3: Run and confirm it fails** with the stub's `internal`.
-- [ ] **Step 4: Implement** — resolve the entity by id and return `not_found` when it is gone; path into reach with `GoalFollow` (the target moves, which is the case spec §3 asks about); `bot.attack(entity)` once; resolve `ok`. Timeout 10_000, not the stub's 30_000 — a reflex recovery that can run for 30s is not a reflex.
-- [ ] **Step 5: Verify** the mob took damage (health from a second connection), confirm the server is left on `peaceful` with no leftover mobs, and commit.
+- [x] **Step 1: Add an enclosed-arena helper** to `mc-console.ts` — floor, four walls, **and** ceiling. Both are required: an undead mob burns to death in **21 seconds** under open sky (spec §4.1), and a mob pathing at the bot walks off a *floating* platform and dies on impact. Make it opt-in (`enclosed?: boolean` on `ArenaBounds`) so the ~10 existing files that use `buildArena` are unaffected.
+- [x] **Step 2: Write the integration test.** In `beforeEach`: build the enclosed arena, `difficulty easy`, summon `zombie` with `{PersistenceRequired:1b}` at a known coordinate. In `afterEach`, **in a `finally`**: `kill @e[type=zombie,…]` and `difficulty peaceful`. Assert first that `getState().nearbyEntities` reports the zombie with `kind: 'hostile'` — the whole reflex chain depends on `classifyEntity` (`snapshot.ts:59-64`) keying on `'Hostile'`, which is plausible but unmeasured. Then assert the mob is **still alive at the assertion point**, not only at the start.
+- [x] **Step 3: Run and confirm it fails** with the stub's `internal`.
+- [x] **Step 4: Implement** — resolve the entity by id and return `not_found` when it is gone; path into reach with `GoalFollow` (the target moves, which is the case spec §3 asks about); `bot.attack(entity)` once; resolve `ok`. Timeout 10_000, not the stub's 30_000 — a reflex recovery that can run for 30s is not a reflex.
+- [x] **Step 5: Verify** the mob took damage (health from a second connection), confirm the server is left on `peaceful` with no leftover mobs, and commit.
 
 ## Task 6b: `flee`
 
@@ -731,12 +731,12 @@ Agreed return shape (PR #22): **`Result<{ fled: boolean }>`, `ok` either way.** 
 
 **Files:** Create `packages/bot/src/phase5-demo.ts`; modify `package.json`, `README.md`, `CLAUDE.md`. Arena `x 2050-2070, z 0-8`, enclosed.
 
-- [ ] **Step 1: Decide where the demo's console helper comes from.** `mc-console.ts` lives in `packages/executor/test/integration/` and `@minebot/executor`'s exports map is `"." only`, so `packages/bot/src` **cannot import it**. Either promote the two commands the demo needs into the demo file (as `phase3-demo.ts` already does with its own local `mc`), or export a console helper properly. Do not discover this at runtime.
-- [ ] **Step 2: Write the demo** — enclosed arena, a real model pursuing a mining goal, a zombie summoned mid-run, the executor wrapped in `ReflexExecutor`. It must fail unless **a preemption actually occurred and its recovery ran**: assert `preemptions.length > 0` **and** that `preemptions[0].recovery?.ok === true`. `preemptions` being non-empty proves only that a trigger fired.
-- [ ] **Step 3: Restore the world in a `finally`** — `difficulty peaceful`, kill the mob — even when the demo fails. The dev server is shared and someone may be logged in.
-- [ ] **Step 4: Add `"demo:phase5"`** and run it **twice**.
-- [ ] **Step 5: Update the docs.** README status/counts/table/roadmap; CLAUDE.md commands, counts, and this phase's facts — at minimum the 21-second burn, the enclosure requirement, and whatever `attack`/`flee` measure. If Task 3 did not land, say so explicitly rather than implying all four stubs shipped.
-- [ ] **Step 6: Full verification.** Record actual numbers in the commit message:
+- [x] **Step 1: Decide where the demo's console helper comes from.** `mc-console.ts` lives in `packages/executor/test/integration/` and `@minebot/executor`'s exports map is `"." only`, so `packages/bot/src` **cannot import it**. Either promote the two commands the demo needs into the demo file (as `phase3-demo.ts` already does with its own local `mc`), or export a console helper properly. Do not discover this at runtime.
+- [x] **Step 2: Write the demo** — enclosed arena, a real model pursuing a mining goal, a zombie summoned mid-run, the executor wrapped in `ReflexExecutor`. It must fail unless **a preemption actually occurred and its recovery ran**: assert `preemptions.length > 0` **and** that `preemptions[0].recovery?.ok === true`. `preemptions` being non-empty proves only that a trigger fired.
+- [x] **Step 3: Restore the world in a `finally`** — `difficulty peaceful`, kill the mob — even when the demo fails. The dev server is shared and someone may be logged in.
+- [x] **Step 4: Add `"demo:phase5"`** and run it **twice**.
+- [x] **Step 5: Update the docs.** README status/counts/table/roadmap; CLAUDE.md commands, counts, and this phase's facts — at minimum the 21-second burn, the enclosure requirement, and whatever `attack`/`flee` measure. If Task 3 did not land, say so explicitly rather than implying all four stubs shipped.
+- [x] **Step 6: Full verification.** Record actual numbers in the commit message:
 
 ```bash
 npm test && npm run typecheck && node scripts/check-invariants.mjs
@@ -748,7 +748,7 @@ npm run demo && npm run demo:phase2 && npm run demo:phase3 && npm run demo:phase
 
   Every `bench:*` and `demo:*` is outside `npm test`. Phase 4 broke two of them while the sweep stayed green; this list is the correction.
 
-- [ ] **Step 7: Commit and open the PR**, stating what the reflex layer did under a live mob and whether `attack`/`flee` behaved as specified.
+- [x] **Step 7: Commit and open the PR**, stating what the reflex layer did under a live mob and whether `attack`/`flee` behaved as specified.
 
 ---
 
