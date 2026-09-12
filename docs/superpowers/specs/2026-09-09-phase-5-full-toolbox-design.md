@@ -1,7 +1,7 @@
 # Phase 5 (Track A): the full toolbox — reflex, follow, building
 
 **Date:** 2026-09-09
-**Status:** AGREED 2026-09-11 (Ricky, PR #22), with `flee` counter-proposed and adopted. One detail is still open — flee's distance and timeout, blocking only Task 6b. Not started.
+**Status:** AGREED 2026-09-11 (Ricky, PR #22), with `flee` counter-proposed and adopted. One detail is still open — flee's distance and timeout, blocking only Task 6b. **IMPLEMENTED 2026-09-12 on `phase-5-task-0`, except Task 6b (`flee`), which that open detail still gates.** Everything else in this spec — the reflex arbiter, `followPlayer`, `placeBlock`, schematics and `attack` — has shipped.
 **Affects:** `packages/executor/` (four stubs, and the arbiter — §2.1), `packages/contract/` and `packages/mock-executor/` (Task 0 only: the four methods' guarantees, and `flee`'s return type)
 **Blocked by:** nothing. Phase 4 Track A is merged; the
 [work split](../../notes/Phase%20Plan%20and%20Parallel%20Work%20Split.md) runs

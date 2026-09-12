@@ -424,6 +424,13 @@ async function main(): Promise<number> {
     // The summon runs alongside the goal: a mob that was already there before
     // the planner started would not demonstrate a plan being interrupted.
     let goalRunning = true
+    // NOTE the `.catch` attached at creation, below. `await summon` further down
+    // is the only other handler, and it is SKIPPED when runBotGoal throws — so a
+    // watcher rejection (its `mc()` throws if the tmux session goes away
+    // mid-run) would become an unhandled rejection, terminating the process
+    // while `main`'s `finally` was still restoring the shared world: difficulty
+    // left on easy, a live zombie, a pinned chunk. Handled at creation so no
+    // path can leave it unobserved.
     const summon = (async (): Promise<{ summoned: boolean; note: string }> => {
       const startedAt = Date.now()
       await sleep(SUMMON_AFTER_MS)
@@ -456,7 +463,10 @@ async function main(): Promise<number> {
         }
         await sleep(250)
       }
-    })()
+    })().catch((e: unknown) => ({
+      summoned: false,
+      note: `never summoned — the watcher itself failed: ${e instanceof Error ? e.message : String(e)}`,
+    }))
 
     const llm = new OllamaClient()
     console.log(`\nasking ${llm.model} for decisions…\n`)

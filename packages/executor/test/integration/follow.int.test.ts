@@ -209,13 +209,21 @@ describe('MineflayerExecutor.followPlayer', () => {
     await buildArena(FAR_ARENA)
     await teleportAndWait(t, TARGET, FAR)
     await waitForOnGround(t, { expectedY: FLOOR })
-    // Proves the precondition: still online, no longer visible.
+    // Proves the precondition as far as it can be proved from here: the target
+    // has left THIS bot's snapshot radius. It does NOT prove the server stopped
+    // tracking the player for us — an earlier comment claimed that, and a
+    // snapshot is not evidence of it. What the test actually needs is only the
+    // weaker fact: `bot.players[TARGET].entity` is undefined, which is what
+    // makes `followPlayer` answer `not_found` rather than walk.
     await waitForPlayerGone(f, TARGET)
 
     const started = Date.now()
     const r = await settledWithin(f.followPlayer(TARGET, { timeoutMs: 8_000 }), 10_000)
     expectReason(r, 'not_found')
-    expect(Date.now() - started).toBeLessThan(1_000)
+    // "At once" means before the 8s timeout could plausibly be what answered —
+    // not a latency measurement. 1s was tight enough to flake on a loaded box
+    // for a check whose only job is to separate the fast path from the timeout.
+    expect(Date.now() - started).toBeLessThan(3_000)
   })
 
   it('fails not_found when the followed player logs off mid-follow', async () => {

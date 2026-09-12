@@ -82,6 +82,27 @@ export function parseSchematic(json: unknown): Schematic {
     throw new Error(`invalid schematic: blocks must be an array, got ${describe(json.blocks)}`)
   }
   const blocks = json.blocks.map((entry, index) => parseBlock(entry, index))
+
+  // Two entries at the same offset is a shape error, and the only one this
+  // module used to let through. Left unchecked it fails LATE and blames the
+  // wrong thing: `placementOrder` sorts the pair adjacent, the first placement
+  // succeeds, and the second returns `invalid_target` — "(x, y, z) is occupied
+  // by dirt" — so `buildSchematic` reports the world interfering with the build
+  // when the truth is a malformed input file. Caught here, where the message can
+  // still name the entry.
+  const seen = new Map<string, number>()
+  for (const [index, b] of blocks.entries()) {
+    const at = `${b.dx},${b.dy},${b.dz}`
+    const first = seen.get(at)
+    if (first !== undefined) {
+      throw new Error(
+        `invalid schematic: blocks[${index}] repeats the offset (${at}) already used by ` +
+          `blocks[${first}] — two blocks cannot occupy one cell`,
+      )
+    }
+    seen.set(at, index)
+  }
+
   return { name: json.name, blocks }
 }
 

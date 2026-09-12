@@ -78,6 +78,35 @@ describe('parseSchematic', () => {
       parseSchematic({ name: 'x', blocks: [{ dx: 0, dy: 0, dz: 0, block: '' }] }),
     ).toThrow(/blocks\[0\]/)
   })
+
+  /**
+   * Without this the error surfaces from `buildSchematic` as "(x, y, z) is
+   * occupied by dirt" — the world blamed for a malformed input file. Both
+   * indices are named so the author can find the pair.
+   */
+  it('rejects two blocks at the same offset, naming both entries', () => {
+    expect(() =>
+      parseSchematic({
+        name: 'x',
+        blocks: [
+          { dx: 0, dy: 0, dz: 0, block: 'dirt' },
+          { dx: 1, dy: 0, dz: 0, block: 'dirt' },
+          { dx: 0, dy: 0, dz: 0, block: 'stone' },
+        ],
+      }),
+    ).toThrow(/blocks\[2\] repeats the offset \(0,0,0\) already used by blocks\[0\]/)
+  })
+
+  it('allows the same block name at different offsets', () => {
+    const s = parseSchematic({
+      name: 'x',
+      blocks: [
+        { dx: 0, dy: 0, dz: 0, block: 'dirt' },
+        { dx: 0, dy: 1, dz: 0, block: 'dirt' },
+      ],
+    })
+    expect(s.blocks).toHaveLength(2)
+  })
 })
 
 describe('placementOrder', () => {

@@ -10,7 +10,7 @@
 
 **Spec:** [docs/superpowers/specs/2026-09-09-phase-5-full-toolbox-design.md](../specs/2026-09-09-phase-5-full-toolbox-design.md)
 
-**Status:** Task 0's decisions agreed 2026-09-11 (Ricky, PR #22), recorded in spec §7 — with `flee` counter-proposed and adopted, and `followPlayer`'s default timeout removed. **One detail still open:** flee's distance and timeout, gating only Task 6b. **Task 0 implemented 2026-09-11** on `phase-5-task-0`; Tasks 1–7 not started.
+**Status:** Task 0's decisions agreed 2026-09-11 (Ricky, PR #22), recorded in spec §7 — with `flee` counter-proposed and adopted, and `followPlayer`'s default timeout removed. **One detail still open:** flee's distance and timeout, gating only Task 6b. **Task 0 implemented 2026-09-11** on `phase-5-task-0`. **Tasks 1–7 all landed 2026-09-12 on that branch, except Task 6b (`flee`), which stays deliberately SKIPPED** pending the agreement above — `flee` is still a stub and is the single remaining integration skip. Task 7 took three fix rounds; a whole-branch review then found one Important defect at the `ReflexExecutor`/`MineflayerExecutor` seam, fixed with a regression test. **The per-step checkboxes below were NOT maintained during execution — do not read an unticked box as work outstanding.** `.superpowers/sdd/2026-09-09-phase-5-track-a/progress.md` is the authoritative ledger of every task, review, fix round and ruling.
 
 ---
 

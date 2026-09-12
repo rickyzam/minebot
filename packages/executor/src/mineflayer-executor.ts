@@ -191,9 +191,16 @@ const MAX_TIMER_MS = 2_147_483_647
  *
  * `placeBlock` already bounds each placement at 30s of its own, so a build can
  * never hang indefinitely on a single block — this only turns that per-block
- * bound into an honest whole-call one. The margin above 30s covers the equip
- * and the server's placement acknowledgement after the approach has used its
- * budget.
+ * bound into an honest whole-call one.
+ *
+ * The 15s above `placeBlock`'s 30s is **slack, not a budget for anything in
+ * particular**. An earlier version of this comment justified it as covering
+ * "the equip and the server's placement acknowledgement after the approach has
+ * used its budget", which is not true: both of those happen INSIDE `placeBlock`
+ * and are already inside its own 30s. The margin exists so a per-block timeout
+ * fires at `placeBlock`'s boundary, where the failure names the block, rather
+ * than at this outer one, where it would only name the build — and measured
+ * cost is ~572ms/block, so the whole figure is ~80× typical either way.
  */
 const BUILD_PER_BLOCK_BUDGET_MS = 45_000
 
@@ -805,7 +812,13 @@ export class MineflayerExecutor implements BotExecutor {
    *  - the caller's signal, `stop()`, and the timeout all abort `signal`,
    *    which `body` is responsible for reacting to;
    *  - whatever `body` returns, an aborted run is reported as `interrupted`
-   *    (caller abort or stop()) or `timeout`, never as success.
+   *    (caller abort or stop()) or, for an elapsed `timeoutMs`, as whatever
+   *    `onElapsed` decides — `timeout` by default. **A caller abort or `stop()`
+   *    is never reported as success; an elapsed timeout CAN be**, because
+   *    `followPlayer` passes `onElapsed: () => ok(undefined)` — "followed for
+   *    the requested time" is a success, not a failure. See the `onElapsed`
+   *    paragraph below; this bullet used to claim "never as success" flatly,
+   *    which that action has contradicted since Task 3.
    *
    * It never throws: a body that rejects becomes `internal`, per the contract's
    * resolve-don't-throw rule.
@@ -883,13 +896,40 @@ export class MineflayerExecutor implements BotExecutor {
   }
 
   /**
-   * Stop the pathfinder and drop whatever goal it holds.
+   * Stop the pathfinder and drop the goal `ours` — but ONLY if the pathfinder
+   * still holds it.
    *
    * Called wherever an action that set a goal finishes, however it finishes. A
    * goal left set outlives the call that set it, and `GoalFollow` — which both
    * `followPlayer` and `attack` use — is dynamic, so the bot keeps walking at
    * a target that has moved on long after the caller was told the action had
    * ended. Task 4 measured that failure for `placeBlock`.
+   *
+   * **The identity check is load-bearing, not defensive.** The pathfinder holds
+   * ONE goal for the whole bot, and `ReflexExecutor` runs a reflex recovery
+   * CONCURRENTLY with the action it preempted — by design (rulings R13, R20,
+   * R21): `preempt()` launches `runRecovery` BEFORE it aborts the preempted
+   * actions, and `runRecovery` yields only a single microtask. Meanwhile an
+   * aborted `followPlayer` resolves synchronously from its abort listener, so
+   * its `finally` lands exactly one microtask later — after the recovery has
+   * already called `setGoal`, because `runAction`, `attack`'s body and
+   * `gotoGoal` are synchronous all the way into `goto()`'s executor.
+   *
+   * Clearing unconditionally there destroyed the RECOVERY's goal: `setGoal`
+   * emits `goal_updated` synchronously (index.js:142-146), `goto`'s
+   * `goalChangedListener` rejects `GoalChanged` for any different goal, `null`
+   * included (lib/goto.js:31-35), and that maps to
+   * `interrupted`/'path stopped before completion'. Because the recovery's own
+   * controller was never aborted, `runRecovery` counted it as a FAILURE, and
+   * three in a row disarm every trigger of that kind — a bot that stops
+   * defending itself while following a player. Found by the whole-branch review
+   * of this phase, and deterministic rather than a race.
+   *
+   * So a stale clear is skipped: after `goal_reached` the plugin has already
+   * nulled its own `stateGoal`, and if another action owns the goal it owns the
+   * cleanup too. `stop()` is inside the same gate deliberately — it ends the
+   * path in progress, which for someone else's goal means their `goto` rejects
+   * `PathStopped`, the same defect by a different route.
    *
    * Swallowing the error is the point rather than a shortcut: the only way
    * these throw is a bot that has already disconnected, and every caller is on
@@ -900,10 +940,12 @@ export class MineflayerExecutor implements BotExecutor {
    * it also restores the shared movements, and the goal must be cleared BEFORE
    * that restore, because `setMovements` resets the path and would re-arm
    * re-planning against a goal still in place. That ordering was Task 4's fix
-   * and factoring it away would regress it.
+   * and factoring it away would regress it. It applies the same identity gate
+   * inline, next to the one its movements restore already had.
    */
-  private clearPathfinderGoal(bot: Bot): void {
+  private clearPathfinderGoal(bot: Bot, ours: PathfinderGoal): void {
     try {
+      if (bot.pathfinder.goal !== ours) return
       bot.pathfinder.stop()
       bot.pathfinder.setGoal(null)
     } catch {
@@ -928,7 +970,7 @@ export class MineflayerExecutor implements BotExecutor {
     goal: PathfinderGoal,
     reached: () => boolean,
   ): Promise<Result> {
-    const onAbort = (): void => this.clearPathfinderGoal(bot)
+    const onAbort = (): void => this.clearPathfinderGoal(bot, goal)
     signal.addEventListener('abort', onAbort, { once: true })
     try {
       await bot.pathfinder.goto(goal)
@@ -1008,7 +1050,10 @@ export class MineflayerExecutor implements BotExecutor {
         // as the bot is within range, which is arrival. A dynamic goal stays
         // set as the target moves, and this call settles only on an abort, the
         // target leaving, or the connection ending.
-        bot.pathfinder.setGoal(new goals.GoalFollow(entity, FOLLOW_RANGE), true)
+        // Held rather than inlined, so the cleanup below can prove the goal it
+        // drops is still this call's own — see clearPathfinderGoal.
+        const ours = new goals.GoalFollow(entity, FOLLOW_RANGE)
+        bot.pathfinder.setGoal(ours, true)
 
         let detach = (): void => undefined
         try {
@@ -1044,8 +1089,10 @@ export class MineflayerExecutor implements BotExecutor {
         } finally {
           detach()
           // Clear the goal whatever ended the call. Left set, the bot would keep
-          // walking after the caller was told the action had ended.
-          this.clearPathfinderGoal(bot)
+          // walking after the caller was told the action had ended. Gated on the
+          // goal still being ours: when a reflex preempted this call, the
+          // recovery's goal is already in place by the time this runs.
+          this.clearPathfinderGoal(bot, ours)
         }
       },
       () => ok(undefined),
@@ -1386,7 +1433,14 @@ export class MineflayerExecutor implements BotExecutor {
           // dirt allowed again — and pillared on the dirt within 8s of this
           // call returning `unreachable` with the dirt still held. On success
           // the same restart could move the bot while it equips and places.
-          bot.pathfinder.setGoal(null)
+          //
+          // Gated on the goal still being ours, for the same reason the
+          // movements restore below is: a reflex recovery preempting this call
+          // has already set its own goal by the time this runs, and clearing it
+          // makes the recovery report `interrupted` without having acted. See
+          // clearPathfinderGoal for the full mechanism. The ORDER is unchanged —
+          // goal first, movements second — which is what Task 4 measured.
+          if (bot.pathfinder.goal === goal) bot.pathfinder.setGoal(null)
           // Only if nothing replaced it meanwhile: restoring over someone
           // else's movements would be a second surprise, not a cleanup.
           if (guarded && bot.pathfinder.movements === guarded) bot.pathfinder.setMovements(shared)
@@ -1545,20 +1599,21 @@ export class MineflayerExecutor implements BotExecutor {
       const target = live()
       if (!target) return fail('not_found', `no entity ${entityId} is in sight`)
 
+      // Held rather than inlined, so the cleanup below can prove the goal it
+      // drops is still this call's own — see clearPathfinderGoal.
+      const ours = new goals.GoalFollow(target, ATTACK_FOLLOW_RANGE)
       let approach: Result
       try {
-        approach = await this.gotoGoal(
-          bot,
-          signal,
-          new goals.GoalFollow(target, ATTACK_FOLLOW_RANGE),
-          () => {
-            const now = live()
-            return now !== null && distanceFrom(bot, now.position) <= ATTACK_REACH
-          },
-        )
+        approach = await this.gotoGoal(bot, signal, ours, () => {
+          const now = live()
+          return now !== null && distanceFrom(bot, now.position) <= ATTACK_REACH
+        })
       } finally {
         // Whatever the outcome, and BEFORE returning — see clearPathfinderGoal.
-        this.clearPathfinderGoal(bot)
+        // Gated: a flee recovery superseding this attack (ruling R22) has its own
+        // goal set by the time this runs, and dropping it would report the flee
+        // as interrupted without it ever having fled.
+        this.clearPathfinderGoal(bot, ours)
       }
       if (!approach.ok) return approach
       if (signal.aborted) return ok(undefined)

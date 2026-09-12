@@ -23,7 +23,7 @@ npm run demo              # Connect, print snapshot, walk. The Phase 1 deliverab
 npm run demo:phase2       # Connect, path around a wall, mine coal. The Phase 2 deliverable.
 npm run demo:phase3       # Real state, real model, real action. The Phase 3 deliverable.
 npm run demo:phase4       # Find coal that is NOT visible, on real terrain. The Phase 4 deliverable.
-npm run demo:phase5       # A zombie interrupts the plan; the reflex preempts and recovers. The Phase 5 deliverable. Raises difficulty to easy and restores it in a finally
+npm run demo:phase5       # A zombie interrupts the plan; the reflex preempts and recovers. The Phase 5 deliverable. Raises difficulty to easy and restores it in a finally. CAN LEGITIMATELY GO RED — see below
 npm run agent:demo        # The planning loop against a fake model and a mock world. No server.
 npm run agent:probe       # Seven scenarios, replicated across fresh processes. Needs Ollama — OLLAMA_HOST is optional, defaulting to 127.0.0.1:11434
 npm run bench:world       # Qualify / place / verify the benchmark world. `-- setup`, `-- verify`
@@ -32,6 +32,8 @@ npm run explore:path      # The exact waypoints a search visits; `--mark` builds
 npm run arena:map         # Print an arena layer by layer, floor holes included. Diagnostic.
 npm run bench:perception  # What honest (line-of-sight) perception costs. Live server. `-- 5 --detail`
 ```
+
+**`npm run demo:phase5` can go red for a reason that is not a regression.** MEASURED 2026-09-12 across four runs: `done`, `stuck`, **the bot DIED**, `done`. The death is the `flee` stub — three flee triggers fired as health fell 5.7 → 4.2, each returning `internal: flee arrives in Phase 5`, so nothing evaded the zombie and it killed the bot, and the demo exits 1 on any death. A red run here therefore says "Task 6b is still gated", not "the reflex layer broke": check the printed flee NOTE before debugging anything else. Same shape as the Phase 1 demo's rot — a red run that says nothing about the code — and it closes only when `flee` is built.
 
 When an integration test fails, run `npm run smoke` first. It separates "my code is broken" from "the server is unreachable," and that distinction saves a lot of wasted debugging.
 
@@ -79,7 +81,7 @@ These cost real debugging time to discover. Treat them as settled.
 | A player's selected hotbar slot persists in player data, survives `/clear`, and is moved by `bot.equip()` | `/give` alone cannot put an item "in the inventory but not in the hand" — use `placeInSlot()`. A test that equips changes what its own next run starts holding |
 | The composition root is `packages/bot/` — the only package depending on both `@minebot/agent` and `@minebot/executor` | Code needing both goes there. Putting it in `agent` pulls Mineflayer into the planning track transitively; `check-invariants.mjs` now catches that |
 | Integration tests never require Ollama; only `demo:phase3` and `agent:probe` do | A red demo with green tests means the model chose badly, not that the wiring broke |
-| `runGoal` returns `interrupted` only on an **outer** abort | An `interrupted` result without one means the reflex layer preempted — Phase 5, so unreachable today |
+| `runGoal` returns `interrupted` only on an **outer** abort | An `interrupted` result without one means **the reflex layer preempted** — which as of Phase 5 Track A is REACHABLE and routine, not hypothetical. This row used to end "Phase 5, so unreachable today"; MEASURED 2026-09-12, one `demo:phase5` run logged **16 preemptions, 9 of them cutting a live action**, each handing the planner `interrupted` with no outer abort in sight |
 | `SchemaDecider` spends **two** model calls on an undecodable reply — the reply plus one repair | A scripted `FakeLlmClient` needs 2 replies per undecodable step, or it exhausts mid-repair and the loop exits `llm_error` instead |
 | Minecraft usernames are capped at **16 characters** | A longer one is rejected at login, and `connect()` returning `disconnected` reads as a broken fixture rather than a naming mistake |
 | Arenas must be separated by more than the largest radius anything might **search**, not merely their own width | The Phase 3 demo at x1150 found the integration arena's ore at x1126 through the model's own 32-block `find_blocks`, and chased it until the step budget ran out |

@@ -311,6 +311,22 @@ export class MockExecutor implements BotExecutor {
    * geometry, so of the real failures it can produce `not_found` and the
    * occupied half of `invalid_target`; "no adjacent face" and `unreachable`
    * are reachable through failure injection.
+   *
+   * **One divergence this enumeration used to omit, which is worse than saying
+   * nothing:** the real executor rejects a NON-BLOCK item up front —
+   * `placeBlock('stick', …)` returns `invalid_target`, because
+   * `bot.registry.blocksByName` has no entry for it (executor ruling R24). The
+   * mock has no notion of placeability, so the same call resolves **`ok`**,
+   * spends the stick, and pushes a stick *block* into `this.blocks` — after
+   * which `findBlocks({ names: ['stick'] })` reports a stick standing in the
+   * world. Anything built against the mock alone can therefore depend on a
+   * success the real executor never gives.
+   *
+   * Deliberately NOT fixed here: R24 is executor-only and this is shared
+   * surface, so making the mock reject non-blocks is a behaviour change to the
+   * integration boundary and needs agreeing first (it is on the list for
+   * Ricky, with R5's `followPlayer` → `not_found` and R9's `attack` →
+   * `unreachable`). Documented so the gap is visible in the meantime.
    */
   async placeBlock(blockName: string, position: Vec3, opts?: ActionOptions): Promise<Result> {
     this.record('placeBlock', blockName, position)
