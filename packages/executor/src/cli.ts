@@ -119,7 +119,16 @@ const main = async (): Promise<void> => {
     // The arena is rebuilt from scratch every run, so nothing needs the chunks
     // kept resident afterwards. Released rather than left pinned on a shared
     // server.
-    mc(`forceload remove ${ARENA.x0} ${ARENA.z0} ${ARENA.x1} ${ARENA.z1}`)
+    //
+    // Guarded for the same reason the disconnect below is: this runs on every
+    // exit path, including one where `waitForFooting` is already propagating a
+    // fixture failure. An unreachable tmux here would throw and REPLACE that
+    // exception, losing the very diagnosis the footing check exists to give.
+    try {
+      mc(`forceload remove ${ARENA.x0} ${ARENA.z0} ${ARENA.x1} ${ARENA.z1}`)
+    } catch (e) {
+      console.error(`warning: failed to release the forceload: ${(e as Error).message}`)
+    }
     // Disconnect on every path — including an unexpected throw above — so a
     // failed run never strands the bot connected on the live server. A
     // failure here is reported but must not mask whatever error (if any) is

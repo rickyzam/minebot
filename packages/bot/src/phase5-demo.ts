@@ -265,6 +265,43 @@ async function buildEnclosedArena(): Promise<void> {
 }
 
 /**
+ * Releases the chunks `buildEnclosedArena` pinned with `forceload add`.
+ *
+ * **Called unconditionally from `main`'s `finally`, and deliberately NOT from
+ * `restoreWorld`.** That distinction is the entire point of this function.
+ * `forceload add` is the first thing the arena build issues — long before
+ * `difficultyRaised` is set — and the fixture checks that follow it
+ * (`expectBlockAt`, `waitForFooting`) are designed to THROW when the fixture is
+ * broken. Releasing the chunks from inside the difficulty-gated restore would
+ * therefore leak them on precisely the failure path those checks exist to
+ * produce: the loud one. Every exit path from the moment `forceload add` runs
+ * has to come through here.
+ *
+ * Removing a region that was never added is harmless — the server answers
+ * "No chunks were marked for force loading", as acceptable a reply as
+ * "Unmarked N chunks". The read-back's real job is to prove the command reached
+ * a live server at all: `queryConsole` throws when no matching reply arrives
+ * within its timeout, and that throw is the failure signal. It is caught here
+ * rather than propagating, so a tmux failure in cleanup cannot replace an
+ * exception already on its way out of `main`.
+ */
+async function releaseForceload(): Promise<string[]> {
+  try {
+    await queryConsole(
+      `forceload remove ${ARENA.x0} ${ARENA.z0} ${ARENA.x1} ${ARENA.z1}`,
+      /Unmarked \d+ chunk|No chunks were marked/,
+    )
+    return []
+  } catch (e) {
+    return [
+      `the forceload on ${ARENA.x0},${ARENA.z0}..${ARENA.x1},${ARENA.z1} could not be ` +
+        `confirmed released — the chunks may still be pinned on the shared server: ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+    ]
+  }
+}
+
+/**
  * Puts the world back: peaceful difficulty first (it is the global state, and
  * it removes hostiles on its own), then the arena volume, then the drops the
  * kills themselves create.
@@ -294,18 +331,6 @@ async function restoreWorld(): Promise<string[]> {
     if (!last.includes('No entity was found')) {
       problems.push(`the arena still held entities after 4 sweeps (last reply: ${last})`)
     }
-    // Release the chunks this run pinned. `forceload add` is how the arena's
-    // fills are guaranteed to land, but leaving the region resident afterwards
-    // is a standing cost on a shared server, and the arena is rebuilt from
-    // scratch every run anyway. Read back like everything else here.
-    const f = await queryConsole(
-      `forceload remove ${ARENA.x0} ${ARENA.z0} ${ARENA.x1} ${ARENA.z1}`,
-      /Unmarked \d+ chunk|No chunks were marked/,
-    )
-    if (f[0] === undefined) {
-      problems.push('the forceload could not be confirmed removed')
-    }
-
     const d = await queryConsole('difficulty', /The difficulty is (\w+)/)
     if (d[1] !== 'Peaceful') {
       problems.push(
@@ -518,11 +543,15 @@ async function main(): Promise<number> {
     } catch {
       // A disconnect that fails must not stop the world being restored.
     }
-    if (difficultyRaised) {
-      const problems = await restoreWorld()
-      for (const p of problems) console.error(`RESTORE FAILED: ${p}`)
-      if (problems.length > 0) process.exitCode = 1
-    }
+    // The forceload is released UNCONDITIONALLY, and before the difficulty-gated
+    // restore. `forceload add` happens at the top of buildEnclosedArena, whereas
+    // `difficultyRaised` is not set until after the fixture checks — so gating
+    // this the same way would leave the chunks pinned on exactly the path those
+    // checks are designed to take when a fixture is broken. See releaseForceload.
+    const problems = await releaseForceload()
+    if (difficultyRaised) problems.push(...(await restoreWorld()))
+    for (const p of problems) console.error(`RESTORE FAILED: ${p}`)
+    if (problems.length > 0) process.exitCode = 1
   }
 }
 
