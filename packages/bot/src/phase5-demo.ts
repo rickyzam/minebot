@@ -277,19 +277,34 @@ async function buildEnclosedArena(): Promise<void> {
  * produce: the loud one. Every exit path from the moment `forceload add` runs
  * has to come through here.
  *
- * Removing a region that was never added is harmless — the server answers
- * "No chunks were marked for force loading", as acceptable a reply as
- * "Unmarked N chunks". The read-back's real job is to prove the command reached
- * a live server at all: `queryConsole` throws when no matching reply arrives
- * within its timeout, and that throw is the failure signal. It is caught here
- * rather than propagating, so a tmux failure in cleanup cannot replace an
- * exception already on its way out of `main`.
+ * Removing a region that was never added is harmless, and that path is REACHABLE
+ * — `connect()` failing returns before the arena is ever pinned, and the release
+ * still runs. So the no-op reply has to match. **MEASURED against the live
+ * server 2026-09-12: it is "No chunks were removed from force loading".**
+ * `commands.forceload.removed.failure`, not the `added.failure` string ("No
+ * chunks were marked…") an earlier version of this comment quoted — that one
+ * answers a failed *add* and can never appear here.
+ *
+ * **Both alternatives are deliberately SHORT and match near the start of the
+ * reply, because `tmux capture-pane` hard-wraps at the pane width (80) and
+ * `queryConsole` matches line by line.** MEASURED: the success reply breaks
+ * mid-word as `…from [` / `128, 0] to …`, so a pattern reaching the trailing
+ * "for force loading" does NOT match, while `Unmarked \d+ chunk` does. The
+ * 33-character `[HH:MM:SS] [Server thread/INFO]: ` prefix counts against the
+ * 80, leaving roughly 47 usable characters. A read-back pattern here is not
+ * free to be as descriptive as it looks.
+ *
+ * The read-back's real job is to prove the command reached a live server at all:
+ * `queryConsole` throws when no matching reply arrives within its timeout, and
+ * that throw is the failure signal. It is caught here rather than propagating,
+ * so a tmux failure in cleanup cannot replace an exception already on its way
+ * out of `main`.
  */
 async function releaseForceload(): Promise<string[]> {
   try {
     await queryConsole(
       `forceload remove ${ARENA.x0} ${ARENA.z0} ${ARENA.x1} ${ARENA.z1}`,
-      /Unmarked \d+ chunk|No chunks were marked/,
+      /Unmarked (\d+ )?chunk|No chunks were removed/,
     )
     return []
   } catch (e) {
@@ -543,13 +558,30 @@ async function main(): Promise<number> {
     } catch {
       // A disconnect that fails must not stop the world being restored.
     }
-    // The forceload is released UNCONDITIONALLY, and before the difficulty-gated
-    // restore. `forceload add` happens at the top of buildEnclosedArena, whereas
-    // `difficultyRaised` is not set until after the fixture checks — so gating
-    // this the same way would leave the chunks pinned on exactly the path those
-    // checks are designed to take when a fixture is broken. See releaseForceload.
-    const problems = await releaseForceload()
-    if (difficultyRaised) problems.push(...(await restoreWorld()))
+    // The forceload is released UNCONDITIONALLY — `forceload add` happens at the
+    // top of buildEnclosedArena, whereas `difficultyRaised` is not set until
+    // after the fixture checks, so gating the release the same way would leave
+    // the chunks pinned on exactly the path those checks are designed to take
+    // when a fixture is broken. See releaseForceload.
+    //
+    // But it is released **LAST**, after the sweeps. An entity selector only
+    // matches inside LOADED chunks, so releasing the pin first lets the bot's
+    // departure unload the arena and turns every `kill @e` into "No entity was
+    // found" — a reply byte-identical to the true green, which would leave the
+    // demo printing "arena empty (server-confirmed)" over a zombie still in the
+    // saved chunk. That is the "fixture that can no-op without shouting" trap,
+    // and the pin is what stops it. restoreWorld is nonetheless wrapped: it
+    // catches internally today and returns complaints rather than throwing, and
+    // this keeps the release unconditional even if that ever changes. `catch`
+    // and not `finally`, because a throw raised inside this `finally` block
+    // would replace whatever error is already propagating out of `main`.
+    const problems: string[] = []
+    try {
+      if (difficultyRaised) problems.push(...(await restoreWorld()))
+    } catch (e) {
+      problems.push(`the world restore threw: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    problems.push(...(await releaseForceload()))
     for (const p of problems) console.error(`RESTORE FAILED: ${p}`)
     if (problems.length > 0) process.exitCode = 1
   }

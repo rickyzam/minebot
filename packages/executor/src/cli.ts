@@ -127,7 +127,13 @@ const main = async (): Promise<void> => {
     try {
       mc(`forceload remove ${ARENA.x0} ${ARENA.z0} ${ARENA.x1} ${ARENA.z1}`)
     } catch (e) {
-      console.error(`warning: failed to release the forceload: ${(e as Error).message}`)
+      // Narrowed rather than cast: a `(e as Error).message` on a non-Error would
+      // throw from inside this `finally` and mask the very error the guard exists
+      // to preserve.
+      console.error(
+        `warning: failed to release the forceload: ` +
+          `${e instanceof Error ? e.message : String(e)}`,
+      )
     }
     // Disconnect on every path — including an unexpected throw above — so a
     // failed run never strands the bot connected on the live server. A
