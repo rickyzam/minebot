@@ -7,7 +7,19 @@ import { renderPrompt } from './prompt.js'
 import type { GoalOutcome, Step, StepOutcome } from './step.js'
 
 export const DEFAULT_MAX_STEPS = 16
-export const DEFAULT_STUCK_THRESHOLD = 3
+
+/**
+ * Ends a goal when one action-and-outcome signature occurs this many times
+ * inside the last `threshold * 2` steps.
+ *
+ * WAS 3. Raised to 4 when the model started being WARNED at 2 (spec §5).
+ * Warning at 2 while still killing at 3 gives it exactly one turn to act on
+ * information it has never had before, then ends the goal anyway — which
+ * would be shipping the old behaviour while claiming a nudge. Two turns is a
+ * real chance, and costs one step out of sixteen.
+ */
+export const DEFAULT_STUCK_THRESHOLD = 4
+
 export const DEFAULT_MAX_UNDECODABLE = 3
 
 export interface RunGoalOptions {
