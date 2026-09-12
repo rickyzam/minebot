@@ -125,39 +125,61 @@ function mc(command: string): void {
  * The restore below is the one piece of shared, world-wide state this demo
  * changes, so "the command was sent" is not good enough: `mc` throws only when
  * tmux is unreachable, and a command the *server* rejected would restore
- * nothing, silently. Correlating the reply with the command is the difficulty —
- * the pane holds every earlier reply too — so this counts tmux's echoes of the
- * command line and reads only what followed a new one.
+ * nothing, silently.
+ *
+ * Correlating the reply with the command is the difficulty, because the pane
+ * holds every earlier reply too. **This used to count tmux's echoes of the
+ * command and read what followed a new one. THIS DEMO IS WHERE THAT BROKE.**
+ * MEASURED 2026-09-12: a run with 17 reflex preemptions produced enough output
+ * to evict older `difficulty` echoes from the bounded `-S -400` capture window
+ * (424 captured lines against 1904 of history), so the post-send count was not
+ * higher than the pre-send count, the match branch never ran, and the demo
+ * printed a FALSE "RESTORE FAILED" while the reply "The difficulty is Peaceful"
+ * sat in the very lines it quoted. The world was fine. The inverse is worse:
+ * evict our own echo while an older one survives and it returns a STALE reply
+ * as the current one.
+ *
+ * So the anchor is a nonce instead of a count — see the canonical copy in
+ * `packages/executor/test/integration/mc-console.ts`, which has the full
+ * reasoning. Kept duplicated rather than imported because a demo must not
+ * depend on a test helper; the two are deliberately identical in behaviour.
  */
+let probeCounter = 0
+
 async function queryConsole(
   command: string,
   pattern: RegExp,
   timeoutMs = 8_000,
 ): Promise<RegExpMatchArray> {
+  const nonce = `minebot_probe_${++probeCounter}_${Math.random().toString(36).slice(2, 10)}`
   const capture = (): string[] =>
     execFileSync('tmux', ['capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-400'], {
       encoding: 'utf8',
     }).split('\n')
-  const echoes = (lines: string[]): number[] =>
-    lines.flatMap((line, i) => (line.trim() === command ? [i] : []))
 
-  const before = echoes(capture()).length
+  // In this order: the server executes console commands in order, so its reply
+  // to `command` lands after every line the invalid nonce produced.
+  mc(nonce)
   mc(command)
 
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const lines = capture()
-    const at = echoes(lines)
-    if (at.length > before) {
-      for (const line of lines.slice(at[at.length - 1]! + 1)) {
+    // The LAST mention: the nonce appears both as the echoed input and in the
+    // server's "Unknown or incomplete command" error quoting it back.
+    let anchor = -1
+    for (const [i, line] of lines.entries()) if (line.includes(nonce)) anchor = i
+    if (anchor !== -1) {
+      for (const line of lines.slice(anchor + 1)) {
         const m = line.match(pattern)
         if (m) return m
       }
     }
     if (Date.now() >= deadline) {
       throw new Error(
-        `queryConsole: "${command}" produced no line matching ${pattern} within ${timeoutMs}ms. ` +
-          `Last console lines: ${JSON.stringify(lines.slice(-6, -1))}`,
+        `queryConsole: "${command}" produced no line matching ${pattern} within ${timeoutMs}ms` +
+          (anchor === -1 ? ` — and its ${nonce} anchor never appeared in the pane` : '') +
+          `. Last console lines: ${JSON.stringify(lines.slice(-6, -1))}`,
       )
     }
     await sleep(150)

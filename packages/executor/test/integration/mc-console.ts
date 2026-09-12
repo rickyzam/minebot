@@ -56,41 +56,75 @@ export function sendConsoleCommand(command: string): void {
  * Correlating the reply with the command is the whole difficulty, because the
  * pane holds every earlier reply too — and a before/after health check sends
  * the *same* command twice, so "the last matching line" would happily return
- * the previous call's answer. Counting the echoes of the command and waiting
- * for a new one closes that: tmux echoes the typed line, so once the count has
- * risen we know the reply we then read follows our own command.
+ * the previous call's answer.
+ *
+ * **This used to count the echoes of the command and wait for the count to
+ * rise. That is unsound, and it was MEASURED failing 2026-09-12.** The count is
+ * taken over `capture-pane -S -400`, a BOUNDED, EVICTING window: measured at
+ * 424 captured lines against 1904 lines of history, holding 3 echoes of a bare
+ * `difficulty`. A burst of server output (a `demo:phase5` run with 17 reflex
+ * preemptions did it) evicts older echoes, so after sending, the count is no
+ * higher than `before` and the match branch never runs — `demo:phase5` reported
+ * a FALSE "RESTORE FAILED" with the reply "The difficulty is Peaceful" sitting
+ * in the captured lines. The inverse is worse and is why this had to change
+ * rather than merely widen: evict OUR echo while an older one survives and the
+ * count test passes against the wrong echo, returning a STALE reply as the
+ * current one — a false green in exactly the before/after case above.
+ *
+ * So correlation is now anchored on something that cannot be confused with
+ * anything else: a nonce. A deliberately invalid command is sent first, the
+ * server answers "Unknown or incomplete command" quoting it back, and the real
+ * command's reply is whatever matches AFTER the last line mentioning the nonce.
+ * Commands are processed in order, so every nonce line precedes the reply.
+ * Eviction can now only remove the anchor entirely, which fails loudly with a
+ * message saying so — it can never silently select an older reply.
+ *
+ * The cost is one junk line per query in the server log, tagged `minebot_probe_`
+ * so anyone reading the log can see what it is.
  */
+let probeCounter = 0
+
 export async function queryConsole(
   command: string,
   pattern: RegExp,
   opts: { timeoutMs?: number } = {},
 ): Promise<RegExpMatchArray> {
   const timeoutMs = opts.timeoutMs ?? 8_000
+  // Counter AND random: the counter keeps two probes in one process distinct
+  // even inside the same millisecond, the random suffix keeps two processes
+  // (a demo and a test run) from colliding in one pane's scrollback.
+  const nonce = `minebot_probe_${++probeCounter}_${Math.random().toString(36).slice(2, 10)}`
   const capture = (): string[] =>
     execFileSync('tmux', ['capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-400'], {
       encoding: 'utf8',
     }).split('\n')
-  const echoes = (lines: string[]): number[] =>
-    lines.flatMap((line, i) => (line.trim() === command ? [i] : []))
 
-  const before = echoes(capture()).length
+  // Both sent up front, in this order. The server executes console commands in
+  // order, so its reply to `command` lands after every line the nonce produced.
+  sendConsoleCommand(nonce)
   sendConsoleCommand(command)
 
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const lines = capture()
-    const at = echoes(lines)
-    if (at.length > before) {
-      // Everything the server printed after our own echo of the command.
-      for (const line of lines.slice(at[at.length - 1]! + 1)) {
+    // The LAST mention, not the first: the nonce appears twice, once as the
+    // echoed input and again in the server's error quoting it back.
+    let anchor = -1
+    for (const [i, line] of lines.entries()) if (line.includes(nonce)) anchor = i
+    if (anchor !== -1) {
+      for (const line of lines.slice(anchor + 1)) {
         const m = line.match(pattern)
         if (m) return m
       }
     }
     if (Date.now() >= deadline) {
       throw new Error(
-        `queryConsole: "${command}" produced no line matching ${pattern} within ${timeoutMs}ms. ` +
-          `Last 5 console lines: ${JSON.stringify(lines.slice(-6, -1))}`,
+        `queryConsole: "${command}" produced no line matching ${pattern} within ${timeoutMs}ms` +
+          (anchor === -1
+            ? ` — and its ${nonce} anchor never appeared in the captured pane, so either the ` +
+              `server is not reading its console or the pane scrolled past it`
+            : '') +
+          `. Last 5 console lines: ${JSON.stringify(lines.slice(-6, -1))}`,
       )
     }
     await new Promise((resolve) => setTimeout(resolve, 150))
