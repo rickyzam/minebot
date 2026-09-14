@@ -117,6 +117,60 @@ const SCENARIOS: readonly Scenario[] = [
     hoped: ['explore_for'],
   },
   {
+    // Spec §4.1. The measured defect: the model reasons "no more coal can be
+    // collected from this position" and gives up on the GOAL. The position is
+    // finished; the goal is not, and the report says so — "more ground
+    // remains" is on the screen in front of it.
+    name: 'position dead, ground remains',
+    goal: 'get me some coal',
+    inventory: [PICKAXE],
+    position: COAL_AT,
+    history: [
+      found,
+      step(
+        2,
+        { action: 'mine_block_at', ...COAL_AT, maxDistance: 32 },
+        { kind: 'result', result: fail('not_found', `no block at ${COAL_AT.x},${COAL_AT.y},${COAL_AT.z}`) },
+      ),
+      step(
+        3,
+        { action: 'explore_for', names: ['coal_ore'], maxDistance: 64 },
+        {
+          kind: 'result',
+          result: ok({ found: [], searchedTo: 32, exhausted: false }),
+        },
+      ),
+    ],
+    hoped: ['explore_for'],
+  },
+  {
+    // THE PAIRED CONTROL (spec §4.5). Identical but exhausted: true. Without
+    // this, "the rule works" and "the rule fires unconditionally" are
+    // indistinguishable — the same reason the contract suite pairs every
+    // hidden block with a visible one.
+    name: 'position dead, search exhausted',
+    goal: 'get me some coal',
+    inventory: [PICKAXE],
+    position: COAL_AT,
+    history: [
+      found,
+      step(
+        2,
+        { action: 'mine_block_at', ...COAL_AT, maxDistance: 32 },
+        { kind: 'result', result: fail('not_found', `no block at ${COAL_AT.x},${COAL_AT.y},${COAL_AT.z}`) },
+      ),
+      step(
+        3,
+        { action: 'explore_for', names: ['coal_ore'], maxDistance: 64 },
+        {
+          kind: 'result',
+          result: ok({ found: [], searchedTo: 64, exhausted: true }),
+        },
+      ),
+    ],
+    hoped: ['give_up'],
+  },
+  {
     name: 'after missing_tool, inventory empty',
     goal: 'get me some coal',
     inventory: [],

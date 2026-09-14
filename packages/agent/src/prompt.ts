@@ -58,7 +58,17 @@ const describeValue = (v: unknown): string => {
         : `found ${r.found.length}: ${r.found
             .map((b) => `${b.name} at ${vec(b.position)}, ${dist(b.distance)} away`)
             .join('; ')}`
-    const more = r.exhausted ? 'nowhere left to search' : 'more ground remains'
+    // Spec §4.1. This used to read as a bare fact — "more ground remains" — and
+    // three separate rules failed to get the model to draw the conclusion from
+    // it. Reading the raw replies showed why: it answered give_up because "no
+    // new coal_ore was found in the surrounding area", i.e. it was treating ONE
+    // empty explore_for as proof of absence. Naming the search's state outright
+    // is what broke that belief: the give_up went away at the same measurement
+    // this wording landed. {@link DECISION} quotes both strings verbatim —
+    // change one and you must change the other.
+    const more = r.exhausted
+      ? 'this search is FINISHED - nowhere left to search'
+      : 'this search is UNFINISHED - more ground remains'
     // Rounded because searchedTo is a raw distance: the Phase 4 demo put
     // "searched out to 32.202484376209235" in front of the model. Fifteen
     // significant figures of noise in a prompt is not free, and the number is
@@ -154,6 +164,44 @@ const SYSTEM = [
 ].join('\n')
 
 /**
+ * Read LAST, because it is rendered last (spec §4.1/§4.2).
+ *
+ * This block says nothing the rules above do not already say. Its whole value
+ * is where it sits, and that was measured rather than guessed. The same
+ * `explore_for` guidance was tried in four other forms — as a claim about
+ * dead positions, as "read the LAST line of Recent actions", beside the
+ * `find_blocks` rule it is modelled on, and as the final rule before the menu.
+ * All four left `position dead, ground remains` off target. Moved here, after
+ * the history, it lands 4/4. The control run that matters: an equally trailing
+ * but CONTENTLESS line ("check your choice against the rules above") did not
+ * move the answer at all, so this is the words in the last slot, not merely
+ * something in the last slot.
+ *
+ * It is unconditional on purpose. Rendering it only after an unfinished
+ * `explore_for` would be a code-level rule deciding what the model is told,
+ * which spec §2 requires be earned by a prompt failing first — and this one
+ * does not fail.
+ *
+ * The three bullets are a set, not a list to pick from. Each was added because
+ * the ones before it pulled a scenario off target: with only the `explore_for`
+ * bullet the model answered `explore_for` to a `missing_tool` failure (9/9),
+ * because the most salient thing in the prompt had become "go and look". A
+ * fourth bullet for `drop collected: false` was tried and REMOVED — it moved
+ * `mine_block_at already returned not_found` to `move_to`. Adding a bullet
+ * here is cheap; not re-running the probe afterwards is not.
+ */
+const DECISION = [
+  'Before you answer, look at the LAST line above and decide from it:',
+  '- an explore_for whose report says "this search is UNFINISHED" — the search has not',
+  '  looked everywhere yet, so run explore_for again. find_blocks cannot help; it only',
+  '  sees from where the bot stands. give_up only once a report says FINISHED.',
+  '- a mine_block_at that FAILED with not_found — that position is finished, so do not',
+  '  mine it or move_to it again.',
+  '- an action that FAILED with missing_tool — walking somewhere else will not conjure a',
+  '  tool, so give_up.',
+].join('\n')
+
+/**
  * What the loop knows and the model cannot see, as a notices block.
  *
  * Conditional on purpose. Rendering "Steps remaining: 14" every turn is noise
@@ -207,6 +255,8 @@ export const renderPrompt = (
         '',
         ...(notices === null ? [] : [notices, '']),
         history,
+        '',
+        DECISION,
       ].join('\n'),
     },
   ]

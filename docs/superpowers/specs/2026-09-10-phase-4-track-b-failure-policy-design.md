@@ -377,3 +377,99 @@ This is the pre-change baseline this phase's later tasks compare against. Any
 regression introduced by a prompt or code change in this phase must be measured
 against these numbers, taken under the replicating probe, not against the
 Phase 4A figures.
+
+## 12. §4.1 as built — four failed candidates and what actually moved it
+
+Measured 2026-09-13, `qwen3:14b` at `100.96.8.28`, every figure from
+`npm run agent:probe -- 4 5` (4 replicates x 5 attempts, each replicate a fresh
+process). The full working is in
+`.superpowers/sdd/2026-09-10-phase-4-track-b/task-4-report.md`; this section is
+the part worth carrying forward.
+
+**Before any rule**, with both new scenarios in place: `position dead, ground
+remains` answered `give_up` 4/4 — the defect reproduced — while the paired
+control `position dead, search exhausted` already answered `give_up` 4/4. So this
+was never a persuasion problem. The control was already right; the task was to
+**discriminate**, and a rule that fired unconditionally would have proved nothing.
+
+### The diagnosis that mattered, and it was not the one in §4.1
+
+`give_up` carries a reason string, and reading it changed the problem. The model
+said:
+
+> *"the coal_ore at (18, 60, -34) is no longer present, and no new coal_ore was
+> found in the surrounding area"*
+
+It was **not** failing to notice "more ground remains". It was treating one empty
+`explore_for` as **proof the block is absent from the world**, and giving up on a
+goal it believed impossible. Against that belief, "run `explore_for` again" reads
+as an instruction to do something futile — which is why candidates 1 and 2, both
+directives with no mechanism attached, changed nothing.
+
+### What failed, and why each failure is informative
+
+| # | Candidate | Result |
+|---|---|---|
+| 1 | Asked the model to weigh whether a dead position means the goal is impossible — a claim | `give_up` 4/4 |
+| 2 | Two stacked rules keyed on the string "more ground remains", one positional ("read the LAST line of Recent actions") | identical to no rule at all |
+| 3 | Compare the `explore_for` report's `searched out to N` against the `maxDistance` asked for | `give_up` 4/4 |
+| 4 | Name the state in the report line itself, plus a rule quoting it | `find_blocks` 4/4 — off target, but the `give_up` was gone |
+| 5 | Candidate 4 minus "never a repeat", plus a mechanism excluding `find_blocks` | `find_blocks` 4/4 |
+| 6 | The same guidance rendered **after the history**, as a three-bullet decision block | **`explore_for` 4/4, control `give_up` 4/4** |
+
+Candidate 3 deserves its own line, because it looked like exactly the move §2
+recommends — replace an inference with a comparison — and still failed. The
+reason string after it read *"explore_for did not find any new coal_ore **within
+64 distance**"*. The model had collapsed the radius it REQUESTED into the ground
+it had COVERED. **`searchedTo` is not a usable trigger; `exhausted` is** — a
+comparison is only checkable if the model resolves both operands independently.
+
+Candidate 4 is where it broke, and it separated one defect into two: naming the
+search's state outright (`this search is UNFINISHED - more ground remains`)
+destroyed the "coal is absent" belief, and the model stopped giving up. It then
+chose `find_blocks`. **The wrong belief and the wrong action were different
+problems**, and the first three candidates were only ever addressing the second.
+
+### The lever was position, and it was isolated with a control
+
+Five wordings had failed from inside the system message. A screening harness
+varied only *where* the same text sits:
+
+- as the last rule, after the action menu, or beside the `find_blocks` rule it is
+  modelled on — all left the answer at `find_blocks`;
+- moved **after the history**, the last thing in the prompt — `explore_for` 9/9;
+- the same trailing slot filled with a **contentless** line ("check your choice
+  against the rules above") — back to `find_blocks` 9/9.
+
+That last row is the control that makes the claim falsifiable: it is the words in
+the final slot, not the existence of something in it.
+
+### The cost of the last slot, which is the part to remember
+
+**Any trailing text degrades the decisions it does not mention.** Even the
+contentless line pulled `mine_block_at already returned not_found` from `give_up`
+to `move_to` 9/9. With only the `explore_for` bullet, a `missing_tool` failure
+was answered `explore_for` 9/9 — "go and look" had become the most salient thing
+in the prompt. A fourth bullet for `drop collected: false` moved `not_found
+already` to `move_to` 9/9 and was removed; putting the `missing_tool` bullet
+first moved it to `mine_block_at` 9/9.
+
+So `DECISION` is a **set**, ordered, each bullet present because its absence cost
+a scenario. Adding a bullet is cheap; not re-running the probe afterwards is not.
+
+### Shipped
+
+`DECISION` in `prompt.ts`, rendered unconditionally at the end of the user
+message. Unconditional on purpose: gating it on an unfinished `explore_for` would
+be a code rule deciding what the model is told, and §2 requires that be earned by
+a prompt failing first. §10 risk 1 — that a code rule in `advice.ts` would be
+needed — did not materialise.
+
+Final probe, all nine scenarios: **9/9 stable and on target, 0 stable but wrong,
+0 UNSTABLE, 180/180 decoded, median latency 276ms.**
+
+One answer changed against §11's baseline: `mine_block_at already returned
+not_found` moved from `give_up` to `explore_for`. Both are in that scenario's
+`hoped` set and `probe.ts` records `explore_for` as the move the position calls
+for, so it is a move to the better of two accepted answers — recorded here
+because "every pre-existing scenario unmoved" is the bar, and this one moved.

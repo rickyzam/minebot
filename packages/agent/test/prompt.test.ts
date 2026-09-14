@@ -81,6 +81,29 @@ describe('renderOutcome', () => {
   it('renders a bare success', () => {
     expect(renderOutcome({ kind: 'result', result: ok(undefined) })).toBe('OK')
   })
+
+  // The two strings this asserts are the ones the decision block quotes back at
+  // the model. Four candidate rules failed to make it treat an empty
+  // explore_for as an UNFINISHED search rather than proof the block is absent;
+  // naming the state outright is what broke that. The phrasing is therefore
+  // load-bearing prompt behaviour, not cosmetics.
+  it('names whether an exploration report is a finished search or an unfinished one', () => {
+    const running = renderOutcome({
+      kind: 'result',
+      result: ok({ found: [], searchedTo: 32.2024, exhausted: false }),
+    })
+    expect(running).toBe(
+      'OK (found nothing; searched out to 32; this search is UNFINISHED - more ground remains)',
+    )
+
+    const done = renderOutcome({
+      kind: 'result',
+      result: ok({ found: [], searchedTo: 64, exhausted: true }),
+    })
+    expect(done).toBe(
+      'OK (found nothing; searched out to 64; this search is FINISHED - nowhere left to search)',
+    )
+  })
 })
 
 describe('renderPrompt', () => {
@@ -191,5 +214,51 @@ describe('renderPrompt with advice', () => {
     const [system, user] = renderPrompt('get coal', snapshot, [], advice)
     expect(user!.content).toContain('Notices')
     expect(system!.content).not.toContain('Notices')
+  })
+})
+
+describe('renderPrompt decision block', () => {
+  // Its position is the entire reason it works. The same guidance sat in the
+  // system rules in four earlier forms and left `position dead, ground remains`
+  // off target every time; rendered after the history it lands 4/4. A test that
+  // only checked the text was present would pass on a version that does not
+  // work, so this one pins that nothing follows it.
+  it('is the last thing in the user message, after the history', () => {
+    const steps = [step(1, { outcome: { kind: 'result', result: ok(undefined) } })]
+    const [, user] = renderPrompt('get coal', snapshot, steps, quiet)
+    const text = user!.content
+    expect(text).toContain('Before you answer, look at the LAST line above')
+    expect(text.indexOf('Recent actions:')).toBeLessThan(
+      text.indexOf('Before you answer, look at the LAST line above'),
+    )
+    expect(text.trimEnd().endsWith('so give_up.')).toBe(true)
+  })
+
+  // The block tells the model to act on two phrases. If `describeValue` ever
+  // stops emitting them verbatim the instruction silently addresses nothing,
+  // and `npm test` would otherwise stay green while the bot regressed.
+  it('quotes the exact words an exploration report uses', () => {
+    const [, user] = renderPrompt('get coal', snapshot, [], quiet)
+    const unfinished = renderOutcome({
+      kind: 'result',
+      result: ok({ found: [], searchedTo: 32, exhausted: false }),
+    })
+    const finished = renderOutcome({
+      kind: 'result',
+      result: ok({ found: [], searchedTo: 64, exhausted: true }),
+    })
+    expect(unfinished).toContain('this search is UNFINISHED')
+    expect(finished).toContain('this search is FINISHED')
+    expect(user!.content).toContain('"this search is UNFINISHED"')
+    expect(user!.content).toContain('FINISHED')
+  })
+
+  // It is unconditional on purpose: making it appear only after an unfinished
+  // explore_for would be a code rule choosing what the model is told, which
+  // spec §2 requires a prompt failure to earn first.
+  it('is rendered even on the very first turn, when there is no history', () => {
+    const [, user] = renderPrompt('get coal', snapshot, [], quiet)
+    expect(user!.content).toContain('(none yet)')
+    expect(user!.content).toContain('Before you answer, look at the LAST line above')
   })
 })
