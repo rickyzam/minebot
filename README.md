@@ -2,9 +2,9 @@
 
 A tool-calling LLM agent that plays Minecraft as a bot — a "smarter NPC" that can navigate, mine, build from blueprints, fight or flee, and talk to players, all through one shared local model rather than a specialised model per behaviour.
 
-**Status: Phase 5 Track A complete except `flee` — the reflex layer beats the plan, under a live mob.** It connects, reports immutable world state, paths around obstacles, mines with the right tool, collects the drop, follows a player, places blocks, builds a structure from a schematic, and swings at a hostile — all under cancellable control. `packages/agent/` turns that state into an LLM decision and back into an action; the two are wired together and run end to end. Perception is limited to line of sight, so the bot no longer sees ore through rock — which is what makes searching necessary and honest.
+**Status: Phase 5 Track A COMPLETE — the reflex layer beats the plan, under a live mob, and the bot now runs from what it cannot beat.** It connects, reports immutable world state, paths around obstacles, mines with the right tool, collects the drop, follows a player, places blocks, builds a structure from a schematic, swings at a hostile, and flees one — all under cancellable control. `packages/agent/` turns that state into an LLM decision and back into an action; the two are wired together and run end to end. Perception is limited to line of sight, so the bot no longer sees ore through rock — which is what makes searching necessary and honest.
 
-The one deliberate gap is **`flee`, which is still a stub**: its distance and timeout are shared-surface decisions that have not been agreed, and guessing at them would be worse than leaving the gap visible. The reflex arbiter already routes a low-health trigger to it, so it will work the day that decision lands.
+`flee` was the last gap and closed on 2026-09-14, once its distance and timeout were agreed: **it aims for 100 blocks from the nearest hostile, bounded by 10 seconds.** Those two cannot both hold — the bot's measured top speed is 5.60 blocks/sec, so 100 blocks needs ≥17.9s — so the 100 is a *target*, the bound wins, and `fled: true` means the gap actually grew. There are now **no stubs and no skipped tests**.
 
 ## The core idea
 
@@ -73,8 +73,8 @@ Three properties are worth knowing:
 
 `ReflexExecutor` wraps any `BotExecutor` and is the layer-1 arbiter. It watches
 the inner executor's events; when a pure rule (`evaluateReflex`) fires, it
-aborts whatever the planner had in flight, runs its own recovery — `attack`, or
-`flee` once that exists — and hands the caller back `interrupted`. The planning
+aborts whatever the planner had in flight, runs its own recovery — `attack` for a
+hostile in reach, `flee` on low health — and hands the caller back `interrupted`. The planning
 loop already re-plans on an `interrupted` result that had no outer abort, so
 nothing above this layer needs to know it exists.
 
@@ -99,7 +99,7 @@ actually occurred **and** its recovery returned `ok`.
 
 ```bash
 npm install
-npm test        # 427 unit tests — no network, no Minecraft, no model
+npm test        # 435 unit tests — no network, no Minecraft, no model
 npm run typecheck
 ```
 
@@ -131,7 +131,7 @@ Then:
 
 ```bash
 npm run smoke            # Does a bot connect at all?
-npm run test:integration # 133 tests against the live server (1 skipped: the `flee` guarantee)
+npm run test:integration # 141 tests against the live server, no skips
 npm run demo             # Connect, print a snapshot, walk to a coordinate
 npm run demo:phase2      # Path around a wall, mine coal ore, collect the drop
 npm run demo:phase3      # The whole loop: real state, real model, real action
@@ -175,8 +175,8 @@ server that it went back.
 | 4 (Track A) | Search: `exploreFor`, a scored benchmark, and the `explore_for` action | **Done** |
 | 4.5 | [Line-of-sight perception](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — stop `findBlocks` seeing through rock | **Done** |
 | 4 (rest) | Retry and recovery policy, against the step logs the loop now produces | Next |
-| 5 (Track A) | Full toolbox: the reflex arbiter, `followPlayer`, `placeBlock`, schematics, `attack` | **Done except `flee`** |
-| 5 (`flee`) | Disengage on low health — gated on an unagreed distance and timeout | Blocked |
+| 5 (Track A) | Full toolbox: the reflex arbiter, `followPlayer`, `placeBlock`, schematics, `attack` | **Done** |
+| 5 (`flee`) | Disengage on low health — 100 blocks as a target, bounded by 10s | **Done** |
 | 6 | Multi-bot scaling against one shared model | |
 | 7 | [Memory and recall](docs/notes/Memory%20and%20Recall.md) — short-term spatial memory, durable landmarks | Roadmap only |
 

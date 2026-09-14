@@ -325,8 +325,20 @@ export interface BotExecutor {
    * call. The same shape as `mineBlock`'s `collected`: a fact about how it went
    * that must not be lost by reporting a failure.
    *
-   * How far it goes and how long it may take are not yet agreed (Phase 5 spec
-   * §7); do not depend on either.
+   * **Agreed 2026-09-14 (Phase 5 spec §7, Decision 4): it aims for 100 blocks
+   * from the nearest hostile, bounded by 10 seconds.** The 100 is a TARGET, not
+   * a requirement — the two cannot both be satisfied, because a bot's top speed
+   * is 5.60 blocks/sec (measured) and 100 blocks therefore needs ≥17.9s, so 10
+   * seconds buys ~56 blocks at best. The bound wins and the run is truncated;
+   * `fled: true` still means what it says, that the gap grew.
+   *
+   * Fails:
+   * - `unreachable` — there was a hostile and the bot could not increase the
+   *   gap at all: nowhere to run that is further away, or nowhere it can path
+   *   to. Distinct from `fled: false`, which means there was nothing to flee.
+   * - `timeout` — the 10 seconds elapsed with the gap no larger than it
+   *   started. Running and gaining ground resolves `ok` even when the timer is
+   *   what ended it, which is the common case given the numbers above.
    */
   flee(opts?: ActionOptions): Promise<Result<{ fled: boolean }>>
 

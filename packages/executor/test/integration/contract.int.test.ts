@@ -1,5 +1,6 @@
 import {
   runContractSuite,
+  type FleeFixture,
   type FollowFixture,
   type PlaceFixture,
   type VisibilityFixture,
@@ -212,6 +213,21 @@ runContractSuite('MineflayerExecutor', async () => {
       await waitForItemCount(executor, PLACE_BLOCK, 0)
       // No release: buildArena rebuilds the floor and clears the air above it.
       return { blockName: PLACE_BLOCK, position: PLACE_TARGET }
+    },
+    prepareFleeFixture: async (): Promise<FleeFixture> => {
+      // The guarantee is the no-hostile case, so all this has to establish is
+      // "no hostile near the bot" — which the suite then verifies for itself and
+      // throws if the fixture lied.
+      //
+      // The arena does it two ways over. It is rebuilt, which the enclosing
+      // `difficulty peaceful` (this file never raises it) has already made
+      // hostile-free; and it pins the bot's position, so "nothing nearby" is a
+      // fact about the fixture rather than about whatever wandered past the
+      // surface start. Supplying this is what stops the suite's last SKIP.
+      await buildArena(ARENA)
+      await teleportAndWait(executor, 'ITContract', START)
+      await waitForOnGround(executor, { expectedY: ARENA.floorY + 1 })
+      return {}
     },
   }
 })

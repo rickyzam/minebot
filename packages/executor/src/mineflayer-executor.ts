@@ -9,6 +9,7 @@ import {
   type BlockQuery,
   type BotEvents,
   type BotExecutor,
+  type EntityInfo,
   type ExplorationReport,
   type ExploreOptions,
   type Result,
@@ -112,6 +113,35 @@ const PLACE_REACH = 4.5
  */
 const ATTACK_REACH = 3
 const ATTACK_FOLLOW_RANGE = 2
+
+/**
+ * How far `flee` AIMS to get from the nearest hostile, and how long it may take.
+ * Agreed 2026-09-14 (Phase 5 spec §7, Decision 4).
+ *
+ * The 100 is a target rather than a requirement, and deliberately so: MEASURED
+ * 2026-09-13, the bot sustains 5.60 blocks/sec (sprint, flat, unobstructed), so
+ * 100 blocks needs ≥17.9s and this bound buys ~56 at best. The bound wins.
+ *
+ * 10_000 and not more, for the reason that bounded `attack` in Task 6a: a reflex
+ * recovery that can run for 30s is not a reflex.
+ */
+const FLEE_TARGET_DISTANCE = 100
+const FLEE_TIMEOUT_MS = 10_000
+
+/**
+ * The radii `flee` tries, furthest first, and how many bearings on each.
+ *
+ * A ladder rather than a single ring at the target, because the pathfinder plans
+ * to the candidate: an unpathable one means the bot does not move at all, and on
+ * any confined floor every point 100 blocks out is off the edge. Without the
+ * fallbacks, "I could have run 30 blocks that way" would report `unreachable`.
+ *
+ * Eight bearings is the same compass the exploration spiral uses — enough that a
+ * wall in one direction does not rule out escape, few enough that the whole list
+ * can be tried inside the bound.
+ */
+const FLEE_RADII: readonly number[] = [FLEE_TARGET_DISTANCE, 64, 32, 16, 8]
+const FLEE_BEARINGS = 8
 
 /**
  * Blocks that do NOT occupy a cell for `placeBlock` — the air variants, plus
@@ -244,6 +274,18 @@ const MAX_TIMER_MS = 2_147_483_647
  * cost is ~572ms/block, so the whole figure is ~80× typical either way.
  */
 const BUILD_PER_BLOCK_BUDGET_MS = 45_000
+
+/**
+ * Horizontal distance between two points, ignoring y.
+ *
+ * `flee` compares candidate destinations against a mob's position, and both sit
+ * on the same floor: including y would let a candidate look further away purely
+ * because the mob is a block lower, which is not escape.
+ */
+const distanceFrom2D = (
+  a: { x: number; z: number },
+  b: { x: number; z: number },
+): number => Math.hypot(a.x - b.x, a.z - b.z)
 
 /** Straight-line distance from the bot to a point, in blocks. */
 const distanceFrom = (bot: Bot, p: { x: number; y: number; z: number }): number => {
@@ -1679,8 +1721,127 @@ export class MineflayerExecutor implements BotExecutor {
     })
   }
 
+  /**
+   * Run away from the nearest hostile: aim for `FLEE_TARGET_DISTANCE`, bounded
+   * by `FLEE_TIMEOUT_MS`, and report whether the gap actually grew.
+   *
+   * **The two numbers cannot both be satisfied, and the agreement says the bound
+   * wins.** MEASURED 2026-09-13: the bot's top speed is 5.60 blocks/sec (sprint,
+   * flat, unobstructed), so 100 blocks needs ≥17.9s and 10 seconds buys ~56
+   * blocks at best. So 100 is a *target*: the run is truncated by the timer, and
+   * `onElapsed` reports `fled: true` when the gap grew anyway — which is the
+   * ordinary outcome, not an edge case.
+   *
+   * **Why a LADDER of radii rather than one ring at 100.** The pathfinder plans
+   * to the candidate, so an unpathable candidate means the bot does not move at
+   * all — and on any confined floor every point 100 blocks out is off the edge.
+   * A single ring would therefore turn "I could have run 30 blocks that way" into
+   * `unreachable`. Trying 100 first and falling back keeps the agreed target
+   * while still escaping when only a shorter run exists. This is a Track A
+   * implementation choice inside the agreed numbers, not a change to them.
+   *
+   * Candidates are filtered to those strictly further from the hostile than the
+   * bot is now — running *past* a zombie is not fleeing — and tried furthest
+   * first.
+   *
+   * Reasons, per the contract: `ok({ fled: false })` only for "there was no
+   * hostile", including the routine race where one died or despawned between the
+   * trigger and this call; `unreachable` when there was one and no candidate
+   * could increase the gap; `timeout` when the bound elapsed with no gain.
+   */
   async flee(opts?: ActionOptions): Promise<Result<{ fled: boolean }>> {
-    return this.runAction(opts, 30_000, async () => fail('internal', 'flee arrives in Phase 5'))
+    // Shared between the body and `onElapsed`, because the timer can end the run
+    // at any moment and "did the gap grow?" is only answerable from what the
+    // body established before it did.
+    let hostileId: number | null = null
+    let startGap: number | null = null
+
+    /**
+     * The current gap to the hostile we set out to escape, or null if it is gone
+     * — which counts as escaped: the thing being fled no longer exists.
+     */
+    const gapNow = (): number | null => {
+      const bot = this.bot
+      if (!bot || hostileId === null) return null
+      const e = bot.entities[hostileId]
+      if (e === undefined || e.isValid === false) return null
+      return distanceFrom(bot, e.position)
+    }
+    const gapGrew = (): boolean => {
+      if (startGap === null) return false
+      const g = gapNow()
+      return g === null || g > startGap
+    }
+
+    return this.runAction<{ fled: boolean }>(
+      opts,
+      FLEE_TIMEOUT_MS,
+      async (bot, signal) => {
+        const hostiles = this.getState().nearbyEntities.filter((e) => e.kind === 'hostile')
+        const nearest = hostiles.reduce<EntityInfo | null>(
+          (best, e) => (best === null || e.distance < best.distance ? e : best),
+          null,
+        )
+        // Nothing to flee from is the safest outcome, not a failure.
+        if (!nearest) return ok({ fled: false })
+
+        hostileId = nearest.id
+        startGap = distanceFrom(bot, nearest.position)
+        const from = bot.entity.position.clone()
+
+        // Furthest-from-the-hostile first, across the whole ladder at once, so a
+        // reachable 32-block escape is preferred over an unreachable 100-block one
+        // only because the latter cannot be pathed — not because of ring order.
+        const candidates = FLEE_RADII.flatMap((radius) =>
+          Array.from({ length: FLEE_BEARINGS }, (_, i) => {
+            const theta = (2 * Math.PI * i) / FLEE_BEARINGS
+            return {
+              x: Math.round(from.x + radius * Math.cos(theta)),
+              y: Math.round(from.y),
+              z: Math.round(from.z + radius * Math.sin(theta)),
+            }
+          }),
+        )
+          .map((p) => ({ p, gap: distanceFrom2D(p, nearest.position) }))
+          // Strictly further, or it is not fleeing.
+          .filter((c) => c.gap > (startGap ?? 0))
+          .sort((a, b) => b.gap - a.gap)
+
+        for (const { p } of candidates) {
+          if (signal.aborted) break
+          const r = await this.gotoGoal(
+            bot,
+            signal,
+            new goals.GoalNear(p.x, p.y, p.z, 1),
+            () => distanceFrom(bot, p) <= ARRIVAL_TOLERANCE,
+          )
+          // Verified against the world, never from the promise: goto() resolves
+          // ok on a zero-length path, so arrival is not evidence of movement and
+          // movement is not evidence of escape.
+          if (gapGrew()) return ok({ fled: true })
+          // An abort is the caller's or the timer's business, not a candidate
+          // that failed — stop rather than burning the rest of the list.
+          if (!r.ok && r.reason === 'interrupted') break
+        }
+
+        if (gapGrew()) return ok({ fled: true })
+        if (signal.aborted) return ok({ fled: false })
+        return fail(
+          'unreachable',
+          `could not increase the gap to ${nearest.name} from ${startGap.toFixed(1)} blocks — ` +
+            `${candidates.length} candidate destination(s) tried, none further away and reachable`,
+        )
+      },
+      // The timer is the expected ending, not an error: with a 100-block target
+      // and a 10s bound it fires on any successful long run.
+      () =>
+        gapGrew()
+          ? ok({ fled: true })
+          : fail(
+              'timeout',
+              `fled for ${FLEE_TIMEOUT_MS}ms without increasing the gap to the nearest hostile`,
+            ),
+    )
   }
 
   /**

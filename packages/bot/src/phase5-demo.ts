@@ -17,13 +17,15 @@
  * asserted; a preemption is *supposed* to derail it, and the planner's own
  * recovery from that is Track B's business.
  *
- * **`flee` is still a stub.** Task 6b is gated on a decision that has not been
- * made — flee's distance and timeout are unagreed shared surface — so
- * `MineflayerExecutor.flee` still returns `fail('internal', 'flee arrives in
- * Phase 5')`. A healthy bot's trigger is `attack`, which is implemented, so
- * that is what this demo exercises. If the bot's health ever reaches the flee
- * threshold (6), the reflex will attempt `flee` and get `internal` back: the
- * demo prints that rather than hiding it.
+ * **`flee` landed 2026-09-14 (Task 6b) and is no longer a stub.** A healthy
+ * bot's trigger is `attack`, so that is still what this demo usually exercises;
+ * but if health reaches the flee threshold (6) the reflex now runs a real
+ * escape — aiming for 100 blocks, bounded by 10s — instead of getting
+ * `internal` back. The demo reports flee triggers either way.
+ *
+ * That matters here because the stub used to kill the bot: across six runs while
+ * it was stubbed, two ended `FAIL: the bot DIED` after three flee triggers each
+ * returned `internal` and nothing evaded the zombie.
  *
  * Step 1 of the brief, decided here rather than at runtime: the console
  * helpers below are a local copy. `mc-console.ts` lives in
@@ -534,16 +536,23 @@ async function main(): Promise<number> {
         `in flight${onPlan.length > 0 ? `: ${[...new Set(onPlan.map((p) => p.action))].join(', ')}` : ''})`,
     )
 
-    // flee is a stub (Task 6b is gated on an unagreed contract decision), so a
-    // flee trigger can only ever record `internal`. Say so rather than letting
-    // it read as a reflex defect.
+    // flee is implemented as of Task 6b, so a flee trigger now reports a real
+    // outcome. Printed with that outcome rather than assumed, because this used
+    // to be the branch that explained away a stub.
     const fleeAttempts = preemptions.filter((p) => p.trigger.kind === 'flee')
     if (fleeAttempts.length > 0) {
+      const outcomes = fleeAttempts.map((p) =>
+        p.recovery === null
+          ? 'still running'
+          : p.recovery.ok
+            ? `ok (fled: ${String((p.recovery.value as { fled?: boolean }).fled)})`
+            : `${p.recovery.reason}`,
+      )
       console.log(
         `\nNOTE: ${fleeAttempts.length} flee trigger(s) fired — the bot dropped to the flee ` +
-          `threshold (health ≤ 6). \`flee\` is STILL A STUB (Phase 5 Task 6b is gated on an ` +
-          `unagreed distance/timeout), so each returned internal: "flee arrives in Phase 5". ` +
-          `That is the known gap, not a reflex failure.`,
+          `threshold (health ≤ 6) and ran a REAL escape (Task 6b, 2026-09-14): ` +
+          `${outcomes.join(', ')}. Until that landed each of these returned ` +
+          `internal: "flee arrives in Phase 5", and two of six runs ended with the bot dead.`,
       )
     }
 
@@ -581,7 +590,8 @@ async function main(): Promise<number> {
       `\nDONE: a zombie came within reach mid-goal; the reflex layer preempted ` +
         `"${first.action}", ran its ${first.trigger.kind} recovery against the live world, and ` +
         `it returned ok. The planner was handed back \`interrupted\` and re-observed. ` +
-        `(\`flee\` remains a stub — this demo exercises the attack trigger.)`,
+        `(Both triggers are real now — \`flee\` landed in Task 6b — though a healthy bot ` +
+        `reaches the attack trigger first.)`,
     )
     return 0
   } finally {
