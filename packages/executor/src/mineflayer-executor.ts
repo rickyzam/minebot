@@ -1856,6 +1856,14 @@ export class MineflayerExecutor implements BotExecutor {
     maxDistance: number,
     opts?: ExploreOptions,
   ): Promise<Result<ExplorationReport>> {
+    // A non-finite budget means "no budget", and that is SAFE but unbounded.
+    // `runAction` arms no timer for a non-finite timeout (so the setTimeout
+    // overflow that fires after ~2ms cannot bite here), and the inner deadline
+    // below becomes Infinity — so the search runs until the caller aborts it
+    // rather than stopping on its own. That is the honest reading of Infinity
+    // and it is deliberate, but it is NOT the same as the documented default:
+    // `exploreFor(names, 64, { budgetMs: Infinity })` with no signal never
+    // returns. Bounding it is the caller's job, exactly as for `followPlayer`.
     const budgetMs = opts?.budgetMs ?? DEFAULT_EXPLORE_BUDGET_MS
     return this.runAction(
       opts,

@@ -1,12 +1,15 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest'
 import { MineflayerExecutor } from '../../src/index.js'
 import {
+  arenaVolume,
   buildArena,
   clearInventory,
-  queryConsole,
+  expectDifficultyPeaceful,
   sendConsoleCommand,
+  sweepArenaUntilEmpty,
   teleportAndWait,
   waitForOnGround,
+  waitUntil,
   type ArenaBounds,
 } from './mc-console.js'
 
@@ -45,9 +48,7 @@ const ARENA: ArenaBounds = {
 }
 const FLOOR = ARENA.floorY + 1
 
-const ARENA_VOLUME =
-  `x=${ARENA.x0},y=${ARENA.floorY},z=${ARENA.z0},` +
-  `dx=${ARENA.x1 - ARENA.x0},dy=${(ARENA.clearance ?? 6) + 1},dz=${ARENA.z1 - ARENA.z0}`
+const ARENA_VOLUME = arenaVolume(ARENA)
 
 const RUNNER = 'ITFlee'
 const MOB_TAG = 'itflee'
@@ -68,38 +69,8 @@ type Pos = { x: number; y: number; z: number }
 const dist = (a: Pos, b: Pos): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
-async function waitUntil(
-  predicate: () => boolean,
-  complaint: string,
-  timeoutMs = 20_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    if (predicate()) return
-    if (Date.now() >= deadline) throw new Error(`${complaint} (within ${timeoutMs}ms)`)
-    await sleep(150)
-  }
-}
 
-async function sweepArenaUntilEmpty(attempts = 4): Promise<void> {
-  let last = ''
-  for (let i = 0; i < attempts; i++) {
-    sendConsoleCommand(`kill @e[type=item,${ARENA_VOLUME}]`)
-    const m = await queryConsole(
-      `kill @e[type=!player,${ARENA_VOLUME}]`,
-      /No entity was found|Killed /,
-    )
-    last = m[0] ?? ''
-    if (last.includes('No entity was found')) return
-    await sleep(500)
-  }
-  throw new Error(`the arena still held entities after ${attempts} sweeps (last reply: ${last})`)
-}
 
-async function expectDifficultyPeaceful(): Promise<void> {
-  const d = await queryConsole('difficulty', /The difficulty is (\w+)/)
-  if (d[1] !== 'Peaceful') throw new Error(`difficulty was NOT restored (reports ${d[1]})`)
-}
 
 describe('MineflayerExecutor.flee', () => {
   let runner: MineflayerExecutor | null = null
@@ -121,7 +92,7 @@ describe('MineflayerExecutor.flee', () => {
       // A killed mob's loot spawns AFTER the kill, so one sweep cannot catch
       // both — measured in Task 6a.
       await sleep(500)
-      await sweepArenaUntilEmpty()
+      await sweepArenaUntilEmpty(ARENA)
       await expectDifficultyPeaceful()
     }
   })

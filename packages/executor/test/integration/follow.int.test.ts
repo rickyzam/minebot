@@ -52,8 +52,14 @@ describe('MineflayerExecutor.followPlayer', () => {
   let target: MineflayerExecutor | null = null
 
   afterEach(async () => {
-    await follower?.disconnect()
-    await target?.disconnect()
+    // Separate `try`s, not one: a throwing first disconnect must not strand the
+    // second bot connected on the shared server. CLAUDE.md makes leaking a bot
+    // a hard rule, and `await a(); await b()` breaks it on any throw from `a`.
+    try {
+      await follower?.disconnect()
+    } finally {
+      await target?.disconnect()
+    }
     follower = null
     target = null
   })

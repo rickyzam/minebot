@@ -577,3 +577,96 @@ export async function buildLargePlatform(bounds: ArenaBounds): Promise<void> {
   sendConsoleCommand(`kill @e[type=item,x=${cx},y=${floorY},z=${cz},distance=..${radius}]`)
   await new Promise((resolve) => setTimeout(resolve, 800))
 }
+
+// ---------------------------------------------------------------------------
+// Shared arena/console helpers.
+//
+// Hoisted here 2026-09-14. The whole-branch review deferred this with "hoist
+// before a fourth", and the fourth arrived — `waitUntil` had reached four copies
+// and `sweepArenaUntilEmpty` / `expectDifficultyPeaceful` / `ARENA_VOLUME`
+// three, two of each added by `flee` and `reflex-seam` on the same day.
+//
+// These THROW rather than using `expect`, which is why they can live here at
+// all: this module has no vitest import and deliberately keeps none, so it is
+// usable from a demo as well as a test. An `expect`-based helper belongs in the
+// test file, not here.
+// ---------------------------------------------------------------------------
+
+/**
+ * An arena as an entity-selector volume, so a cleanup sweep reaches everything
+ * inside it and nothing outside it.
+ *
+ * `dy` spans the floor through the ceiling — a mob standing on the floor and an
+ * item resting on it are both inside, and so is anything a test put on the roof.
+ */
+export function arenaVolume(bounds: ArenaBounds): string {
+  const clearance = bounds.clearance ?? 6
+  return (
+    `x=${bounds.x0},y=${bounds.floorY},z=${bounds.z0},` +
+    `dx=${bounds.x1 - bounds.x0},dy=${clearance + 1},dz=${bounds.z1 - bounds.z0}`
+  )
+}
+
+/**
+ * Polls `predicate` until it is true, or throws naming what did not happen.
+ *
+ * The complaint is mandatory and not defaulted: a bare "timed out" in an
+ * integration run tells you nothing about which of a dozen awaited conditions
+ * gave up.
+ */
+export async function waitUntil(
+  predicate: () => boolean,
+  complaint: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() >= deadline) throw new Error(`${complaint} (within ${timeoutMs}ms)`)
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+}
+
+/**
+ * Kills everything in the arena and does not return until the SERVER says it is
+ * empty — items included.
+ *
+ * Two passes minimum, and that is measured rather than defensive: killing a mob
+ * creates its drop AFTER the kill resolves (Task 6a), so the flesh does not
+ * exist when the sweep that produced it runs. Only the last test of a run leaks
+ * without this, because every earlier one is hidden by the next `buildArena`,
+ * and `/fill` would not help — a drop is an entity, not a block.
+ */
+export async function sweepArenaUntilEmpty(
+  bounds: ArenaBounds,
+  attempts = 4,
+): Promise<void> {
+  const volume = arenaVolume(bounds)
+  let last = ''
+  for (let i = 0; i < attempts; i++) {
+    sendConsoleCommand(`kill @e[type=item,${volume}]`)
+    const m = await queryConsole(`kill @e[type=!player,${volume}]`, /No entity was found|Killed /)
+    last = m[0] ?? ''
+    if (last.includes('No entity was found')) return
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`the arena still held entities after ${attempts} sweeps (last reply: ${last})`)
+}
+
+/**
+ * Reads difficulty back from the server and throws unless it is Peaceful.
+ *
+ * Difficulty is world-wide, so a combat test that leaves it raised changes the
+ * game for anyone logged in. Read back rather than assumed: `difficulty
+ * peaceful` has no acknowledgement, and a `finally` that fired and failed looks
+ * exactly like one that worked.
+ */
+export async function expectDifficultyPeaceful(): Promise<void> {
+  const d = await queryConsole('difficulty', /The difficulty is (\w+)/)
+  if (d[1] !== 'Peaceful') {
+    throw new Error(
+      `difficulty was NOT restored (the server reports ${d[1]}) — the shared dev server is ` +
+        `left on a combat difficulty`,
+    )
+  }
+}

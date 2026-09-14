@@ -117,6 +117,15 @@ export interface ReflexExecutorOptions {
 const DEFAULT_RECOVERY_TIMEOUT_MS = 10_000
 const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
 
+/**
+ * How many preemption records `preemptions` keeps. Oldest are dropped first.
+ *
+ * Generous on purpose: the busiest run ever measured recorded 17 preemptions in
+ * one goal, so this is ~30x headroom and nothing real will notice the cap. It
+ * exists so a bot left running for hours cannot grow the list without bound.
+ */
+const MAX_PREEMPTION_RECORDS = 500
+
 /** 0 is an ordinary action or nothing at all; 1 and 2 are attack and flee. */
 type Priority = 0 | 1 | 2
 const priorityOf = (t: ReflexTrigger): 1 | 2 => (t.kind === 'flee' ? 2 : 1)
@@ -163,6 +172,14 @@ export class ReflexExecutor implements BotExecutor {
   private suppressed = false
   /** Per trigger kind, so a run of failed attacks cannot disarm flee. */
   private readonly consecutiveFailures: Record<ReflexTrigger['kind'], number> = { attack: 0, flee: 0 }
+  /**
+   * Bounded, oldest dropped first. A `ReflexExecutor` lives as long as the
+   * session and a persistent hostile preempts repeatedly — 17 times in a single
+   * 10-step demo goal, measured — so an uncapped list is a slow leak in a
+   * long-running bot. The cap is generous enough that no test or demo has ever
+   * come close to it, so `preemptions` still reads as "everything that
+   * happened" in practice.
+   */
   private readonly records: LivePreemption[] = []
 
   constructor(inner: BotExecutor, opts: ReflexExecutorOptions = {}) {
@@ -190,9 +207,31 @@ export class ReflexExecutor implements BotExecutor {
     return this.inner.connect()
   }
 
-  /** Not pure pass-through: cancels a running recovery first (see the header). */
+  /**
+   * Not pure pass-through: cancels a running recovery first (see the header),
+   * and clears the per-kind failure counts.
+   *
+   * **The reset is the point, and it closes a real gap.** The counts exist so a
+   * trigger that keeps failing stops firing — but they were session-lived, and
+   * the subscription deliberately survives a reconnect (contract suite,
+   * "subscription lifetime"). So three failed attacks, a disconnect, and a
+   * reconnect left the bot **permanently undefended** against that kind for the
+   * rest of the process: nothing ever reset the counter. A new connection is a
+   * new world, and whatever made those recoveries fail — a mob in an
+   * unreachable spot, a chunk that had not loaded — did not necessarily survive
+   * with it.
+   *
+   * `suppressed` is reset for the same reason. It is normally cleared in
+   * `runRecovery`'s `finally`, which still runs when the abort above settles the
+   * recovery, so this is belt-and-braces rather than a known leak — but a
+   * half-open connection dropping mid-recovery is exactly the case where
+   * "normally" is doing a lot of work.
+   */
   disconnect(): Promise<void> {
     this.recovery?.controller.abort()
+    this.consecutiveFailures.attack = 0
+    this.consecutiveFailures.flee = 0
+    this.suppressed = false
     return this.inner.disconnect()
   }
 
@@ -328,6 +367,10 @@ export class ReflexExecutor implements BotExecutor {
       recovery: null,
     }
     this.records.push(preemption)
+    // Trim AFTER pushing, so the newest is never the one dropped.
+    if (this.records.length > MAX_PREEMPTION_RECORDS) {
+      this.records.splice(0, this.records.length - MAX_PREEMPTION_RECORDS)
+    }
 
     // The latch, set BEFORE anything is aborted: an abort listener that
     // re-enters this handler synchronously must already see it.
