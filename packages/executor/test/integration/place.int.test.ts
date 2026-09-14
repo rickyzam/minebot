@@ -16,6 +16,7 @@ import {
   teleportAndWait,
   waitForBlockVisible,
   waitForItemCount,
+  waitUntil,
   waitForOnGround,
   type ArenaBounds,
 } from './mc-console.js'
@@ -70,8 +71,14 @@ describe('MineflayerExecutor.placeBlock', () => {
   let watcher: MineflayerExecutor | null = null
 
   afterEach(async () => {
-    await placer?.disconnect()
-    await watcher?.disconnect()
+    // Separate `try`s, not one: a throwing first disconnect must not strand the
+    // second bot connected on the shared server. CLAUDE.md makes leaking a bot
+    // a hard rule, and `await a(); await b()` breaks it on any throw from `a`.
+    try {
+      await placer?.disconnect()
+    } finally {
+      await watcher?.disconnect()
+    }
     placer = null
     watcher = null
   })
@@ -460,20 +467,6 @@ describe('MineflayerExecutor.placeBlock', () => {
       return [...seen].sort()
     }
 
-    /** Poll `predicate` until true, or throw `what` after `timeoutMs`. */
-    async function waitUntil(
-      predicate: () => boolean,
-      timeoutMs: number,
-      what: string,
-    ): Promise<void> {
-      const deadline = Date.now() + timeoutMs
-      for (;;) {
-        if (predicate()) return
-        if (Date.now() >= deadline) throw new Error(`waitUntil: ${what} (within ${timeoutMs}ms)`)
-        await sleep(100)
-      }
-    }
-
     it(
       'builds a 2x2x2 cube bottom-up, and a second connection sees all eight',
       async () => {
@@ -551,8 +544,8 @@ describe('MineflayerExecutor.placeBlock', () => {
         // cancelling a build in progress rather than one that never started.
         await waitUntil(
           () => itemCount(e, 'dirt') <= 7,
-          120_000,
           'no dirt was placed before the abort',
+          120_000,
         )
         controller.abort()
         expectReason(await build, 'interrupted')

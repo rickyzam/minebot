@@ -2,12 +2,16 @@ import { describe, it, expect, afterEach, beforeEach } from 'vitest'
 import type { EntityInfo, Result } from '@minebot/contract'
 import { MineflayerExecutor } from '../../src/index.js'
 import {
+  arenaVolume,
   buildArena,
   clearInventory,
+  expectDifficultyPeaceful,
   queryConsole,
   sendConsoleCommand,
+  sweepArenaUntilEmpty,
   teleportAndWait,
   waitForOnGround,
+  waitUntil,
   type ArenaBounds,
 } from './mc-console.js'
 
@@ -40,9 +44,7 @@ const INTERIOR = { x0: ARENA.x0 + 1, x1: ARENA.x1 - 1, z0: ARENA.z0 + 1, z1: ARE
  * The arena expressed as a selector volume, so cleanup reaches everything
  * inside it and nothing outside it. `dy` covers the floor through the ceiling.
  */
-const ARENA_VOLUME =
-  `x=${ARENA.x0},y=${ARENA.floorY},z=${ARENA.z0},` +
-  `dx=${ARENA.x1 - ARENA.x0},dy=${(ARENA.clearance ?? 6) + 1},dz=${ARENA.z1 - ARENA.z0}`
+const ARENA_VOLUME = arenaVolume(ARENA)
 
 const ATTACKER = 'ITCombat'
 const WATCHER = 'ITCombatWatch'
@@ -79,53 +81,7 @@ type Pos = { x: number; y: number; z: number }
 const dist = (a: Pos, b: Pos): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
-/**
- * Sweep the arena until the SERVER itself says nothing is left in it.
- *
- * Cleanup that fires commands and never reads the answer is precisely the
- * fixture that can no-op without shouting, which this repo rates as worse than
- * no fixture at all — and it is guarding shared world state that outlives the
- * run. `sendConsoleCommand` throws only when tmux is unreachable, so a command
- * the server rejected, or a drop that landed a moment too late, would leak in
- * silence. Reading the kill back turns that into a loud failure.
- *
- * Loops rather than trusting one delay: a killed mob's loot spawns AFTER the
- * kill that produced it (measured — see the `afterEach`), so the pass that
- * removes the mob cannot also remove its flesh, and how long the drop takes to
- * appear is not something a fixed sleep should be asked to guarantee.
- */
-async function sweepArenaUntilEmpty(attempts = 4): Promise<void> {
-  let last = ''
-  for (let i = 0; i < attempts; i++) {
-    sendConsoleCommand(`kill @e[type=item,${ARENA_VOLUME}]`)
-    // An empty selector answers "No entity was found"; a non-empty one answers
-    // "Killed …". Either is a valid reply — only the former ends the sweep.
-    const m = await queryConsole(
-      `kill @e[type=!player,${ARENA_VOLUME}]`,
-      /No entity was found|Killed /,
-    )
-    last = m[0] ?? ''
-    if (last.includes('No entity was found')) return
-    await sleep(500)
-  }
-  expect(last, `the arena still held entities after ${attempts} sweeps`).toContain(
-    'No entity was found',
-  )
-}
 
-/**
- * Read the difficulty back. It is the one piece of global, world-wide state
- * this file changes, so "the restore command was sent" is not good enough —
- * a restore that silently failed would leave the shared dev server on a combat
- * difficulty for everyone.
- */
-async function expectDifficultyPeaceful(): Promise<void> {
-  const m = await queryConsole('difficulty', /The difficulty is (\w+)/)
-  expect(
-    m[1],
-    'the difficulty was NOT restored — the shared server is left on a combat difficulty',
-  ).toBe('Peaceful')
-}
 
 describe('MineflayerExecutor.attack', () => {
   let attacker: MineflayerExecutor | null = null
@@ -144,8 +100,14 @@ describe('MineflayerExecutor.attack', () => {
 
   afterEach(async () => {
     try {
-      await attacker?.disconnect()
-      await watcher?.disconnect()
+      // Separate `try`s, not one: a throwing first disconnect must not strand the
+      // second bot connected on the shared server. CLAUDE.md makes leaking a bot
+      // a hard rule, and `await a(); await b()` breaks it on any throw from `a`.
+      try {
+        await attacker?.disconnect()
+      } finally {
+        await watcher?.disconnect()
+      }
       attacker = null
       watcher = null
     } finally {
@@ -170,7 +132,7 @@ describe('MineflayerExecutor.attack', () => {
       await sleep(500)
       // Both of these read the SERVER back rather than firing and hoping, so a
       // cleanup that did not take fails the run instead of leaking quietly.
-      await sweepArenaUntilEmpty()
+      await sweepArenaUntilEmpty(ARENA)
       await expectDifficultyPeaceful()
     }
   })
@@ -269,18 +231,6 @@ describe('MineflayerExecutor.attack', () => {
     )
   }
 
-  async function waitUntil(
-    predicate: () => boolean,
-    complaint: string,
-    timeoutMs = 10_000,
-  ): Promise<void> {
-    const deadline = Date.now() + timeoutMs
-    for (;;) {
-      if (predicate()) return
-      if (Date.now() >= deadline) throw new Error(`${complaint} (within ${timeoutMs}ms)`)
-      await sleep(150)
-    }
-  }
 
   /**
    * The attacker is alive, and still where the fight happened.

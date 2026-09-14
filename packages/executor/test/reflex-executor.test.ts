@@ -228,6 +228,63 @@ describe('ReflexExecutor', () => {
     expect(reflex.preemptions).toHaveLength(2)
   })
 
+  it('disconnect() clears the failure counts, so a reconnected bot defends itself again', async () => {
+    // The gap this closes: the counts were session-lived while the event
+    // subscription deliberately survives a reconnect, so three failed attacks
+    // then a reconnect left the bot PERMANENTLY undefended for that kind.
+    const inner = new MockExecutor({
+      actionDelayMs: 0,
+      entities: [zombie(3)],
+      failures: { attack: { reason: 'unreachable' } },
+    })
+    const reflex = new ReflexExecutor(inner, { maxConsecutiveFailures: 2 })
+    await reflex.connect()
+    for (let i = 0; i < 5; i++) {
+      inner.emit('damaged', { health: 20, source: null })
+      await settle()
+    }
+    // Disarmed, as before: the cap held.
+    expect(reflex.preemptions).toHaveLength(2)
+
+    // A new connection is a new world; whatever made those fail need not have
+    // survived it.
+    await reflex.disconnect()
+    await reflex.connect()
+    inner.setFailure('attack', null)
+    inner.emit('damaged', { health: 20, source: null })
+    await settle()
+
+    expect(reflex.preemptions).toHaveLength(3)
+    expect(reflex.preemptions[2]?.recovery?.ok).toBe(true)
+  })
+
+  it('proves the reset is what re-arms it, not merely reconnecting', async () => {
+    // The same run WITHOUT clearing the injected failure: still disarmed after a
+    // reconnect would be indistinguishable from "the reset did nothing", so this
+    // pins that the counter — not the connection — is what was blocking.
+    const inner = new MockExecutor({
+      actionDelayMs: 0,
+      entities: [zombie(3)],
+      failures: { attack: { reason: 'unreachable' } },
+    })
+    const reflex = new ReflexExecutor(inner, { maxConsecutiveFailures: 2 })
+    await reflex.connect()
+    for (let i = 0; i < 5; i++) {
+      inner.emit('damaged', { health: 20, source: null })
+      await settle()
+    }
+    expect(reflex.preemptions).toHaveLength(2)
+
+    await reflex.disconnect()
+    await reflex.connect()
+    // Failure still injected, so it fires again and fails again — but it FIRES,
+    // which is the whole point.
+    inner.emit('damaged', { health: 20, source: null })
+    await settle()
+    expect(reflex.preemptions).toHaveLength(3)
+    expect(reflex.preemptions[2]?.recovery?.ok).toBe(false)
+  })
+
   it('forwards timeoutMs and other options to the inner action', async () => {
     const inner = new MockExecutor()
     const spy = vi.spyOn(inner, 'moveTo')
