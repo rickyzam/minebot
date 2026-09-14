@@ -172,23 +172,33 @@ const SYSTEM = [
  * dead positions, as "read the LAST line of Recent actions", beside the
  * `find_blocks` rule it is modelled on, and as the final rule before the menu.
  * All four left `position dead, ground remains` off target. Moved here, after
- * the history, it lands 4/4. The control run that matters: an equally trailing
- * but CONTENTLESS line ("check your choice against the rules above") did not
- * move the answer at all, so this is the words in the last slot, not merely
- * something in the last slot.
+ * the history, it lands 4/4.
  *
  * It is unconditional on purpose. Rendering it only after an unfinished
  * `explore_for` would be a code-level rule deciding what the model is told,
  * which spec §2 requires be earned by a prompt failing first — and this one
  * does not fail.
  *
- * The three bullets are a set, not a list to pick from. Each was added because
- * the ones before it pulled a scenario off target: with only the `explore_for`
- * bullet the model answered `explore_for` to a `missing_tool` failure (9/9),
- * because the most salient thing in the prompt had become "go and look". A
- * fourth bullet for `drop collected: false` was tried and REMOVED — it moved
- * `mine_block_at already returned not_found` to `move_to`. Adding a bullet
- * here is cheap; not re-running the probe afterwards is not.
+ * **Do not append to, reorder, or pad this block without re-running
+ * `npm run agent:probe -- 4 5` across ALL scenarios.** Three measurements say
+ * why, and each is a change a reasonable editor would think was free:
+ *
+ * - **The slot is load-bearing by OCCUPANCY, not only by content.** A trailing
+ *   line saying nothing at all — "check your choice against the rules above" —
+ *   left `ground remains` exactly where it was (so the words here matter) and
+ *   still moved `mine_block_at already returned not_found` to `move_to` 9/9 (so
+ *   merely putting something here costs an unrelated scenario). Whatever goes
+ *   last has to carry every decision that competes with it. That is why there
+ *   are three bullets and not one: with only the `explore_for` bullet, a
+ *   `missing_tool` failure was answered `explore_for` 9/9, because the most
+ *   salient thing in the prompt had become "go and look".
+ * - **ORDER is load-bearing.** The same three bullets with `missing_tool` first
+ *   moved `not_found already` to `mine_block_at` 9/9.
+ * - **Adding one is not additive.** A fourth bullet for `drop collected: false`
+ *   moved `not_found already` to `move_to` 9/9, and was removed.
+ *
+ * Nothing above is covered by a unit test, because none of it can be: the
+ * failures are in what a model chooses. Spec §12 has the full tables.
  */
 const DECISION = [
   'Before you answer, look at the LAST line above and decide from it:',
