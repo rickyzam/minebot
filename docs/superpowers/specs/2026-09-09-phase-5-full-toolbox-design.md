@@ -182,7 +182,7 @@ each block has support when it is placed. Anything else fails on the first
 floating block. Scope: a saved list, per the work-split note. Not `.schem` /
 `.litematic` parsing.
 
-## 7. Decisions — all three answered
+## 7. Decisions — all four answered
 
 ### Decision 1 — how does the planner learn it was preempted? — ANSWERED 2026-09-09
 
@@ -280,6 +280,45 @@ citation was weaker than it read and should not be re-cited as evidence.
   script has ever given a bot dirt or cobblestone. `placeBlock` will — a bot told
   to place its last dirt can pillar on it while pathing, then fail `not_found` for
   a block it had. Plan Task 4 handles it.
+
+### Decision 4 — `flee`'s distance and timeout, and four boundary corrections — ANSWERED 2026-09-14 (Ricky, PR #23)
+
+The last gate on Task 6b, plus four items the whole-branch review surfaced. All
+five were asked with a recommendation and all five were confirmed as recommended.
+
+**`flee`: 100 blocks, bounded by 10 seconds — with 100 as the TARGET, not a
+requirement.** `fled: true` means *the bot ended further from the nearest hostile
+than it started*, so the 10s bound simply truncates the run and the result stays
+honest. Reading it the other way — 100 blocks as required separation — was put to
+Ricky and rejected, because it cannot be satisfied:
+
+> **MEASURED 2026-09-13** on a 90-block floating runway, flat, straight and
+> unobstructed: a 20-block leg covered 19.9 blocks in 3.62s (5.49 blocks/sec) and
+> a 60-block leg covered 59.1 blocks in 10.57s (**5.60 blocks/sec**). That is
+> Minecraft's sprint speed (5.612 m/s), i.e. a ceiling rather than a tuning
+> target. **100 blocks therefore needs ≥17.9 seconds** before any pathfinder
+> think time, and a 10s bound buys **~56 blocks at best** — less on real terrain.
+
+Keeping 10s was deliberate and follows this phase's own rule, the one that bounded
+`attack` in Task 6a: *a reflex recovery that can run for 30s is not a reflex.*
+Stretching flee to ~25–30s to fit the 100 would have contradicted it.
+
+Consequence for the fixture, also agreed: the test asserts "ended further away",
+so the arena is sized to that assertion rather than to 100 blocks. A literal
+100-block escape would have needed a new enclosed platform an order of magnitude
+larger than anything in the suite — the corridor along z≈0–8 is occupied from x800
+to x2170, and its largest gap (x2170→x2279, 109 blocks) abuts the force-loaded
+benchmark world that `bench:explore` searches at r=64.
+
+**The four corrections** — the first two are shared surface and change what Track
+B builds against:
+
+| | Agreed |
+|---|---|
+| R5 — `followPlayer` → `not_found` | **The mock learns it AND the contract states it.** The mock derives it with no new API: `EntityInfo` already carries `name` and `kind`, so `not_found` is "no seeded entity with `kind: 'player'` and that name". Accepted consequence: a test must now seed a player entity for `followPlayer` to succeed. |
+| R24 — mock rejects non-blocks | **An explicit placeable-name set with a documented built-in default**; anything outside it returns `invalid_target`. The alternative — an opt-in `nonPlaceable` list, default empty — was rejected because it would leave the divergence on by default, which is the thing being fixed. Until this lands, `mock.placeBlock('stick', …)` resolves `ok` and puts a stick *block* into the mock world. |
+| R9 — `attack` → `unreachable` | **Promote to the contract; documentation plus failure injection is enough.** The mock is NOT to derive it — it has no geometry, and deriving it would mean inventing a seeded-distance concept. |
+| `placeBlock` and replaceable blocks | **Stop treating them as occupied, but EXCLUDE lava and fire.** Note `minecraft-data` has no `replaceable` field — water, lava, `short_grass`, snow, fire and vine all report `boundingBox: 'empty'` and are indistinguishable there — so this is a curated list, not a lookup. Vanilla's `#minecraft:replaceable` tag *does* include lava and fire; they are excluded here because a bot replacing lava unprompted loses the block, the item, or itself. |
 
 ### 7.1 Follow-on scope — agreed in PR #22, NOT Phase 5 Track A
 

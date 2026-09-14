@@ -113,8 +113,49 @@ const PLACE_REACH = 4.5
 const ATTACK_REACH = 3
 const ATTACK_FOLLOW_RANGE = 2
 
-/** Blocks that count as an empty cell for `placeBlock`. Anything else occupies it. */
-const EMPTY_BLOCKS: ReadonlySet<string> = new Set(['air', 'cave_air', 'void_air'])
+/**
+ * Blocks that do NOT occupy a cell for `placeBlock` — the air variants, plus
+ * the blocks Minecraft simply replaces when you place into them. Anything else
+ * occupies it.
+ *
+ * **Curated, not looked up, because there is nothing to look up.**
+ * `minecraft-data` carries no `replaceable` field: water, lava, `short_grass`,
+ * snow, fire and vine all report `boundingBox: 'empty'` and are
+ * indistinguishable there, so `boundingBox` cannot separate "Minecraft will
+ * replace this" from "this will kill the bot". Verified 2026-09-14 that all of
+ * these names exist in `minecraft-data`.
+ *
+ * **Lava and fire are deliberately absent**, and that is a departure from
+ * vanilla: both ARE in the `#minecraft:replaceable` tag, so Minecraft would let
+ * the bot place into them. Agreed 2026-09-14 (Phase 5 spec §7, Decision 4) to
+ * exclude them anyway — a bot replacing lava unprompted loses the block, the
+ * item, or itself, and nothing in this project wants that to be the default.
+ * They therefore report `invalid_target`, "occupied", like any solid block.
+ */
+const EMPTY_BLOCKS: ReadonlySet<string> = new Set([
+  'air',
+  'cave_air',
+  'void_air',
+  'water',
+  'bubble_column',
+  'short_grass',
+  'tall_grass',
+  'fern',
+  'large_fern',
+  'dead_bush',
+  'seagrass',
+  'tall_seagrass',
+  'vine',
+  'glow_lichen',
+  'snow',
+  'moss_carpet',
+  'hanging_roots',
+  'warped_roots',
+  'crimson_roots',
+  'nether_sprouts',
+  'light',
+  'structure_void',
+])
 
 /** The six neighbours of a cell, as offsets. */
 const NEIGHBOUR_OFFSETS: ReadonlyArray<readonly [number, number, number]> = [

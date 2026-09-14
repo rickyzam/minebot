@@ -82,7 +82,58 @@ export interface MockOptions {
    * to test the retry policy the contract's closed reason set exists for.
    */
   failures?: Partial<Record<MockActionName, InjectedFailure>>
+  /**
+   * Which names count as placeable blocks, for `placeBlock`. Defaults to
+   * {@link DEFAULT_PLACEABLE_BLOCKS}; anything outside the set returns
+   * `invalid_target`, matching the real executor's registry check.
+   *
+   * Agreed 2026-09-14 (Phase 5 spec §7, Decision 4). Before it, the mock had no
+   * notion of placeability, so `placeBlock('stick', …)` resolved **`ok`**, spent
+   * the stick and pushed a stick *block* into the mock world — after which
+   * `findBlocks({ names: ['stick'] })` reported a stick standing in it. The real
+   * executor returns `invalid_target` and does not move. The alternative
+   * considered was an opt-in list of NON-placeable names defaulting to empty;
+   * that was rejected because it would have left the divergence on by default.
+   *
+   * Pass your own set to place something the default list does not know about.
+   */
+  placeableBlocks?: readonly string[]
 }
+
+/**
+ * The block names {@link MockExecutor} treats as placeable by default.
+ *
+ * Deliberately a short, ordinary list rather than an attempt at Minecraft's
+ * whole registry: the mock has no registry to consult, and the point of the set
+ * is to make "this is not a block" reachable at all. Covers what the contract
+ * suite and the planning-loop tests actually place, plus the common building
+ * blocks. Pass `placeableBlocks` to extend it.
+ */
+export const DEFAULT_PLACEABLE_BLOCKS: readonly string[] = [
+  'dirt',
+  'coarse_dirt',
+  'grass_block',
+  'stone',
+  'cobblestone',
+  'stone_bricks',
+  'sand',
+  'gravel',
+  'oak_planks',
+  'oak_log',
+  'spruce_planks',
+  'glass',
+  'torch',
+  'crafting_table',
+  'furnace',
+  'chest',
+  'ladder',
+  'glowstone',
+  'obsidian',
+  'coal_ore',
+  'iron_ore',
+  'iron_block',
+  'emerald_block',
+]
 
 export interface RecordedCall {
   name: string
@@ -120,6 +171,7 @@ export class MockExecutor implements BotExecutor {
    */
   private inFlightStop: (() => void) | null = null
   private readonly failures = new Map<MockActionName, InjectedFailure>()
+  private readonly placeable: ReadonlySet<string>
   private pendingConnect: Promise<Result> | null = null
   private disconnectRequested = false
 
@@ -132,6 +184,7 @@ export class MockExecutor implements BotExecutor {
     this.blocks = opts.blocks ?? []
     this.delayMs = opts.actionDelayMs ?? 0
     this.exploreDelayMs = opts.exploreDelayMs ?? 0
+    this.placeable = new Set(opts.placeableBlocks ?? DEFAULT_PLACEABLE_BLOCKS)
     for (const [action, failure] of Object.entries(opts.failures ?? {})) {
       if (failure) this.failures.set(action as MockActionName, failure)
     }
@@ -258,6 +311,17 @@ export class MockExecutor implements BotExecutor {
     this.record('followPlayer', playerName)
     const r = await this.simulate('followPlayer', opts)
     if (!r.ok) return r
+    // Agreed 2026-09-14 (Phase 5 spec §7, Decision 4). Derived from the seeded
+    // entities rather than from a new seeding concept: `EntityInfo` already
+    // carries `name` and `kind`, so "in sight" is "there is a player entity of
+    // that name". The real executor has always produced this and the mock did
+    // not, which left mock and real disagreeing on a reason the planner sees.
+    //
+    // The accepted consequence: a mock world must seed a player entity for
+    // `followPlayer` to succeed at all.
+    if (!this.entities.some((e) => e.kind === 'player' && e.name === playerName)) {
+      return fail('not_found', `no player named "${playerName}" is in sight`)
+    }
     // Non-finite means "never elapses", and must not reach wait(): see
     // untilAborted() for what setTimeout does with Infinity.
     const timeoutMs = opts?.timeoutMs
@@ -339,6 +403,12 @@ export class MockExecutor implements BotExecutor {
     // policies for them once acquiring actions exist.
     if (!this.inventory.some((i) => i.name === blockName)) {
       return fail('not_found', `${blockName} is not in the inventory`)
+    }
+    // Placeability AFTER the inventory, because that is the order the real
+    // executor checks in — so `placeBlock('stick', …)` with no stick held is
+    // `not_found` in both, and `invalid_target` in both once one is held.
+    if (!this.placeable.has(blockName)) {
+      return fail('invalid_target', `"${blockName}" is not a placeable block`)
     }
     // Occupancy is a fact about the world, not about perception, so a block
     // seeded invisible still occupies its position.

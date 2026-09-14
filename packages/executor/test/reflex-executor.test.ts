@@ -451,12 +451,34 @@ const visibilityBlocks = [
   { name: 'coal_ore', position: { x: 6, y: 64, z: 0 }, distance: 6 },
 ]
 
+/**
+ * A player for `followPlayer` to find — required as of 2026-09-14 (Phase 5 spec
+ * §7, Decision 4), since the mock now derives `not_found` from its entities.
+ *
+ * Safe here for a specific, measured reason: `evaluateReflex` fires only on
+ * `kind === 'hostile'`, so a player entity cannot trigger a preemption. That is
+ * what lets this suite keep its "nothing preempts" property while still seeding
+ * something.
+ */
+const FOLLOWED_PLAYER = {
+  id: 501,
+  name: 'SomePlayer',
+  kind: 'player' as const,
+  position: { x: 4, y: 64, z: 0 },
+  distance: 4,
+}
+
 // Verifies the decorator is a faithful BotExecutor: delegation,
 // throw-when-disconnected, the eight abort cases, followPlayer's no-timeout
-// guarantee. Seeded with NO entities, deliberately — a hostile would preempt
-// every action and make the run meaningless. Arbitration is covered above.
+// guarantee. Seeded with NO HOSTILE entities, deliberately — a hostile would
+// preempt every action and make the run meaningless. The one player entity is
+// there for followPlayer and cannot trigger anything. Arbitration is covered above.
 runContractSuite('ReflexExecutor over MockExecutor', async () => {
-  const inner = new MockExecutor({ actionDelayMs: 20, blocks: [...seededBlocks, ...visibilityBlocks] })
+  const inner = new MockExecutor({
+    actionDelayMs: 20,
+    blocks: [...seededBlocks, ...visibilityBlocks],
+    entities: [FOLLOWED_PLAYER],
+  })
   const executor = new ReflexExecutor(inner)
   await executor.connect()
   return {
@@ -469,7 +491,7 @@ runContractSuite('ReflexExecutor over MockExecutor', async () => {
         control: { name: 'coal_ore', position: visibilityBlocks[1]!.position },
         maxDistance: 16,
       }),
-    prepareFollowFixture: () => Promise.resolve({ playerName: 'SomePlayer' }),
+    prepareFollowFixture: () => Promise.resolve({ playerName: FOLLOWED_PLAYER.name }),
     preparePlaceFixture: () =>
       Promise.resolve({ blockName: 'dirt', position: { x: 1, y: 64, z: 1 } }),
     prepareFleeFixture: () => Promise.resolve({}),

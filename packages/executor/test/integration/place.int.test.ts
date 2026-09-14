@@ -227,6 +227,59 @@ describe('MineflayerExecutor.placeBlock', () => {
     expect(itemCount(e, 'stick')).toBe(1)
   })
 
+  // ---- Decision 4 (2026-09-14): replaceable blocks do not occupy a cell ----
+
+  it('places into a cell holding snow, which Minecraft replaces', async () => {
+    // A snow LAYER sits on any full block top and does not flow, so it is the
+    // clean case: genuinely replaceable, and it leaves the arena tidy.
+    const target = { x: 1856, y: FLOOR, z: 4 }
+    const e = await placerAt(START, { item: 'dirt', count: 1 })
+    placeArenaBlock(target, 'snow')
+    await waitForBlockVisible(e, 'snow', target)
+
+    const r = await e.placeBlock('dirt', target, { timeoutMs: 30_000 })
+    expect(r.ok, `expected ok, got ${JSON.stringify(r)}`).toBe(true)
+    // Verified from a SECOND connection: the placing bot's own world model
+    // updates optimistically, so it is not evidence.
+    await confirmFrom(FLOOR_VIEW, 'dirt', target)
+    expect(itemCount(e, 'dirt')).toBe(0)
+  })
+
+  it('places into a cell holding water', async () => {
+    // Water is the case Ricky named explicitly. It flows, which is why this
+    // test is last among the positives — `buildArena` clears it next test.
+    const target = { x: 1857, y: FLOOR, z: 4 }
+    const e = await placerAt(START, { item: 'dirt', count: 1 })
+    placeArenaBlock(target, 'water')
+    await waitForBlockVisible(e, 'water', target)
+
+    const r = await e.placeBlock('dirt', target, { timeoutMs: 30_000 })
+    expect(r.ok, `expected ok, got ${JSON.stringify(r)}`).toBe(true)
+    // Polled, not read once: the inventory update arrives from the server a
+    // moment after the placement resolves. The snow case above only got away
+    // with a bare read because `confirmFrom` spends that time connecting.
+    await waitForItemCount(e, 'dirt', 0)
+  })
+
+  it('still fails invalid_target for lava, which vanilla WOULD replace', async () => {
+    // The deliberate departure from vanilla: lava is in `#minecraft:replaceable`,
+    // so Minecraft would let this through. We refuse, because a bot replacing
+    // lava unprompted loses the block, the item, or itself.
+    //
+    // Placed 14 blocks from the bot, and the target check runs BEFORE the
+    // approach, so the bot never walks toward it — it cannot be harmed by this.
+    const target = { x: 1868, y: FLOOR, z: 4 }
+    const e = await placerAt(START, { item: 'dirt', count: 1 })
+    placeArenaBlock(target, 'lava')
+    await waitForBlockVisible(e, 'lava', target)
+
+    const started = Date.now()
+    expectReason(await e.placeBlock('dirt', target, { timeoutMs: 30_000 }), 'invalid_target')
+    // Rejected on the target check, so it is prompt and the bot has not moved.
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(itemCount(e, 'dirt')).toBe(1)
+  })
+
   it('fails unreachable — promptly, not a pathfinder timeout — for a cell sealed in stone', async () => {
     // A hollow 3x3x3 stone box. Its centre is empty and has six solid
     // neighbours, so it is a valid target in every respect but one: nothing

@@ -216,6 +216,14 @@ export interface BotExecutor {
    * follow issued there blocks the loop until something aborts it. Bounding it
    * — by passing `timeoutMs`, or by guaranteeing an abort — is the caller's
    * job, not the executor's. Agreed 2026-09-11 (Phase 5 spec §7).
+   *
+   * Fails `not_found` when no player of that name is in sight — at call time, or
+   * because the target left or moved out of sight mid-follow. Agreed 2026-09-14
+   * (Phase 5 spec §7, Decision 4): the real executor produced this from the
+   * start and `MockExecutor` did not, so mock and real disagreed on a reason the
+   * planner sees. The mock now derives it from its own entities — no seeded
+   * entity with `kind: 'player'` and that name — which means **a mock world must
+   * seed a player entity for `followPlayer` to succeed.**
    */
   followPlayer(playerName: string, opts?: ActionOptions): Promise<Result>
   /**
@@ -249,9 +257,22 @@ export interface BotExecutor {
    *   `missing_tool`: having no material to place and having no tool to
    *   harvest with are different facts, and call for different recoveries.
    * - `invalid_target` — `position` is already occupied, or has no adjacent
-   *   solid block to place against. Freestanding mid-air placement is not
+   *   solid block to place against, **or `blockName` is not a placeable block
+   *   at all** (a `stick`, say). Freestanding mid-air placement is not
    *   supported; build bottom-up.
    * - `unreachable` — the bot cannot get within reach of `position`.
+   *
+   * **"Occupied" excludes replaceable blocks.** Water, grass, ferns, vines,
+   * snow layers and the like do not occupy a cell — Minecraft replaces them —
+   * so placing into one succeeds. **Lava and fire are the deliberate
+   * exceptions:** vanilla's `#minecraft:replaceable` tag includes both, and both
+   * are treated as occupied here, because a bot replacing lava unprompted loses
+   * the block, the item, or itself. Agreed 2026-09-14 (Phase 5 spec §7,
+   * Decision 4).
+   *
+   * Note the ordering, which both implementations share: the **inventory** is
+   * checked before placeability, so `placeBlock('stick', …)` with no stick held
+   * is `not_found`, and `invalid_target` only once one is.
    *
    * Agreed 2026-09-11 (Phase 5 spec §7).
    */
@@ -263,6 +284,13 @@ export interface BotExecutor {
    *
    * Fails `not_found` when no entity with `entityId` exists any more — it
    * died, despawned, or left the loaded world since the caller saw it.
+   *
+   * Fails `unreachable` when the bot cannot get within reach of it. Agreed
+   * 2026-09-14 (Phase 5 spec §7, Decision 4), promoted from executor-only
+   * behaviour. Note the asymmetry this leaves deliberately in place:
+   * `MockExecutor` does **not** derive it — the mock has no geometry, and
+   * inventing a seeded-distance concept to fake one was rejected — so against
+   * the mock this reason is reachable only through failure injection.
    *
    * Agreed 2026-09-11 (Phase 5 spec §7).
    */
