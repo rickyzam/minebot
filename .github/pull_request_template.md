@@ -4,7 +4,7 @@
 
 ## Verification
 
-CI runs the typecheck, the 50 unit tests, and the structural invariants. It **cannot** run the integration suite — that needs a live Minecraft server and a tmux session to drive its console — so green CI does not mean the Mineflayer side works.
+CI runs the typecheck, the unit tests, and the structural invariants. It **cannot** run the integration suite — that needs a live Minecraft server and a tmux session to drive its console — so green CI does not mean the Mineflayer side works.
 
 If this PR touches `packages/executor/`, `scripts/`, or anything that talks to the game, run the integration suite locally and confirm:
 
@@ -19,6 +19,16 @@ Not applicable for docs-only or planning-track changes.
 - [ ] This PR does **not** change `packages/contract/` or `packages/mock-executor/`
 
 If it does, both tracks build against those, so say what changed and confirm it has been agreed. See [spec §9](docs/superpowers/specs/2026-09-07-minecraft-agent-design.md) for changes already proposed and pending agreement.
+
+## Review
+
+<!-- Track B (Ricky's instance) PRs only, once docs/REVIEW-PROTOCOL.md is ADOPTED.
+     Delete this section for Track A and trivial PRs. -->
+
+- Cycle folder: `docs/reviews/<YYYY-MM-DD>-<slug>/`
+- Stages this PR carries, converged: spec ☐ · plan ☐ · impl ☐ <!-- delete the stages this PR does not carry, e.g. impl on a design PR -->
+- No escalation in the cycle folder is still awaiting a human decision
+- Merge with a **merge commit**, never squash (findings cite branch SHAs)
 
 ## Notes
 

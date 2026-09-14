@@ -10,6 +10,7 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 - [Phase 1 plan](docs/superpowers/plans/2026-09-07-phase-1-track-a.md) — its "Verified environment facts" block is measurements, not assumptions.
 - [Perception: line of sight](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — **Implemented 2026-09-08.** `findBlocks` used to see through solid rock; it no longer does. Read §5.2 before touching perception — the filter belongs in `useExtraInfo`, not in `matching` and not in the returned array, and §5.2 says why. §5.5 records what implementation turned up. §7.1 stays open for Ricky to confirm the cost wording only.
 - [Phase 5 design](docs/superpowers/specs/2026-09-09-phase-5-full-toolbox-design.md) and [plan](docs/superpowers/plans/2026-09-09-phase-5-track-a.md) — the reflex arbiter, `followPlayer`, `placeBlock`, schematics, `attack`/`flee`. **Task 0's contract decisions were agreed with Track B on 2026-09-11** and are recorded in spec §7, including two that differ from the original proposal: `followPlayer` has **no default timeout**, and `flee` returns `Result<{ fled: boolean }>`. The plan is v2 — three reviews found v1 unexecutable, and why is at the top of it. **Track A landed on 2026-09-12, except `flee`** — see "Scope boundaries".
+- [Review protocol](docs/REVIEW-PROTOCOL.md) — **PROPOSED, not yet binding.** How Track B's author instance (Ricky's) and a separate reviewer instance (Dorel's) hand work across through files on the PR branch. See "Cross-instance review" below for which half applies to you.
 - [Memory and recall](docs/notes/Memory%20and%20Recall.md) — roadmap. Its two invariants ("memory is written only from perception output", "memory produces search hints, never action targets") constrain work being done now, not just later.
 
 ## Commands
@@ -185,6 +186,33 @@ When you add a guard, prove it can fire. A safety check nobody has seen trigger 
 `packages/executor/test/integration/mc-console.ts` builds a stone platform at **y=199**, deliberately floating above all terrain so tests are independent of biome and world generation. It survived a full world reseed unchanged. `placeArenaBlock` generalises it for Phase 2's "mine a known block" tests.
 
 `ArenaBounds.enclosed` (opt-in, so the existing callers are unaffected) adds four walls and a glowstone ceiling. Anything involving a **live mob** needs it — see the 21-second burn in the facts table. `queryConsole` is the other half of that story: it sends a console command and returns the server's own reply, which is how a fixture proves its cleanup actually happened rather than firing and hoping.
+
+## Cross-instance review
+
+**Status: PROPOSED.** Act on this section only once the first line of [docs/REVIEW-PROTOCOL.md](docs/REVIEW-PROTOCOL.md) reads **ADOPTED**. Until then, work as before.
+
+Track B is authored in one Claude Code instance and reviewed in another, because the two humans' token budgets differ and review is the expensive part. Work away from the author's plan and a reviewer that did not write the work sees what the author assumed. The protocol is the authority; this is the summary that tells you which half is yours.
+
+**Work out your role first, from who is directing you, not from the machine.** `gh api user --jq .login` gives the default. If the person tells you they are someone else using this session, their word decides.
+- `rickyzam` asking you to write, respond to or fix Track B work: you are the **author**.
+- `onetruezman` asking you to review a PR Ricky directed: you are the **reviewer**.
+- Ricky asking you to review his own PR: **refuse, and say why.**
+- Dorel asking you to author Track B work: outside the protocol, and reviewed in-session like Track A.
+
+The full table is in [§2](docs/REVIEW-PROTOCOL.md#2-scope). If none of these fits, ask.
+
+**If you are the author** ([§4](docs/REVIEW-PROTOCOL.md#4-the-author--rickys-instance)):
+- Brainstorm, spec, plan, implement. **Do not run reviewer subagents on your own work.** Implement with `superpowers:executing-plans`, not `subagent-driven-development`, whose per-task reviewers duplicate the protocol.
+- **Never fix on the fly.** Fix only what a finding ID names. A `mechanical` fix gets exactly the change specified. A `design` fix gets no code until you have accepted the recommended fix or had your proposal confirmed. Each finding gets one proposal-or-dispute exchange; after a rejection, take the reviewer's fix or escalate. Problems you notice while fixing get listed, not fixed.
+- Before requesting review: `npm test`, `npm run typecheck`, `node scripts/check-invariants.mjs`, and `agent:probe` against bellatrix's Ollama if prompt text changed. Never rewrite pushed history once a request is open; stacked branches take `main` by merge.
+
+**If you are the reviewer** ([§5](docs/REVIEW-PROTOCOL.md#5-the-reviewer--dorels-instance)):
+- Review the requested SHA in a worktree. Use a Sonnet persona bundle, at most 5 in parallel. **Verify every finding yourself before recording it,** and quote the cited lines in it. A false or hard-to-check finding costs the author the tokens this protocol exists to save.
+- You wrote Track A. Mark any finding that implicates Track A code `Seam: Track A`, and never quietly downgrade one.
+- Write and commit **only** inside the cycle folder under `docs/reviews/`. Never edit the author's work, not even a typo.
+- Run the gates the author cannot: `test:integration`, `smoke`, `demo:*`, which only run on bellatrix. One live-server job at a time ([§6.7](docs/REVIEW-PROTOCOL.md#67-shared-live-resources-on-bellatrix)).
+
+**Both:** one author per file, at most 3 rounds per stage then escalate to the humans, merge commits only, and a one-line `[review]` PR comment after every push. Neither instance polls GitHub; a human starts each turn.
 
 ## Scope boundaries
 
