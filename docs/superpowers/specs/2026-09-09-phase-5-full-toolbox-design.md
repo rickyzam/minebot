@@ -1,8 +1,8 @@
 # Phase 5 (Track A): the full toolbox — reflex, follow, building
 
 **Date:** 2026-09-09
-**Status:** DRAFT. Not agreed, not started. Decision 2 was answered on 2026-09-09; two remain, and one of them needs Ricky.
-**Affects:** `packages/executor/` (four stubs), `packages/bot/` (the arbiter), `packages/contract/` (one doc-comment gap, §7.1)
+**Status:** AGREED 2026-09-11 (Ricky, PR #22), with `flee` counter-proposed and adopted. One detail is still open — flee's distance and timeout, blocking only Task 6b. **FULLY IMPLEMENTED on `phase-5-task-0`:** everything but `flee` on 2026-09-12, and `flee` itself on 2026-09-14 once Decision 4 pinned its distance and timeout. No stubs remain and the integration run has no skips.
+**Affects:** `packages/executor/` (four stubs, and the arbiter — §2.1), `packages/contract/` and `packages/mock-executor/` (Task 0 only: the four methods' guarantees, and `flee`'s return type)
 **Blocked by:** nothing. Phase 4 Track A is merged; the
 [work split](../../notes/Phase%20Plan%20and%20Parallel%20Work%20Split.md) runs
 `P4A → P5A` and `P4B → P5B` as separate chains that rejoin only at Phase 6.
@@ -18,7 +18,8 @@ Four executor methods are stubs returning `fail('internal', '… arrives in Phas
 | `placeBlock(blockName, position)` | Building, plus a schematic loader |
 
 They already have contract signatures, and `runAction()` already gives each of
-them the pre-abort check the contract suite asserts for all six actions. So this
+them the pre-abort check the contract suite asserts for all eight abortable cases,
+across seven actions. So this
 phase adds behaviour behind an interface that already exists — the same shape as
 `explore_for`, which worked.
 
@@ -54,7 +55,14 @@ why it goes first — and doing it first fixes the interrupt semantics *before*
 |---|---|---|
 | Trigger rules — pure predicates over `WorldSnapshot` | `packages/executor/` | Design §5 already plans them as pure functions over a fake snapshot: no Minecraft, no model, exhaustively testable |
 | Recovery actions (`attack`, `flee`) | `packages/executor/` | Ordinary executor methods |
-| **The arbiter** — subscribes, decides, preempts, hands back | `packages/bot/` | It needs the executor's event stream *and* the planner's `AbortController`, and `packages/bot/` is the only package allowed to depend on both. Putting it in `agent` would pull Mineflayer into the planning track transitively, which `check-invariants.mjs` fails on |
+| **The arbiter** — subscribes, decides, preempts, hands back | `packages/executor/` | A `BotExecutor` decorator: it wraps another executor, subscribes to its event stream, aborts its own internal controller for the in-flight action, and returns `interrupted`. It depends only on contract types and the trigger rules. It never touches the planner — `loop.ts` already re-plans on an `interrupted` result without an outer abort (§7 Decision 1) |
+
+*Corrected 2026-09-11.* The arbiter row said `packages/bot/`, on the grounds that
+the arbiter needs "the planner's `AbortController`" and `bot` is the only package
+allowed to depend on both tracks. Decision 1's answer made that false: a decorator
+preempts through the signal it passes to the inner executor, and needs no planner
+at all. The invariant that motivated the old placement still holds — nothing here
+puts Mineflayer into `packages/agent`.
 
 ### 2.2 The one semantic that does not exist yet
 
@@ -174,11 +182,11 @@ each block has support when it is placed. Anything else fails on the first
 floating block. Scope: a saved list, per the work-split note. Not `.schem` /
 `.litematic` parsing.
 
-## 7. Decisions needed before implementation
+## 7. Decisions — all four answered
 
 ### Decision 1 — how does the planner learn it was preempted? — ANSWERED 2026-09-09
 
-**It already does, and Track B built it.** `packages/agent/src/loop.ts:161-165`
+**It already does, and Track B built it.** `packages/agent/src/loop.ts:160-168`
 falls through and re-plans on an `interrupted` result whenever no outer signal
 was aborted, with a comment naming §3.5 and warning never to retry the
 interrupted action against the snapshot it was chosen for. So the arbiter can be
@@ -186,9 +194,7 @@ a plain `BotExecutor` decorator: no new `FailureReason`, no new flag, no change
 to `packages/agent`. The original framing below is kept because the options it
 rejected are still the wrong answers.
 
-
-
-`interrupted` currently means both "you aborted me" and "the reflex layer
+*Original framing:* `interrupted` currently means both "you aborted me" and "the reflex layer
 preempted you". Options: a distinct `FailureReason` (**no** — that set is closed
 and shared, and widening it is a contract change); an `interrupted` result plus
 a flag on the goal outcome; or the arbiter re-invoking the planner itself so the
@@ -202,11 +208,138 @@ No longer a blocker. §4.1 replaces it with measured facts: the real constraint
 was never permission, it was that an undead mob burns to death in 21 seconds on
 an open-sky arena. §4.2 settles that with a roof.
 
-### Decision 3 — when does `followPlayer` return? (needs Ricky; shared surface)
+### Decision 3 — the four methods' guarantees — ANSWERED 2026-09-11 (Ricky, PR #22)
 
-Per §5. This is a documented-guarantee gap in `packages/contract`, which is the
-one surface the project's central rule protects. It is additive clarification
-rather than a signature change, but it still needs agreement.
+Decision 3 was bundled with the rest of Task 0 into one ask. Five rows accepted,
+one accepted with its policy deferred, one counter-proposed, plus `setHealth()`.
+
+| Method | Agreed | Changed from the proposal? |
+|---|---|---|
+| `followPlayer` | Follows **until aborted**. `timeoutMs` honoured **when passed**, **no default**; elapsing resolves `ok` | **Yes** — the proposal had a 30_000 default |
+| `placeBlock` | `not_found` — block not in inventory | No; the policy is deferred |
+| `placeBlock` | `invalid_target` — no adjacent face, or target occupied | No |
+| `placeBlock` | `unreachable` — cannot path within reach | No |
+| `attack` | One swing, then `ok`; `not_found` if the entity id is gone | No |
+| `flee` | **`Result<{ fled: boolean }>`, `ok` either way** — `fled: false` when there was no hostile | **Yes — a return-type change** |
+| `MockExecutor.setHealth()` | Test affordance | No |
+
+No new `FailureReason`. Nothing in `packages/agent` changes in Task 0.
+
+**`followPlayer` — the consequence Ricky asked to have recorded.** "Follows until
+aborted" is what the action means. But `loop.ts:143` dispatches with only
+`controller.signal`, and `timeoutMs` appears nowhere in `packages/agent`
+(verified 2026-09-11) — the planner never bounds an action. So without a
+`timeoutMs`, `followPlayer` blocks `runGoal` until something aborts it, and in
+Phase 5 the only thing that will is the reflex arbiter. **A peaceful follow never
+returns.** Bounding it is Track B's: either the planner passes `timeoutMs`, or it
+guarantees something aborts.
+
+**`flee` — why the counter-proposal is right.** "Nothing to flee from" is the
+safest outcome, not a failure, and reporting it as one costs twice: the reflex
+path hits it as a race whenever a hostile dies or despawns between trigger and
+call, and once `flee` reaches the menu the failure lands in a step log where this
+project has repeatedly measured the model over-reacting. `mineBlock`'s
+`collected` is the precedent — *"mining succeeded, and that fact must not be lost
+by reporting a failure."* Ricky owns the `prompt.ts` renderer, so `{ fled }` does
+not reach the model as `[object Object]`, the bug `ExplorationReport` hit.
+
+**Still open, blocking only Task 6b:** flee *where* and *for how long*. §3 leaves
+N and the timeout unspecified, and unagreed, the implementation picks them.
+Track A proposes a 12-block candidate circle and a 10_000ms bound (plan Task 6b).
+
+**`placeBlock` → `not_found` — the policy, deliberately deferred.** Ricky's
+eventual intent is that "out of dirt" and `missing_tool` both produce *go and get
+more* — check the relevant chest, then gather from a designated area. That is
+prompt policy and belongs to Phase 4 Track B. It is not encoded now because the
+contract has **no container actions** and **"designated area" does not exist**
+anywhere in the repo: a model told to fetch would pick something, fail, and pick
+again. The two reason codes stay distinct because they are distinct facts.
+
+**A correction to the rationale Track A gave for `not_found`.** The ask cited
+Track B's probe answering `give_up` 5/5 after `missing_tool`. That scenario
+(`after missing_tool, inventory empty`) has an **empty inventory** and a `hoped`
+answer of `give_up` — it shows the model giving up with `missing_tool` *and*
+nothing to work with, which is what the scenario was written to want. It does not
+isolate `missing_tool` as the cause. The row stands on its reasoning; the
+citation was weaker than it read and should not be re-cited as evidence.
+
+**Two things Track A verified while recording this — both change the plan.**
+
+- **`setTimeout(fn, Infinity)` fires after ~2ms in Node** (measured
+  2026-09-11: the delay overflows and clamps, with only a
+  `TimeoutOverflowWarning`). `runAction` arms its timer unconditionally
+  (`mineflayer-executor.ts:747-751`), so "no default" implemented as a default of
+  `Infinity` would make `followPlayer` report `timeout` almost at once — and the
+  same bug already reaches any action whose caller passes `timeoutMs: Infinity`.
+  `runAction` also maps its own timer to `fail('timeout')` (`:757-760`), while the
+  agreed rule resolves `ok` on elapse. Plan Task 3 handles both.
+- **Movement can build.** `Movements` defaults `allow1by1towers = true` with
+  `scafoldingBlocks = [dirt, cobblestone]` (`movements.js:31, 75-77`), and the
+  executor overrides only `canDig` (`mineflayer-executor.ts:431-433`). Ricky
+  flagged it, and it checks out. It has never bitten because no test, demo or
+  script has ever given a bot dirt or cobblestone. `placeBlock` will — a bot told
+  to place its last dirt can pillar on it while pathing, then fail `not_found` for
+  a block it had. Plan Task 4 handles it.
+
+### Decision 4 — `flee`'s distance and timeout, and four boundary corrections — ANSWERED 2026-09-14 (Ricky, PR #23)
+
+The last gate on Task 6b, plus four items the whole-branch review surfaced. All
+five were asked with a recommendation and all five were confirmed as recommended.
+
+**`flee`: 100 blocks, bounded by 10 seconds — with 100 as the TARGET, not a
+requirement.** `fled: true` means *the bot ended further from the nearest hostile
+than it started*, so the 10s bound simply truncates the run and the result stays
+honest. Reading it the other way — 100 blocks as required separation — was put to
+Ricky and rejected, because it cannot be satisfied:
+
+> **MEASURED 2026-09-13** on a 90-block floating runway, flat, straight and
+> unobstructed: a 20-block leg covered 19.9 blocks in 3.62s (5.49 blocks/sec) and
+> a 60-block leg covered 59.1 blocks in 10.57s (**5.60 blocks/sec**). That is
+> Minecraft's sprint speed (5.612 m/s), i.e. a ceiling rather than a tuning
+> target. **100 blocks therefore needs ≥17.9 seconds** before any pathfinder
+> think time, and a 10s bound buys **~56 blocks at best** — less on real terrain.
+
+Keeping 10s was deliberate and follows this phase's own rule, the one that bounded
+`attack` in Task 6a: *a reflex recovery that can run for 30s is not a reflex.*
+Stretching flee to ~25–30s to fit the 100 would have contradicted it.
+
+Consequence for the fixture, also agreed: the test asserts "ended further away",
+so the arena is sized to that assertion rather than to 100 blocks. A literal
+100-block escape would have needed a new enclosed platform an order of magnitude
+larger than anything in the suite — the corridor along z≈0–8 is occupied from x800
+to x2170, and its largest gap (x2170→x2279, 109 blocks) abuts the force-loaded
+benchmark world that `bench:explore` searches at r=64.
+
+**The four corrections** — the first two are shared surface and change what Track
+B builds against:
+
+| | Agreed |
+|---|---|
+| R5 — `followPlayer` → `not_found` | **The mock learns it AND the contract states it.** The mock derives it with no new API: `EntityInfo` already carries `name` and `kind`, so `not_found` is "no seeded entity with `kind: 'player'` and that name". Accepted consequence: a test must now seed a player entity for `followPlayer` to succeed. |
+| R24 — mock rejects non-blocks | **An explicit placeable-name set with a documented built-in default**; anything outside it returns `invalid_target`. The alternative — an opt-in `nonPlaceable` list, default empty — was rejected because it would leave the divergence on by default, which is the thing being fixed. Until this lands, `mock.placeBlock('stick', …)` resolves `ok` and puts a stick *block* into the mock world. |
+| R9 — `attack` → `unreachable` | **Promote to the contract; documentation plus failure injection is enough.** The mock is NOT to derive it — it has no geometry, and deriving it would mean inventing a seeded-distance concept. |
+| `placeBlock` and replaceable blocks | **Stop treating them as occupied, but EXCLUDE lava and fire.** Note `minecraft-data` has no `replaceable` field — water, lava, `short_grass`, snow, fire and vine all report `boundingBox: 'empty'` and are indistinguishable there — so this is a curated list, not a lookup. Vanilla's `#minecraft:replaceable` tag *does* include lava and fire; they are excluded here because a bot replacing lava unprompted loses the block, the item, or itself. |
+
+### 7.1 Follow-on scope — agreed in PR #22, NOT Phase 5 Track A
+
+None of it blocks anything here.
+
+1. **A designated-area allowlist, enforced in the executor** — one concept serving
+   both "never build over a player's base" and "gather from here". Enforcement,
+   not inference: world data carries no player-placed flag, and crafted-block
+   heuristics misfire on generated villages, which is exactly where a base might be.
+2. **Incoming chat into `WorldSnapshot`, and a build-confirmation flow** — Phase 5
+   Track B. `BotEvents.chat` already exists; what is missing is a snapshot field
+   and a renderer. A goal has no requester today, an unanswered question must be
+   bounded, and the default on no answer must be *do not build* — building over a
+   base is irreversible, not building is not. **The asking must not be the safety
+   mechanism:** this project watched a prompt rule fail four times before a change
+   to what the model *checks* worked. Allowlist enforces; asking is courtesy.
+3. **Retry and failure policy**, including "go get more" for `not_found` and
+   `missing_tool` — Phase 4 Track B, unstarted.
+4. **Scaffolding** — overhangs, where bottom-up ordering does not save you, and
+   safe self-removal of a tower the bot is standing on. Freestanding mid-air
+   placement is a named Phase 5 limitation.
 
 ## 8. Suggested order
 
@@ -228,8 +361,8 @@ directly and are worth stating before they are re-learned:
   run, not assumed.
 - **Prove each guard can fire.** Every new reflex trigger needs a test that shows
   it firing, and the contract suite's existing "resolves interrupted when
-  pre-aborted" assertion must keep passing for all six actions as they stop being
-  stubs.
+  pre-aborted" assertion must keep passing for all eight abortable cases, across
+  seven actions, as they stop being stubs.
 
 The reflex layer specifically is testable without a server at all: trigger rules
 are pure, and `MockExecutor` can emit `damaged` on demand. That is the phase's

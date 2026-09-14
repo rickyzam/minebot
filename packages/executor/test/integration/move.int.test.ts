@@ -66,6 +66,32 @@ describe('MineflayerExecutor.moveTo', () => {
     expect(Math.hypot(end.x - target.x, end.z - target.z)).toBeLessThanOrEqual(2)
   })
 
+  // setTimeout(fn, delay) clamps any delay that does not fit a signed 32-bit
+  // int to 1ms, with only a warning — MEASURED 2026-09-11 in Node 24: Infinity,
+  // NaN and a finite 3e9 all fired after 2ms. runAction used to arm its timer
+  // with whatever it was given, so a caller asking for "no timeout" or "a very
+  // long one" got a `timeout` failure almost at once. The walk is ~6 blocks,
+  // ~2s, so a timer that fires early is caught long before arrival.
+  it.each([
+    { label: 'Infinity', username: 'ITMoveInfinite', timeoutMs: Infinity },
+    { label: '3e9 (finite, past the 32-bit limit)', username: 'ITMoveHugeTmo', timeoutMs: 3e9 },
+  ])(
+    'walks to a nearby coordinate with timeoutMs $label rather than timing out at once',
+    async ({ username, timeoutMs }) => {
+      executor = new MineflayerExecutor({ username })
+      await executor.connect()
+      await resetToArena(executor, username)
+      const start = executor.getState().self.position
+      const target = { x: Math.round(start.x) + 6, y: start.y, z: Math.round(start.z) }
+
+      const r = await executor.moveTo(target, { timeoutMs })
+      expect(r).toEqual({ ok: true, value: undefined })
+
+      const end = executor.getState().self.position
+      expect(Math.hypot(end.x - target.x, end.z - target.z)).toBeLessThanOrEqual(2)
+    },
+  )
+
   it('resolves interrupted when the signal is already aborted, without moving', async () => {
     executor = new MineflayerExecutor({ username: 'ITMovePreAbort' })
     await executor.connect()

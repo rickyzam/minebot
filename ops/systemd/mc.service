@@ -1,0 +1,69 @@
+[Unit]
+# The Minecraft Fabric backend — 1.21.10, offline mode, survival + peaceful,
+# bound to 127.0.0.1:25566 so it is unreachable from the network. Bots connect
+# HERE (signing their own Velocity forwarding payload); people connect to the
+# Velocity proxy on 25565, which forwards to this. See minebot's CLAUDE.md.
+#
+# DELIBERATELY NOT ENABLED — there is no [Install] section, so this never starts
+# at boot. Bringing up a world should stay a deliberate act, and the repo's
+# integration tests assume they own the arena. Start it when you want it:
+#
+#   systemctl --user start mc
+#
+# What the unit is FOR is the other end. systemd stops every ACTIVE unit during
+# shutdown whether or not it is enabled, and it WAITS for ExecStop to finish —
+# so a reboot flushes the world instead of killing it. MEASURED 2026-09-12:
+# three of the last seven server runs (Sep 8, 9 and 11) ended mid-activity with
+# no "Stopping server", no "Saving worlds" and no "All dimensions are saved",
+# i.e. roughly half of recent runs never flushed. A hand-started tmux session
+# gets no ordered shutdown; this does.
+Description=Minecraft Fabric backend (minebot dev server, tmux session "mc")
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# oneshot + RemainAfterExit rather than Type=forking: `tmux new-session -d`
+# returns immediately, and the tmux server it leaves behind is not a child
+# systemd can track as a main PID. All the real work is in ExecStop anyway.
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/zman/minecraft/server/minebot
+
+# Two guards, in this order, both learned by this unit failing on its first real
+# start with "duplicate session: mc":
+#
+#  1. REFUSE if something already listens on 25566. A world must never have two
+#     servers writing it, and a hand-started one is exactly the case this unit
+#     exists to replace — so it says so rather than half-starting.
+#  2. Otherwise CLEAR a leftover `mc` session. Stopping a hand-started server
+#     leaves the session alive at a shell prompt, and `tmux new-session` then
+#     fails outright. Safe only because guard 1 has already established that no
+#     server is running in it.
+ExecStartPre=/bin/sh -c 'if ss -ltn 2>/dev/null | awk "{print \\$4}" | grep -q ":25566$"; then echo "refusing to start: something is already listening on 25566 — a server is already up (hand-started?), so this unit will not touch it" >&2; exit 1; fi; tmux kill-session -t mc 2>/dev/null || true; exit 0'
+
+# The DEFAULT tmux socket, unlike velocity.service's dedicated one. That is not
+# an inconsistency: the integration suite and every demo drive this console with
+# `tmux send-keys -t mc`, and mc-console.ts hardcodes the session name. Moving it
+# to another socket would break 134 tests for a cosmetic gain.
+#
+# `exec java …` so java replaces the shell and the pane ends when the server
+# exits, rather than leaving a dead pane that keeps the session alive.
+ExecStart=/usr/bin/tmux new-session -d -s mc -x 200 -y 50 "exec java -Xms16G -Xmx16G -jar fabric-server-mc.1.21.10-loader.0.19.2-launcher.1.1.1.jar nogui"
+
+# THE POINT OF THIS UNIT. The console `stop` command, never a signal, because a
+# world has to flush — and then WAIT for the session to end, because the flush is
+# what takes the time. The session disappearing IS the evidence the server exited
+# of its own accord.
+ExecStop=-/usr/bin/tmux send-keys -t mc "stop" Enter
+ExecStop=-/bin/sh -c 'for i in $(seq 1 170); do /usr/bin/tmux has-session -t mc 2>/dev/null || exit 0; sleep 1; done'
+ExecStop=-/bin/sh -c '/usr/bin/tmux kill-session -t mc 2>/dev/null || true'
+
+# 180s, generously above the ~1s this world takes to save. A flush cut short is
+# the exact failure the unit exists to prevent, so the timeout is set to be
+# irrelevant rather than tight.
+TimeoutStopSec=180
+
+# Only the main process (already exited, being oneshot). NOT the control group:
+# the tmux server on the default socket may hold sessions this unit did not
+# create, and killing the group would take them down with it.
+KillMode=process

@@ -1,11 +1,20 @@
-import { runContractSuite, type VisibilityFixture } from '@minebot/mock-executor/contract-suite'
+import {
+  runContractSuite,
+  type FleeFixture,
+  type FollowFixture,
+  type PlaceFixture,
+  type VisibilityFixture,
+} from '@minebot/mock-executor/contract-suite'
 import { MineflayerExecutor } from '../../src/index.js'
 import {
   buildArena,
+  clearInventory,
   placeArenaBlock,
   sendConsoleCommand,
   teleportAndWait,
+  waitForItemCount,
   waitForOnGround,
+  waitForPlayerVisible,
   type ArenaBounds,
 } from './mc-console.js'
 
@@ -26,6 +35,22 @@ const CONTROL = { x: 1400, y: ARENA.floorY + 1, z: 4 }
  * block placed here rather than something the terrain happened to contain.
  */
 const MARKER = 'emerald_block'
+
+/**
+ * The follow fixture's target: a second connection, standing on the arena
+ * floor 3 blocks from START. Its own name, distinct from every other
+ * integration bot, and under Minecraft's 16-character username cap.
+ */
+const FOLLOW_TARGET = 'ITContractTgt'
+const FOLLOW_TARGET_START = { x: 1402, y: ARENA.floorY + 1, z: 4 }
+
+/**
+ * The place fixture: a block the contract bot is made to hold none of, and an
+ * empty arena cell two blocks from START with the stone floor beneath it — a
+ * valid target in every respect except the missing material.
+ */
+const PLACE_BLOCK = 'dirt'
+const PLACE_TARGET = { x: 1407, y: ARENA.floorY + 1, z: 4 }
 
 /** What the suite's findBlocks assertions are declared against. */
 const FINDABLE = ['grass_block', 'short_grass']
@@ -142,6 +167,67 @@ runContractSuite('MineflayerExecutor', async () => {
         // No release: buildArena rebuilds the floor and the air above it on
         // every call, which removes both markers and the shell.
       }
+    },
+    prepareFollowFixture: async (): Promise<FollowFixture> => {
+      // The arena, not SURFACE_START, for the visibility fixture's reason: a
+      // flat stone floor makes "a player standing near the bot" independent of
+      // whatever terrain the surface start happens to have beside it.
+      await buildArena(ARENA)
+      await teleportAndWait(executor, 'ITContract', START)
+      await waitForOnGround(executor, { expectedY: ARENA.floorY + 1 })
+
+      const target = new MineflayerExecutor({ username: FOLLOW_TARGET })
+      try {
+        const connected = await target.connect()
+        if (!connected.ok) {
+          throw new Error(
+            `prepareFollowFixture: ${FOLLOW_TARGET} could not connect: ` +
+              `${connected.reason} ${connected.detail}`,
+          )
+        }
+        await teleportAndWait(target, FOLLOW_TARGET, FOLLOW_TARGET_START)
+        await waitForOnGround(target, { expectedY: ARENA.floorY + 1 })
+        // Not optional. Without it the follow guarantees would run against a
+        // name the executor cannot see yet, and a not_found would read as the
+        // executor breaking the contract rather than the fixture racing.
+        await waitForPlayerVisible(executor, FOLLOW_TARGET)
+      } catch (e) {
+        // The suite calls release only on a fixture that was returned, so a
+        // failure here must disconnect for itself or it leaks a bot.
+        await target.disconnect()
+        throw e
+      }
+      return { playerName: FOLLOW_TARGET, release: () => target.disconnect() }
+    },
+    preparePlaceFixture: async (): Promise<PlaceFixture> => {
+      // The arena, for the same reason as the fixtures above: an empty cell
+      // with a solid floor beneath it is then a fact of the fixture, not of
+      // whatever terrain the surface start has beside it.
+      await buildArena(ARENA)
+      await teleportAndWait(executor, 'ITContract', START)
+      await waitForOnGround(executor, { expectedY: ARENA.floorY + 1 })
+      clearInventory('ITContract')
+      // Waited for, not assumed: /clear has no acknowledgement. The suite
+      // re-checks the inventory itself and throws, but a fixture that raced
+      // would then fail as a broken fixture on some runs and not others.
+      await waitForItemCount(executor, PLACE_BLOCK, 0)
+      // No release: buildArena rebuilds the floor and clears the air above it.
+      return { blockName: PLACE_BLOCK, position: PLACE_TARGET }
+    },
+    prepareFleeFixture: async (): Promise<FleeFixture> => {
+      // The guarantee is the no-hostile case, so all this has to establish is
+      // "no hostile near the bot" — which the suite then verifies for itself and
+      // throws if the fixture lied.
+      //
+      // The arena does it two ways over. It is rebuilt, which the enclosing
+      // `difficulty peaceful` (this file never raises it) has already made
+      // hostile-free; and it pins the bot's position, so "nothing nearby" is a
+      // fact about the fixture rather than about whatever wandered past the
+      // surface start. Supplying this is what stops the suite's last SKIP.
+      await buildArena(ARENA)
+      await teleportAndWait(executor, 'ITContract', START)
+      await waitForOnGround(executor, { expectedY: ARENA.floorY + 1 })
+      return {}
     },
   }
 })

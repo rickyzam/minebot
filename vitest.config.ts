@@ -17,6 +17,11 @@ export default defineConfig({
           testTimeout: 60_000,
           hookTimeout: 60_000,
           fileParallelism: false,
+          // Fails the run with one actionable line when the dev server is down,
+          // instead of 134 connection errors that each look like a code bug.
+          // The backend is deliberately not autostarted, so this is the normal
+          // state after a reboot — see packages/executor/src/require-backend.ts.
+          globalSetup: ['packages/executor/test/integration/global-setup.ts'],
         },
       },
     ],

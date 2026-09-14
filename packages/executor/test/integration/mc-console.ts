@@ -29,6 +29,109 @@ export function sendConsoleCommand(command: string): void {
 }
 
 /**
+ * Sends `command` and returns the server's own reply to it, matched by
+ * `pattern`.
+ *
+ * Some facts can only be had from the server itself. Mob health is one:
+ * MEASURED 2026-09-12 against mineflayer 4.39.0, `entity.health` is assigned in
+ * exactly two places — `plugins/health.js:25` (the bot itself) and
+ * `plugins/boss_bar.js:33` — so `WorldSnapshot.nearbyEntities[].health` is
+ * always `undefined` for a mob, on every connection.
+ *
+ * Note precisely what that does and does not say. The value DOES reach the
+ * client: `entities.js:456-457` stores every `entity_metadata` packet as
+ * `entity.metadata`, keyed by metadata index (`parseMetadata`, :936-943), and
+ * health is a standard `LivingEntity` metadata field. What mineflayer omits is
+ * surfacing it as `entity.health`; the raw value survives only in
+ * `entity.metadata`, which this executor does not expose. So the accurate
+ * claim is "no connection *reports* a mob's health", not "the data never
+ * arrives".
+ *
+ * Either way a second bot cannot witness that a mob lost hit points. The
+ * console can (`data get entity … Health`), and it is the server's own record
+ * rather than any client's view of it — strictly stronger evidence than a
+ * second connection, which is what the "never trust the acting bot's world
+ * model" rule is actually asking for.
+ *
+ * Correlating the reply with the command is the whole difficulty, because the
+ * pane holds every earlier reply too — and a before/after health check sends
+ * the *same* command twice, so "the last matching line" would happily return
+ * the previous call's answer.
+ *
+ * **This used to count the echoes of the command and wait for the count to
+ * rise. That is unsound, and it was MEASURED failing 2026-09-12.** The count is
+ * taken over `capture-pane -S -400`, a BOUNDED, EVICTING window: measured at
+ * 424 captured lines against 1904 lines of history, holding 3 echoes of a bare
+ * `difficulty`. A burst of server output (a `demo:phase5` run with 17 reflex
+ * preemptions did it) evicts older echoes, so after sending, the count is no
+ * higher than `before` and the match branch never runs — `demo:phase5` reported
+ * a FALSE "RESTORE FAILED" with the reply "The difficulty is Peaceful" sitting
+ * in the captured lines. The inverse is worse and is why this had to change
+ * rather than merely widen: evict OUR echo while an older one survives and the
+ * count test passes against the wrong echo, returning a STALE reply as the
+ * current one — a false green in exactly the before/after case above.
+ *
+ * So correlation is now anchored on something that cannot be confused with
+ * anything else: a nonce. A deliberately invalid command is sent first, the
+ * server answers "Unknown or incomplete command" quoting it back, and the real
+ * command's reply is whatever matches AFTER the last line mentioning the nonce.
+ * Commands are processed in order, so every nonce line precedes the reply.
+ * Eviction can now only remove the anchor entirely, which fails loudly with a
+ * message saying so — it can never silently select an older reply.
+ *
+ * The cost is one junk line per query in the server log, tagged `minebot_probe_`
+ * so anyone reading the log can see what it is.
+ */
+let probeCounter = 0
+
+export async function queryConsole(
+  command: string,
+  pattern: RegExp,
+  opts: { timeoutMs?: number } = {},
+): Promise<RegExpMatchArray> {
+  const timeoutMs = opts.timeoutMs ?? 8_000
+  // Counter AND random: the counter keeps two probes in one process distinct
+  // even inside the same millisecond, the random suffix keeps two processes
+  // (a demo and a test run) from colliding in one pane's scrollback.
+  const nonce = `minebot_probe_${++probeCounter}_${Math.random().toString(36).slice(2, 10)}`
+  const capture = (): string[] =>
+    execFileSync('tmux', ['capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-400'], {
+      encoding: 'utf8',
+    }).split('\n')
+
+  // Both sent up front, in this order. The server executes console commands in
+  // order, so its reply to `command` lands after every line the nonce produced.
+  sendConsoleCommand(nonce)
+  sendConsoleCommand(command)
+
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const lines = capture()
+    // The LAST mention, not the first: the nonce appears twice, once as the
+    // echoed input and again in the server's error quoting it back.
+    let anchor = -1
+    for (const [i, line] of lines.entries()) if (line.includes(nonce)) anchor = i
+    if (anchor !== -1) {
+      for (const line of lines.slice(anchor + 1)) {
+        const m = line.match(pattern)
+        if (m) return m
+      }
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `queryConsole: "${command}" produced no line matching ${pattern} within ${timeoutMs}ms` +
+          (anchor === -1
+            ? ` — and its ${nonce} anchor never appeared in the captured pane, so either the ` +
+              `server is not reading its console or the pane scrolled past it`
+            : '') +
+          `. Last 5 console lines: ${JSON.stringify(lines.slice(-6, -1))}`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+}
+
+/**
  * Teleports `username` to a fixed coordinate via the server console, then
  * polls the bot's own reported position until it reflects the teleport
  * (or throws if it hasn't within `timeoutMs`). Polling the bot's own state —
@@ -124,6 +227,143 @@ export async function waitForOnGround(
   }
 }
 
+/**
+ * Polls `executor`'s own snapshot until it reports a player named `playerName`
+ * among its nearby entities, or throws if it has not within `timeoutMs`.
+ *
+ * A second bot connecting and teleporting is not the same as the first bot
+ * having received the spawn packet for it. A follow fixture that returned
+ * before this would hand `followPlayer` a name the executor cannot see yet,
+ * and the test would measure the fixture's race instead of the action.
+ */
+export async function waitForPlayerVisible(
+  executor: MineflayerExecutor,
+  playerName: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 10_000
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const seen = executor
+      .getState()
+      .nearbyEntities.some((e) => e.kind === 'player' && e.name === playerName)
+    if (seen) return
+    if (Date.now() >= deadline) {
+      const p = executor.getState().self.position
+      throw new Error(
+        `waitForPlayerVisible: ${playerName} never appeared among the bot's nearby entities ` +
+          `within ${timeoutMs}ms (bot at (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})). ` +
+          `Either the second connection failed to land near it, or it was placed beyond ` +
+          `the snapshot's entity radius.`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+}
+
+/**
+ * The inverse of {@link waitForPlayerVisible}: polls until `executor` no longer
+ * reports `playerName` nearby, or throws. A fixture that sends a player "out of
+ * range" must prove it left, or a later `not_found` assertion would be
+ * checking against a player the bot can still see.
+ */
+export async function waitForPlayerGone(
+  executor: MineflayerExecutor,
+  playerName: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 10_000
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const seen = executor
+      .getState()
+      .nearbyEntities.some((e) => e.kind === 'player' && e.name === playerName)
+    if (!seen) return
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `waitForPlayerGone: ${playerName} was still among the bot's nearby entities ` +
+          `${timeoutMs}ms after being sent away`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+}
+
+/** How many of `itemName` the executor's own snapshot says it holds, across all slots. */
+export function itemCount(executor: MineflayerExecutor, itemName: string): number {
+  return executor
+    .getState()
+    .self.inventory.filter((i) => i.name === itemName)
+    .reduce((n, i) => n + i.count, 0)
+}
+
+/**
+ * Polls until the executor holds exactly `count` of `itemName`, or throws.
+ *
+ * `/give` and `/clear` are console commands with no acknowledgement, and the
+ * inventory reaches the bot as later slot packets. A test that gives an item
+ * and calls an action straight away measures that race, not the action — and
+ * a `not_found` read against an inventory that has not arrived yet looks
+ * exactly like a correct guard.
+ */
+export async function waitForItemCount(
+  executor: MineflayerExecutor,
+  itemName: string,
+  count: number,
+  opts: { timeoutMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 8_000
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const held = itemCount(executor, itemName)
+    if (held === count) return
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `waitForItemCount: expected ${count} ${itemName} in the inventory within ${timeoutMs}ms, ` +
+          `last saw ${held}. The /give or /clear did not land, or something spent the item.`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+}
+
+/**
+ * Polls `executor`'s own `findBlocks` until it reports `blockName` at exactly
+ * `position`, or throws.
+ *
+ * `findBlocks` is line-of-sight limited, so this proves two things at once:
+ * the console command that built the block landed, and this connection can
+ * actually see it. Use it on a SECOND connection to confirm what another bot
+ * did — the acting bot's own world model is not evidence (see `bot.dig()`).
+ */
+export async function waitForBlockVisible(
+  executor: MineflayerExecutor,
+  blockName: string,
+  position: { x: number; y: number; z: number },
+  opts: { timeoutMs?: number; maxDistance?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 10_000
+  const maxDistance = opts.maxDistance ?? 16
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const seen = executor
+      .findBlocks({ names: [blockName], maxDistance, limit: 64 })
+      .map((b) => b.position)
+    if (seen.some((p) => p.x === position.x && p.y === position.y && p.z === position.z)) return
+    if (Date.now() >= deadline) {
+      const me = executor.getState().self.position
+      throw new Error(
+        `waitForBlockVisible: no ${blockName} visible at (${position.x}, ${position.y}, ` +
+          `${position.z}) within ${timeoutMs}ms from (${me.x.toFixed(1)}, ${me.y.toFixed(1)}, ` +
+          `${me.z.toFixed(1)}). Saw ${seen.length} other(s): ` +
+          `${JSON.stringify(seen.slice(0, 8))}. Either the block is not there, or this ` +
+          `viewpoint has no line of sight to it.`,
+      )
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+}
+
 export interface ArenaBounds {
   /** Inclusive world-space bounds of the platform, in blocks. */
   x0: number
@@ -137,6 +377,41 @@ export interface ArenaBounds {
    * a jump plus margin.
    */
   clearance?: number
+  /**
+   * Wall the platform in on all six sides: four walls around the perimeter of
+   * the cleared volume, and a **glowstone ceiling** as its top layer.
+   * Off by default, so every existing caller keeps the open platform it was
+   * written against.
+   *
+   * Both halves are required by the combat tests, and each answers a measured
+   * failure (Phase 5 spec §4.1-4.2):
+   *
+   *  - **The ceiling** is what keeps an undead mob alive. Under open sky a
+   *    named, `PersistenceRequired` zombie on the y=199 platform *burned to
+   *    death at 21 seconds* — shorter than a single pathfinding leg. Roofing it
+   *    removes the sky light locally, instead of `time set midnight` +
+   *    `doDaylightCycle false`, which would change the sky for anyone playing.
+   *  - **The walls** are what keeps it on the platform. A hostile paths straight
+   *    at the bot, and the platform floats ~130 blocks above real terrain: a mob
+   *    (or a bot backing away from one) that walks off the edge dies on impact,
+   *    and the test reads that as the action failing.
+   *
+   * The ceiling is glowstone rather than stone to **prevent natural spawns**.
+   * A sealed, unlit box on any difficulty above peaceful is a mob spawner: it
+   * would make combat tests flaky (someone else's zombie in the arena) and
+   * leave hostiles behind afterwards. Hostile spawning needs block light 0;
+   * glowstone emits 15, which still reaches 10 at the floor of a 6-high box.
+   * Done locally rather than by touching the `doMobSpawning` gamerule, which is
+   * global shared state.
+   *
+   * The walls and ceiling are built INSIDE the cleared volume, so the usable
+   * interior is `x0+1..x1-1` by `z0+1..z1-1`, from `floorY + 1` up to
+   * `floorY + clearance - 1`. Keeping them inside is what makes the enclosure
+   * self-healing: every block it writes sits in the volume the air fill just
+   * cleared, so a rebuild cannot leave a stale block from a previous test
+   * standing in a wall.
+   */
+  enclosed?: boolean
 }
 
 /**
@@ -189,6 +464,19 @@ export async function buildArena(bounds: ArenaBounds): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 500))
   sendConsoleCommand(`fill ${x0} ${floorY + 1} ${z0} ${x1} ${floorY + clearance} ${z1} air`)
   sendConsoleCommand(`fill ${x0} ${floorY} ${z0} ${x1} ${floorY} ${z1} stone`)
+
+  if (bounds.enclosed) {
+    // See ArenaBounds.enclosed for why each of these exists. Order matters only
+    // in that all of it lands after the air fill above — which is what makes a
+    // rebuild restore a wall an earlier test knocked a hole in.
+    const ceilingY = floorY + clearance
+    const wallTop = ceilingY - 1
+    sendConsoleCommand(`fill ${x0} ${ceilingY} ${z0} ${x1} ${ceilingY} ${z1} glowstone`)
+    sendConsoleCommand(`fill ${x0} ${floorY + 1} ${z0} ${x1} ${wallTop} ${z0} stone`)
+    sendConsoleCommand(`fill ${x0} ${floorY + 1} ${z1} ${x1} ${wallTop} ${z1} stone`)
+    sendConsoleCommand(`fill ${x0} ${floorY + 1} ${z0} ${x0} ${wallTop} ${z1} stone`)
+    sendConsoleCommand(`fill ${x1} ${floorY + 1} ${z0} ${x1} ${wallTop} ${z1} stone`)
+  }
 
   // VERIFIED 2026-09-07, the hard way: a coal drop left in the arena by an
   // earlier run was silently picked up by a later one, so a case that should

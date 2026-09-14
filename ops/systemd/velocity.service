@@ -1,0 +1,45 @@
+[Unit]
+# Velocity proxy — the front door on 0.0.0.0:25565, where PEOPLE connect.
+# Bots do not need this: they connect straight to the Fabric backend on 25566
+# and sign their own forwarding payload. See minebot's CLAUDE.md.
+#
+# The proxy is stateless — it holds no world and stores no player data — so it
+# is safe to start, stop and restart at will, which is why it is autostarted and
+# the backend deliberately is NOT.
+Description=Velocity Minecraft proxy (tmux socket "velocity")
+Documentation=https://docs.papermc.io/velocity
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# oneshot + RemainAfterExit rather than Type=forking: `tmux new-session -d`
+# returns immediately and the tmux server it leaves behind is not a child
+# systemd can track as a main PID.
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/zman/minecraft/velocity
+
+# A DEDICATED tmux socket ("-L velocity"), deliberately NOT the default one.
+# The default socket holds the `mc` session running the Fabric backend, and a
+# world must be flushed with the console `stop` command rather than killed.
+# Sharing a socket would put that tmux server inside this unit's cgroup, so
+# `systemctl --user stop velocity` could take the backend down uncleanly. A
+# separate socket makes that impossible rather than merely unlikely.
+#
+#   attach:  tmux -L velocity attach -t velocity     (detach with ctrl-b d)
+#   console: tmux -L velocity send-keys -t velocity '<command>' Enter
+#
+# `exec java …` so java replaces the shell and the pane ends when it exits,
+# instead of leaving a dead pane holding the session open.
+ExecStart=/usr/bin/tmux -L velocity new-session -d -s velocity -x 200 -y 50 "exec java -Xms512M -Xmx512M -XX:+UseG1GC -jar velocity.jar"
+
+# Graceful shutdown: Velocity's own `shutdown` command, then a moment to let it
+# close connections before the session is torn down. `|| true` throughout so a
+# stop of an already-dead proxy is not itself a failure.
+ExecStop=-/usr/bin/tmux -L velocity send-keys -t velocity "shutdown" Enter
+ExecStop=-/bin/sh -c 'for i in $(seq 1 15); do /usr/bin/tmux -L velocity has-session -t velocity 2>/dev/null || exit 0; sleep 1; done'
+ExecStop=-/bin/sh -c '/usr/bin/tmux -L velocity kill-session -t velocity 2>/dev/null || true'
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

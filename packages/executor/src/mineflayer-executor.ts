@@ -1,6 +1,6 @@
 import mineflayer, { type Bot } from 'mineflayer'
 import pathfinderPkg from 'mineflayer-pathfinder'
-import type { goals as PathfinderGoals } from 'mineflayer-pathfinder'
+import type { GoalPlaceBlockOptions, goals as PathfinderGoals } from 'mineflayer-pathfinder'
 import {
   ok,
   fail,
@@ -9,6 +9,7 @@ import {
   type BlockQuery,
   type BotEvents,
   type BotExecutor,
+  type EntityInfo,
   type ExplorationReport,
   type ExploreOptions,
   type Result,
@@ -34,6 +35,7 @@ import {
   type SearchState,
 } from './explore.js'
 import { isPerceivable, observe, type PerceptionWorld } from './visibility.js'
+import { placementOrder, type Schematic } from './schematic.js'
 
 // VERIFIED 2026-09-07: `goals` is not an ESM named export of this CJS package
 // — Node's named-export detection finds only `Movements`, `pathfinder` and
@@ -59,6 +61,8 @@ type PathfinderGoal = PathfinderGoals.Goal
  */
 type MineflayerBlock = NonNullable<ReturnType<Bot['blockAt']>>
 type MineflayerVec3 = MineflayerBlock['position']
+/** One of the entities Mineflayer tracks, derived for the same reason as above. */
+type MineflayerEntity = NonNullable<Bot['entities'][number]>
 
 /**
  * How close counts as having arrived, for `moveTo`.
@@ -80,10 +84,133 @@ const ARRIVAL_TOLERANCE = 2.5
 const DIG_REACH = 5
 
 /**
+ * How far from the bot's eye a face may be and still be placed against, as
+ * `GoalPlaceBlock` measures it: from the standing node's eye to the centre of
+ * the reference block's face. 4.5 is vanilla survival's block interaction
+ * range — the bot stands where a player could have placed from, rather than at
+ * the edge of whatever the server might tolerate.
+ */
+const PLACE_REACH = 4.5
+
+/**
+ * How close the bot must be to an entity before a swing is believable, and how
+ * close the approach asks to get.
+ *
+ * Vanilla's survival attack range is 3 blocks, and the server rejects an
+ * interaction beyond 6 — so anything past 3 was never a swing a player could
+ * have made, whatever the server would tolerate. The same reasoning as
+ * `DIG_REACH`: the bot stands where a player could have struck from.
+ *
+ * The follow range is one block tighter than the reach, so arriving at the
+ * goal leaves margin for a mob that is still moving when the swing goes out.
+ *
+ * NOTE the reach check is what makes ruling R9's `unreachable` honest, and it
+ * is not redundant with the pathfinder: **the server does not check line of
+ * sight for an attack**, only distance. A bot that could stand within 3 blocks
+ * of a mob sealed behind a thin wall would land a swing through it. The
+ * enclosure in `combat.int.test.ts` is three blocks thick for exactly that
+ * reason.
+ */
+const ATTACK_REACH = 3
+const ATTACK_FOLLOW_RANGE = 2
+
+/**
+ * How far `flee` AIMS to get from the nearest hostile, and how long it may take.
+ * Agreed 2026-09-14 (Phase 5 spec §7, Decision 4).
+ *
+ * The 100 is a target rather than a requirement, and deliberately so: MEASURED
+ * 2026-09-13, the bot sustains 5.60 blocks/sec (sprint, flat, unobstructed), so
+ * 100 blocks needs ≥17.9s and this bound buys ~56 at best. The bound wins.
+ *
+ * 10_000 and not more, for the reason that bounded `attack` in Task 6a: a reflex
+ * recovery that can run for 30s is not a reflex.
+ */
+const FLEE_TARGET_DISTANCE = 100
+const FLEE_TIMEOUT_MS = 10_000
+
+/**
+ * The radii `flee` tries, furthest first, and how many bearings on each.
+ *
+ * A ladder rather than a single ring at the target, because the pathfinder plans
+ * to the candidate: an unpathable one means the bot does not move at all, and on
+ * any confined floor every point 100 blocks out is off the edge. Without the
+ * fallbacks, "I could have run 30 blocks that way" would report `unreachable`.
+ *
+ * Eight bearings is the same compass the exploration spiral uses — enough that a
+ * wall in one direction does not rule out escape, few enough that the whole list
+ * can be tried inside the bound.
+ */
+const FLEE_RADII: readonly number[] = [FLEE_TARGET_DISTANCE, 64, 32, 16, 8]
+const FLEE_BEARINGS = 8
+
+/**
+ * Blocks that do NOT occupy a cell for `placeBlock` — the air variants, plus
+ * the blocks Minecraft simply replaces when you place into them. Anything else
+ * occupies it.
+ *
+ * **Curated, not looked up, because there is nothing to look up.**
+ * `minecraft-data` carries no `replaceable` field: water, lava, `short_grass`,
+ * snow, fire and vine all report `boundingBox: 'empty'` and are
+ * indistinguishable there, so `boundingBox` cannot separate "Minecraft will
+ * replace this" from "this will kill the bot". Verified 2026-09-14 that all of
+ * these names exist in `minecraft-data`.
+ *
+ * **Lava and fire are deliberately absent**, and that is a departure from
+ * vanilla: both ARE in the `#minecraft:replaceable` tag, so Minecraft would let
+ * the bot place into them. Agreed 2026-09-14 (Phase 5 spec §7, Decision 4) to
+ * exclude them anyway — a bot replacing lava unprompted loses the block, the
+ * item, or itself, and nothing in this project wants that to be the default.
+ * They therefore report `invalid_target`, "occupied", like any solid block.
+ */
+const EMPTY_BLOCKS: ReadonlySet<string> = new Set([
+  'air',
+  'cave_air',
+  'void_air',
+  'water',
+  'bubble_column',
+  'short_grass',
+  'tall_grass',
+  'fern',
+  'large_fern',
+  'dead_bush',
+  'seagrass',
+  'tall_seagrass',
+  'vine',
+  'glow_lichen',
+  'snow',
+  'moss_carpet',
+  'hanging_roots',
+  'warped_roots',
+  'crimson_roots',
+  'nether_sprouts',
+  'light',
+  'structure_void',
+])
+
+/** The six neighbours of a cell, as offsets. */
+const NEIGHBOUR_OFFSETS: ReadonlyArray<readonly [number, number, number]> = [
+  [0, -1, 0],
+  [0, 1, 0],
+  [0, 0, -1],
+  [0, 0, 1],
+  [-1, 0, 0],
+  [1, 0, 0],
+]
+
+/**
  * A* detour budget, in path cost. See the measurement table at the call site
  * in `openConnection`, and issue #15 for why it must not be left unbounded.
  */
 const PATHFINDER_SEARCH_RADIUS = 128
+
+/**
+ * How close `followPlayer` keeps to its target, in blocks — `GoalFollow`'s
+ * range. The pathfinder re-plans only once the target has moved further than
+ * this from where the current path was aimed, and considers the bot there
+ * once within it. Close enough to read as following; far enough that the bot
+ * is not forever shuffling into the player's own block.
+ */
+const FOLLOW_RANGE = 2
 
 /** Default wall-clock a single exploreFor call may spend. Design §3.2. */
 const DEFAULT_EXPLORE_BUDGET_MS = 20_000
@@ -117,6 +244,48 @@ const WAYPOINT_ARRIVAL_TOLERANCE = 4
  * single 32-block leg measured ~6s) plus the pathfinder's 5s think time.
  */
 const EXPLORE_TIMEOUT_HEADROOM_MS = 15_000
+
+/**
+ * The longest delay `setTimeout` honours: a signed 32-bit millisecond count.
+ *
+ * MEASURED 2026-09-11 in Node 24: any delay past this — `Infinity`, `NaN`, and
+ * a perfectly finite `3e9` alike — is clamped to 1ms with only a
+ * `TimeoutOverflowWarning`, and fired after 2ms. So "no timeout" must be
+ * expressed by not arming a timer, and a very long timeout by clamping to this.
+ */
+const MAX_TIMER_MS = 2_147_483_647
+
+/**
+ * Per-block share of `buildSchematic`'s default timeout, so the default scales
+ * with the structure instead of a fixed number that is absurd for one block and
+ * far too tight for fifty.
+ *
+ * `placeBlock` already bounds each placement at 30s of its own, so a build can
+ * never hang indefinitely on a single block — this only turns that per-block
+ * bound into an honest whole-call one.
+ *
+ * The 15s above `placeBlock`'s 30s is **slack, not a budget for anything in
+ * particular**. An earlier version of this comment justified it as covering
+ * "the equip and the server's placement acknowledgement after the approach has
+ * used its budget", which is not true: both of those happen INSIDE `placeBlock`
+ * and are already inside its own 30s. The margin exists so a per-block timeout
+ * fires at `placeBlock`'s boundary, where the failure names the block, rather
+ * than at this outer one, where it would only name the build — and measured
+ * cost is ~572ms/block, so the whole figure is ~80× typical either way.
+ */
+const BUILD_PER_BLOCK_BUDGET_MS = 45_000
+
+/**
+ * Horizontal distance between two points, ignoring y.
+ *
+ * `flee` compares candidate destinations against a mob's position, and both sit
+ * on the same floor: including y would let a candidate look further away purely
+ * because the mob is a block lower, which is not escape.
+ */
+const distanceFrom2D = (
+  a: { x: number; z: number },
+  b: { x: number; z: number },
+): number => Math.hypot(a.x - b.x, a.z - b.z)
 
 /** Straight-line distance from the bot to a point, in blocks. */
 const distanceFrom = (bot: Bot, p: { x: number; y: number; z: number }): number => {
@@ -422,11 +591,22 @@ export class MineflayerExecutor implements BotExecutor {
         // semantics the explicit spawned emit below already relies on.
         this.watchForUnexpectedDisconnect(bot)
         this.wireBotEvents(bot)
-        // Movement is non-destructive by design: canDig false means the
-        // pathfinder never tunnels. The only blocks this executor breaks are
-        // the ones mineBlock was explicitly asked to break — a pathfinder
-        // allowed to dig would quietly rewrite the terrain the integration
-        // tests depend on.
+        // Movement does not dig: canDig false means the pathfinder never
+        // tunnels. The only blocks this executor breaks are the ones mineBlock
+        // was explicitly asked to break — a pathfinder allowed to dig would
+        // quietly rewrite the terrain the integration tests depend on.
+        //
+        // But movement CAN BUILD, and this does not stop it. Movements defaults
+        // scafoldingBlocks to [dirt, cobblestone] and allow1by1towers to true,
+        // so a bot carrying either may pillar, bridge a gap, or place a step
+        // while pathing, and leave those blocks behind. Only pillaring is gated
+        // on allow1by1towers; bridging and stepping up (getMoveForward,
+        // getMoveJumpUp) spend scaffolding regardless. MEASURED 2026-09-11 in
+        // place.int.test.ts: told to place its only dirt on a ledge, the bot
+        // pillared on that dirt and failed not_found. placeBlock guards its own
+        // material (see there); towers built from other scaffolding are still
+        // possible. Not switched off globally, because that changes which
+        // targets every other action can reach.
         bot.loadPlugin(pathfinder)
         const movements = new Movements(bot)
         movements.canDig = false
@@ -715,7 +895,13 @@ export class MineflayerExecutor implements BotExecutor {
    *  - the caller's signal, `stop()`, and the timeout all abort `signal`,
    *    which `body` is responsible for reacting to;
    *  - whatever `body` returns, an aborted run is reported as `interrupted`
-   *    (caller abort or stop()) or `timeout`, never as success.
+   *    (caller abort or stop()) or, for an elapsed `timeoutMs`, as whatever
+   *    `onElapsed` decides — `timeout` by default. **A caller abort or `stop()`
+   *    is never reported as success; an elapsed timeout CAN be**, because
+   *    `followPlayer` passes `onElapsed: () => ok(undefined)` — "followed for
+   *    the requested time" is a success, not a failure. See the `onElapsed`
+   *    paragraph below; this bullet used to claim "never as success" flatly,
+   *    which that action has contradicted since Task 3.
    *
    * It never throws: a body that rejects becomes `internal`, per the contract's
    * resolve-don't-throw rule.
@@ -723,11 +909,22 @@ export class MineflayerExecutor implements BotExecutor {
    * Exists because `moveTo` carried ~40 lines of this scaffolding that
    * `mineBlock`'s four cancellable steps would each have repeated, and every
    * repetition is a chance to get the resolve-never-throw rule subtly wrong.
+   *
+   * `defaultTimeoutMs: null` means the action has no timeout unless the caller
+   * passes one, and a non-finite effective timeout (`Infinity`, `NaN`) means
+   * none at all: the timer is simply not armed. It must never be expressed as
+   * `setTimeout(fn, Infinity)`, which fires after ~1ms — see MAX_TIMER_MS.
+   *
+   * `onElapsed`, when given, replaces `fail('timeout')` as the result of the
+   * timer firing. Only `followPlayer` passes it: for an action that runs until
+   * stopped, running for the whole time it was asked to is success. Every other
+   * action leaves it out, and a timer abort stays a `timeout` failure.
    */
   private async runAction<T>(
     opts: ActionOptions | undefined,
-    defaultTimeoutMs: number,
+    defaultTimeoutMs: number | null,
     body: (bot: Bot, signal: AbortSignal) => Promise<Result<T>>,
+    onElapsed?: () => Result<T>,
   ): Promise<Result<T>> {
     if (opts?.signal?.aborted) return fail('interrupted', 'aborted before start')
     const bot = this.bot
@@ -745,10 +942,18 @@ export class MineflayerExecutor implements BotExecutor {
       controller.abort()
     }
     const timeoutMs = opts?.timeoutMs ?? defaultTimeoutMs
-    const timer = setTimeout(() => {
-      cause ??= 'timeout'
-      controller.abort()
-    }, timeoutMs)
+    const timer =
+      timeoutMs === null || !Number.isFinite(timeoutMs)
+        ? undefined
+        : setTimeout(
+            () => {
+              cause ??= 'timeout'
+              controller.abort()
+            },
+            // Clamped, not passed through: a finite delay past the 32-bit limit
+            // overflows exactly as Infinity does. The clamp is ~24.8 days.
+            Math.min(timeoutMs, MAX_TIMER_MS),
+          )
 
     opts?.signal?.addEventListener('abort', onCallerAbort, { once: true })
     this.inFlightStop = stopThisAction
@@ -756,7 +961,7 @@ export class MineflayerExecutor implements BotExecutor {
     /** The single mapping from "this run was aborted" to a failure reason. */
     const abortedResult = (): Result<T> =>
       cause === 'timeout'
-        ? fail('timeout', `did not finish within ${timeoutMs}ms`)
+        ? (onElapsed?.() ?? fail('timeout', `did not finish within ${timeoutMs}ms`))
         : fail('interrupted', cause === 'stop' ? 'stopped via stop()' : 'aborted mid-action')
 
     try {
@@ -770,6 +975,64 @@ export class MineflayerExecutor implements BotExecutor {
       clearTimeout(timer)
       opts?.signal?.removeEventListener('abort', onCallerAbort)
       if (this.inFlightStop === stopThisAction) this.inFlightStop = null
+    }
+  }
+
+  /**
+   * Stop the pathfinder and drop the goal `ours` — but ONLY if the pathfinder
+   * still holds it.
+   *
+   * Called wherever an action that set a goal finishes, however it finishes. A
+   * goal left set outlives the call that set it, and `GoalFollow` — which both
+   * `followPlayer` and `attack` use — is dynamic, so the bot keeps walking at
+   * a target that has moved on long after the caller was told the action had
+   * ended. Task 4 measured that failure for `placeBlock`.
+   *
+   * **The identity check is load-bearing, not defensive.** The pathfinder holds
+   * ONE goal for the whole bot, and `ReflexExecutor` runs a reflex recovery
+   * CONCURRENTLY with the action it preempted — by design (rulings R13, R20,
+   * R21): `preempt()` launches `runRecovery` BEFORE it aborts the preempted
+   * actions, and `runRecovery` yields only a single microtask. Meanwhile an
+   * aborted `followPlayer` resolves synchronously from its abort listener, so
+   * its `finally` lands exactly one microtask later — after the recovery has
+   * already called `setGoal`, because `runAction`, `attack`'s body and
+   * `gotoGoal` are synchronous all the way into `goto()`'s executor.
+   *
+   * Clearing unconditionally there destroyed the RECOVERY's goal: `setGoal`
+   * emits `goal_updated` synchronously (index.js:142-146), `goto`'s
+   * `goalChangedListener` rejects `GoalChanged` for any different goal, `null`
+   * included (lib/goto.js:31-35), and that maps to
+   * `interrupted`/'path stopped before completion'. Because the recovery's own
+   * controller was never aborted, `runRecovery` counted it as a FAILURE, and
+   * three in a row disarm every trigger of that kind — a bot that stops
+   * defending itself while following a player. Found by the whole-branch review
+   * of this phase, and deterministic rather than a race.
+   *
+   * So a stale clear is skipped: after `goal_reached` the plugin has already
+   * nulled its own `stateGoal`, and if another action owns the goal it owns the
+   * cleanup too. `stop()` is inside the same gate deliberately — it ends the
+   * path in progress, which for someone else's goal means their `goto` rejects
+   * `PathStopped`, the same defect by a different route.
+   *
+   * Swallowing the error is the point rather than a shortcut: the only way
+   * these throw is a bot that has already disconnected, and every caller is on
+   * a path where that is a normal outcome — the action is ending regardless,
+   * and there is no pathfinder left to stop.
+   *
+   * `placeBlock` deliberately does NOT use this. Its cleanup is a superset —
+   * it also restores the shared movements, and the goal must be cleared BEFORE
+   * that restore, because `setMovements` resets the path and would re-arm
+   * re-planning against a goal still in place. That ordering was Task 4's fix
+   * and factoring it away would regress it. It applies the same identity gate
+   * inline, next to the one its movements restore already had.
+   */
+  private clearPathfinderGoal(bot: Bot, ours: PathfinderGoal): void {
+    try {
+      if (bot.pathfinder.goal !== ours) return
+      bot.pathfinder.stop()
+      bot.pathfinder.setGoal(null)
+    } catch {
+      // Disconnected mid-action.
     }
   }
 
@@ -790,14 +1053,7 @@ export class MineflayerExecutor implements BotExecutor {
     goal: PathfinderGoal,
     reached: () => boolean,
   ): Promise<Result> {
-    const onAbort = (): void => {
-      try {
-        bot.pathfinder.stop()
-        bot.pathfinder.setGoal(null)
-      } catch {
-        // disconnected mid-path
-      }
-    }
+    const onAbort = (): void => this.clearPathfinderGoal(bot, goal)
     signal.addEventListener('abort', onAbort, { once: true })
     try {
       await bot.pathfinder.goto(goal)
@@ -846,9 +1102,83 @@ export class MineflayerExecutor implements BotExecutor {
     )
   }
 
-  async followPlayer(_playerName: string, opts?: ActionOptions): Promise<Result> {
-    return this.runAction(opts, 30_000, async () =>
-      fail('internal', 'followPlayer arrives in Phase 5'),
+  /**
+   * Follow a player until aborted (signal or `stop()`), or until a passed
+   * `timeoutMs` elapses — which resolves `ok`. No default timeout. Agreed
+   * 2026-09-11, Phase 5 spec §7; see the contract's doc comment.
+   *
+   * Consequence recorded at Ricky's request: the planning loop dispatches with
+   * a signal only (`loop.ts:143`), so a follow issued there does not return
+   * until something aborts it. Bounding it is Track B's.
+   *
+   * Fails `not_found` when the named player has no entity this bot is tracking
+   * at call start, or when that entity goes away mid-follow — the player logged
+   * off, left range, or died. Ruling R5: executor behaviour, not yet in the
+   * agreed contract. Without the mid-follow half the call would never return:
+   * `GoalFollow.isValid()` only checks that it holds an entity reference, which
+   * a departed player's stale entity still is, so the pathfinder carries on
+   * chasing its last known position.
+   */
+  async followPlayer(playerName: string, opts?: ActionOptions): Promise<Result> {
+    return this.runAction(
+      opts,
+      null,
+      async (bot, signal) => {
+        const entity = bot.players[playerName]?.entity
+        if (!entity) {
+          return fail('not_found', `no player named "${playerName}" is in sight`)
+        }
+
+        // Following, not arriving. `goto(new GoalFollow(...))` resolves as soon
+        // as the bot is within range, which is arrival. A dynamic goal stays
+        // set as the target moves, and this call settles only on an abort, the
+        // target leaving, or the connection ending.
+        // Held rather than inlined, so the cleanup below can prove the goal it
+        // drops is still this call's own — see clearPathfinderGoal.
+        const ours = new goals.GoalFollow(entity, FOLLOW_RANGE)
+        bot.pathfinder.setGoal(ours, true)
+
+        let detach = (): void => undefined
+        try {
+          return await new Promise<Result>((resolve) => {
+            // An aborted run is relabelled by runAction — `interrupted`, or
+            // `ok` for an elapsed timeoutMs — so ok here is safe.
+            const onAbort = (): void => resolve(ok(undefined))
+            const onEntityGone = (gone: typeof entity): void => {
+              if (gone === entity) {
+                resolve(fail('not_found', `${playerName} is no longer in sight`))
+              }
+            }
+            const onPlayerLeft = (player: { username: string }): void => {
+              if (player.username === playerName) {
+                resolve(fail('not_found', `${playerName} left the game`))
+              }
+            }
+            const onEnd = (): void => resolve(fail('disconnected', 'connection ended mid-follow'))
+
+            signal.addEventListener('abort', onAbort, { once: true })
+            bot.on('entityGone', onEntityGone)
+            bot.on('playerLeft', onPlayerLeft)
+            bot.once('end', onEnd)
+            detach = () => {
+              signal.removeEventListener('abort', onAbort)
+              bot.removeListener('entityGone', onEntityGone)
+              bot.removeListener('playerLeft', onPlayerLeft)
+              bot.removeListener('end', onEnd)
+            }
+            // Checked after subscribing, so an abort in between is not missed.
+            if (signal.aborted) onAbort()
+          })
+        } finally {
+          detach()
+          // Clear the goal whatever ended the call. Left set, the bot would keep
+          // walking after the caller was told the action had ended. Gated on the
+          // goal still being ours: when a reflex preempted this call, the
+          // recovery's goal is already in place by the time this runs.
+          this.clearPathfinderGoal(bot, ours)
+        }
+      },
+      () => ok(undefined),
     )
   }
 
@@ -1040,18 +1370,478 @@ export class MineflayerExecutor implements BotExecutor {
     return bot.entity.position.offset(0, 0, 0).set(x, y, z)
   }
 
-  async placeBlock(_blockName: string, _position: Vec3, opts?: ActionOptions): Promise<Result> {
-    return this.runAction(opts, 30_000, async () =>
-      fail('internal', 'placeBlock arrives in Phase 5'),
+  /**
+   * Place one `blockName` from the inventory at `position`. Agreed 2026-09-11,
+   * Phase 5 spec §7; see the contract's doc comment for the failure table.
+   *
+   * Checks run cheapest and least invasive first, the order the mock uses:
+   * inventory, then the target cell, then the approach. Nothing moves until
+   * the call is known to be answerable.
+   */
+  async placeBlock(blockName: string, position: Vec3, opts?: ActionOptions): Promise<Result> {
+    return this.runAction(opts, 30_000, async (bot, signal) => {
+      // --- Step 1: the material ---
+      if (!bot.inventory.items().some((i) => i.name === blockName)) {
+        return fail('not_found', `no ${blockName} in the inventory`)
+      }
+      // Executor behaviour, not in the agreed table: an item that is not a
+      // block (a stick) would otherwise walk into reach and then be refused by
+      // the server as `internal`. `invalid_target` is what mineBlock and
+      // exploreFor already answer for an unknown block name.
+      if (!bot.registry.blocksByName[blockName]) {
+        return fail('invalid_target', `"${blockName}" is not a placeable block`)
+      }
+
+      // --- Step 2: the target cell ---
+      const target = this.toBlockPos(
+        bot,
+        Math.floor(position.x),
+        Math.floor(position.y),
+        Math.floor(position.z),
+      )
+      const where = `(${target.x}, ${target.y}, ${target.z})`
+      const existing = bot.blockAt(target)
+      if (!existing) return fail('unreachable', `${where} is not in a loaded chunk`)
+      if (!EMPTY_BLOCKS.has(existing.name)) {
+        return fail('invalid_target', `${where} is occupied by ${existing.name}`)
+      }
+      const supported = NEIGHBOUR_OFFSETS.some(
+        ([dx, dy, dz]) => bot.blockAt(target.offset(dx, dy, dz))?.boundingBox === 'block',
+      )
+      if (!supported) {
+        // Freestanding mid-air placement is out of scope (PR #22): build bottom-up.
+        return fail('invalid_target', `nothing solid beside ${where} to place against`)
+      }
+      if (signal.aborted) return ok(undefined)
+
+      // --- Step 3: approach ---
+      // GoalPlaceBlock, not GoalNear (ruling R8). Its end condition is a
+      // standing node whose eye has LINE OF SIGHT to a reference face within
+      // PLACE_REACH, and it refuses any node whose feet or head would be in
+      // the target cell — Minecraft will not place a block into a cell an
+      // entity occupies, and the bot counts. GoalNear would happily park the
+      // bot on the very cell it was asked to fill.
+      //
+      // The line-of-sight requirement is our honesty rule, not the server's.
+      // MEASURED 2026-09-11: with LOS off, the bot placed into the empty centre
+      // of a sealed stone box from outside it, and the server accepted it. LOS
+      // keeps the bot from building through a wall it cannot see through, as
+      // perception already refuses to look through one.
+      //
+      // The .d.ts marks `faces` and `facing` required; the implementation
+      // (lib/goals.js:383) defaults both — every face, any facing — and that
+      // default is what is wanted. Built fresh per call: the constructor
+      // mutates its options object.
+      const goal = new goals.GoalPlaceBlock(target, bot.world, {
+        range: PLACE_REACH,
+        LOS: true,
+      } as unknown as GoalPlaceBlockOptions)
+      // Runtime methods of the pinned 2.4.5 goal. `isEnd` is typed for the
+      // pathfinder's own Move nodes and `getFaceAndRef` is not declared at
+      // all; both only read x/y/z and Vec3 arithmetic off what they are given.
+      const placeGoal = goal as unknown as {
+        isEnd(node: MineflayerVec3): boolean
+        getFaceAndRef(
+          eye: MineflayerVec3,
+        ): { face: MineflayerVec3; ref: MineflayerVec3 } | null
+      }
+      /**
+       * The face to place against from where the bot stands now, or null.
+       * Used for both the arrival check and the placement, so they never
+       * disagree.
+       *
+       * The bot's own cell — plus the cell above only when it stands on a
+       * partial block. That is the pathfinder's own rule for which node a
+       * standing bot occupies (index.js:78-84: the floored position, offset by
+       * one when the block there is solid, not full height, and the bot is on
+       * the ground).
+       *
+       * Review round 1, Important 2 — MEASURED 2026-09-11. This used to try
+       * the cell above unconditionally, copying the post-walk check at
+       * index.js:590. On the floor right against a two-high ledge the bot's
+       * own eye (y+1.62) is below the ledge top and cannot see the face beside
+       * the target, but an eye one block higher can. A zero-length path then
+       * passed as arrival, and the server — which does not check line of
+       * sight — accepted a placement on a surface the bot could not see:
+       * {"ok":true} where `unreachable` is right.
+       */
+      const faceFromHere = (): { face: MineflayerVec3; ref: MineflayerVec3 } | null => {
+        const node = bot.entity.position.floored()
+        const standingIn = bot.blockAt(node)
+        const onPartialBlock =
+          standingIn !== null &&
+          standingIn.boundingBox === 'block' &&
+          bot.entity.position.y - node.y > 0.001 &&
+          bot.entity.onGround
+        for (const n of onPartialBlock ? [node, node.offset(0, 1, 0)] : [node]) {
+          if (placeGoal.isEnd(n)) return placeGoal.getFaceAndRef(n.offset(0.5, 1.6, 0.5))
+        }
+        return null
+      }
+
+      // The approach must not spend the material it is walking over to place.
+      //
+      // MEASURED 2026-09-11 (place.int.test.ts, the ledge tests): with one
+      // dirt and the shared movements, the bot reached a ledge target by
+      // pillaring on that dirt, then had nothing left to place — not_found for
+      // a block the caller did have, and a pillar left behind. So for this
+      // approach the pathfinder gets a copy of the shared movements whose
+      // scafoldingBlocks leaves out the material.
+      //
+      // A shallow copy, not `new Movements(bot)`: a fresh instance would
+      // silently drop every setting made on the shared one, including
+      // canDig = false. And swapped only when the material IS scaffolding,
+      // because setMovements resets any path in progress.
+      const shared = bot.pathfinder.movements
+      const materialId = bot.registry.itemsByName[blockName]?.id
+      const spare = shared.scafoldingBlocks.filter((id) => id !== materialId)
+      const guarded =
+        spare.length === shared.scafoldingBlocks.length
+          ? null
+          : Object.assign(Object.create(Object.getPrototypeOf(shared)) as typeof shared, shared, {
+              scafoldingBlocks: spare,
+            })
+      if (guarded) bot.pathfinder.setMovements(guarded)
+      let approach: Result
+      try {
+        approach = await this.gotoGoal(bot, signal, goal, () => faceFromHere() !== null)
+      } finally {
+        try {
+          // Clear the goal FIRST, whatever the outcome. Review round 1,
+          // Important 1 — MEASURED 2026-09-11. A failed approach (NoPath, or a
+          // zero-length path `reached()` rejects) leaves the goal set, and
+          // setMovements runs resetPath, which re-arms re-planning
+          // (`pathUpdated = false`, index.js:123-139). The pathfinder then
+          // re-planned the same GoalPlaceBlock with the SHARED movements —
+          // dirt allowed again — and pillared on the dirt within 8s of this
+          // call returning `unreachable` with the dirt still held. On success
+          // the same restart could move the bot while it equips and places.
+          //
+          // Gated on the goal still being ours, for the same reason the
+          // movements restore below is: a reflex recovery preempting this call
+          // has already set its own goal by the time this runs, and clearing it
+          // makes the recovery report `interrupted` without having acted. See
+          // clearPathfinderGoal for the full mechanism. The ORDER is unchanged —
+          // goal first, movements second — which is what Task 4 measured.
+          if (bot.pathfinder.goal === goal) bot.pathfinder.setGoal(null)
+          // Only if nothing replaced it meanwhile: restoring over someone
+          // else's movements would be a second surprise, not a cleanup.
+          if (guarded && bot.pathfinder.movements === guarded) bot.pathfinder.setMovements(shared)
+        } catch {
+          // disconnected mid-approach
+        }
+      }
+      if (!approach.ok) return approach
+      if (signal.aborted) return ok(undefined)
+
+      // --- Step 4: equip and place ---
+      const placement = faceFromHere()
+      if (!placement) return fail('unreachable', `lost sight of a face beside ${where}`)
+      const reference = bot.blockAt(placement.ref)
+      if (!reference) return fail('unreachable', `the block beside ${where} is not loaded`)
+      // Looked up again rather than reused: the approach took time, and the
+      // equip needs the item as it is now.
+      const item = bot.inventory.items().find((i) => i.name === blockName)
+      if (!item) return fail('not_found', `no ${blockName} left in the inventory after the approach`)
+      await bot.equip(item, 'hand')
+      if (signal.aborted) return ok(undefined)
+
+      // `face` points from the target to the reference block; Mineflayer wants
+      // the vector from the reference to the cell being filled.
+      //
+      // Verified against the server, not the bot's own view: in mineflayer
+      // 4.39 placeBlock (lib/plugins/place_block.js) sends the packet and then
+      // waits for the SERVER's block update at the destination, rejecting with
+      // "Server refused to place …" if the type did not change. It does not
+      // write the block into the local world model first, unlike bot.dig().
+      await bot.placeBlock(reference, placement.face.scaled(-1))
+      return ok(undefined)
+    })
+  }
+
+  /**
+   * Build `s` with its origin at `origin`: one `placeBlock` per block, in
+   * `placementOrder` — ascending `dy`, so every block already has something
+   * beneath it to place against by the time its turn comes. That ordering is
+   * not a nicety: `placeBlock` refuses a cell with no adjacent solid block, so
+   * a top-down build fails `invalid_target` on its very first block.
+   *
+   * Executor-only, and deliberately NOT on `BotExecutor`. Adding it there is a
+   * change to the shared surface Track B builds against, and the planning loop
+   * does not need it yet.
+   *
+   * Stops at the first failure and reports that failure's own reason, with a
+   * detail naming the offending block, its absolute position, and how many
+   * blocks were already placed. A bare reason would leave the caller unable to
+   * tell a build that died on block 1 from one that died on block 8 — the first
+   * is "this plan was wrong", the second "something interfered halfway", and
+   * they call for different recoveries. The count is in the detail because a
+   * failed `Result` carries no value.
+   *
+   * Verification is `placeBlock`'s, not re-implemented here: it already checks
+   * the cell, and confirms the placement against the SERVER's block update
+   * rather than the bot's own world model.
+   */
+  async buildSchematic(
+    s: Schematic,
+    origin: Vec3,
+    opts?: ActionOptions,
+  ): Promise<Result<{ placed: number }>> {
+    const order = placementOrder(s)
+    return this.runAction(
+      opts,
+      // Scaled, not fixed — see BUILD_PER_BLOCK_BUDGET_MS.
+      //
+      // The empty schematic is `null` ("no timeout"), not the 0 the
+      // multiplication would give. runAction treats only `null` and a
+      // non-finite delay as "no timeout", so 0 arms a real `setTimeout(fn, 0)`
+      // — which this body survives only because an empty loop has no `await`
+      // and so settles on the microtask queue before any macrotask can run.
+      // That is correct by accident; say what is meant instead.
+      order.length === 0 ? null : order.length * BUILD_PER_BLOCK_BUDGET_MS,
+      async (_bot, signal) => {
+        let placed = 0
+        for (const block of order) {
+          // Between blocks, so a long build is cancellable even while no single
+          // placement is in flight. Returning ok with the honest count is safe:
+          // runAction relabels an aborted run as `interrupted` (caller abort or
+          // stop()) or `timeout`, and keeping that mapping in one place is the
+          // whole reason runAction exists.
+          if (signal.aborted) return ok({ placed })
+
+          const at: Vec3 = {
+            x: origin.x + block.dx,
+            y: origin.y + block.dy,
+            z: origin.z + block.dz,
+          }
+          // Our signal is passed down, so an abort settles the placement in
+          // flight too rather than waiting for it to walk and place first.
+          //
+          // This nests a runAction inside a runAction, the first place in this
+          // class that does. It buys each placement its own 30s bound and its
+          // own goal/movements cleanup. It costs `stop()` coverage BETWEEN
+          // blocks: placeBlock's runAction overwrites `inFlightStop` and clears
+          // it on the way out, so a stop() landing between two placements halts
+          // the pathfinder but does not abort this loop — the next placeBlock
+          // then re-registers and a stop() during it works normally. Nothing
+          // calls stop() on a build today (this is not a contract action, so
+          // the reflex layer never dispatches it); if that changes, this loop
+          // needs its own stop registration rather than borrowing placeBlock's.
+          const result = await this.placeBlock(block.block, at, { signal })
+          if (!result.ok) {
+            // An aborted run's failure is the abort, not the block — let
+            // runAction label it rather than blaming whatever placeBlock said.
+            if (signal.aborted) return ok({ placed })
+            return fail(
+              result.reason,
+              `${s.name}: ${block.block} at (${at.x}, ${at.y}, ${at.z}) failed after ` +
+                `${placed} of ${order.length} placed — ${result.detail}`,
+            )
+          }
+          placed += 1
+        }
+        return ok({ placed })
+      },
     )
   }
 
-  async attack(_entityId: number, opts?: ActionOptions): Promise<Result> {
-    return this.runAction(opts, 30_000, async () => fail('internal', 'attack arrives in Phase 5'))
+  /**
+   * Swing once at an entity, then resolve `ok`. Agreed 2026-09-11, Phase 5
+   * spec §7; see the contract's doc comment. `ok` says the swing happened, not
+   * that the entity died — call again to keep attacking.
+   *
+   * The default timeout is **10s, not the 30s the stub carried**. This is what
+   * the reflex layer dispatches as its recovery when a hostile closes
+   * (`ReflexExecutor`, whose own `recoveryTimeoutMs` default is the same 10s),
+   * and a reflex that can run for thirty seconds is not a reflex — it is an
+   * action the planner cannot get out of.
+   *
+   * Fails:
+   * - `not_found` — no entity with that id, at call time or by the time the
+   *   approach finishes. Agreed; it died, despawned, or left the loaded world.
+   * - `unreachable` — the bot cannot get within reach of it. **Ruling R9,
+   *   executor behaviour only**, mirroring `placeBlock`'s agreed row; it is
+   *   deliberately NOT in the contract's doc comment, which is shared surface
+   *   and not yet agreed with Track B.
+   *
+   * `GoalFollow`, not `GoalNear`: the target is a mob with its own AI, so it
+   * moves while the bot walks at it, and a fixed point would be stale before
+   * the bot arrived. This is the case spec §3 asks about.
+   */
+  async attack(entityId: number, opts?: ActionOptions): Promise<Result> {
+    return this.runAction(opts, 10_000, async (bot, signal) => {
+      /** The entity as Mineflayer tracks it now, or null once it is gone. */
+      const live = (): MineflayerEntity | null => {
+        const e = bot.entities[entityId]
+        // Both halves matter: on `entity_destroy` Mineflayer sets `isValid`
+        // false and then deletes the entry, so a caller holding an id can be
+        // looking at either state depending on when it asks.
+        return e === undefined || e.isValid === false ? null : e
+      }
+
+      const target = live()
+      if (!target) return fail('not_found', `no entity ${entityId} is in sight`)
+
+      // Held rather than inlined, so the cleanup below can prove the goal it
+      // drops is still this call's own — see clearPathfinderGoal.
+      const ours = new goals.GoalFollow(target, ATTACK_FOLLOW_RANGE)
+      let approach: Result
+      try {
+        approach = await this.gotoGoal(bot, signal, ours, () => {
+          const now = live()
+          return now !== null && distanceFrom(bot, now.position) <= ATTACK_REACH
+        })
+      } finally {
+        // Whatever the outcome, and BEFORE returning — see clearPathfinderGoal.
+        // Gated: a flee recovery superseding this attack (ruling R22) has its own
+        // goal set by the time this runs, and dropping it would report the flee
+        // as interrupted without it ever having fled.
+        this.clearPathfinderGoal(bot, ours)
+      }
+      if (!approach.ok) return approach
+      if (signal.aborted) return ok(undefined)
+
+      // Re-read rather than reusing `target`: the approach took time, and the
+      // mob may have died to something else — its own fall, another mob, a
+      // player — while the bot walked at it.
+      const now = live()
+      if (!now) return fail('not_found', `entity ${entityId} was gone before the swing`)
+      const reach = distanceFrom(bot, now.position)
+      if (reach > ATTACK_REACH) {
+        return fail('unreachable', `entity ${entityId} is ${reach.toFixed(1)} blocks away`)
+      }
+
+      // Face it before swinging. Not required by the server, which checks only
+      // distance — which is precisely why it is here: a swing that lands while
+      // the bot faces the other way is not something a player could have done.
+      await bot.lookAt(now.position.offset(0, now.height / 2, 0), true)
+      if (signal.aborted) return ok(undefined)
+      bot.attack(now)
+      return ok(undefined)
+    })
   }
 
-  async flee(opts?: ActionOptions): Promise<Result> {
-    return this.runAction(opts, 30_000, async () => fail('internal', 'flee arrives in Phase 5'))
+  /**
+   * Run away from the nearest hostile: aim for `FLEE_TARGET_DISTANCE`, bounded
+   * by `FLEE_TIMEOUT_MS`, and report whether the gap actually grew.
+   *
+   * **The two numbers cannot both be satisfied, and the agreement says the bound
+   * wins.** MEASURED 2026-09-13: the bot's top speed is 5.60 blocks/sec (sprint,
+   * flat, unobstructed), so 100 blocks needs ≥17.9s and 10 seconds buys ~56
+   * blocks at best. So 100 is a *target*: the run is truncated by the timer, and
+   * `onElapsed` reports `fled: true` when the gap grew anyway — which is the
+   * ordinary outcome, not an edge case.
+   *
+   * **Why a LADDER of radii rather than one ring at 100.** The pathfinder plans
+   * to the candidate, so an unpathable candidate means the bot does not move at
+   * all — and on any confined floor every point 100 blocks out is off the edge.
+   * A single ring would therefore turn "I could have run 30 blocks that way" into
+   * `unreachable`. Trying 100 first and falling back keeps the agreed target
+   * while still escaping when only a shorter run exists. This is a Track A
+   * implementation choice inside the agreed numbers, not a change to them.
+   *
+   * Candidates are filtered to those strictly further from the hostile than the
+   * bot is now — running *past* a zombie is not fleeing — and tried furthest
+   * first.
+   *
+   * Reasons, per the contract: `ok({ fled: false })` only for "there was no
+   * hostile", including the routine race where one died or despawned between the
+   * trigger and this call; `unreachable` when there was one and no candidate
+   * could increase the gap; `timeout` when the bound elapsed with no gain.
+   */
+  async flee(opts?: ActionOptions): Promise<Result<{ fled: boolean }>> {
+    // Shared between the body and `onElapsed`, because the timer can end the run
+    // at any moment and "did the gap grow?" is only answerable from what the
+    // body established before it did.
+    let hostileId: number | null = null
+    let startGap: number | null = null
+
+    /**
+     * The current gap to the hostile we set out to escape, or null if it is gone
+     * — which counts as escaped: the thing being fled no longer exists.
+     */
+    const gapNow = (): number | null => {
+      const bot = this.bot
+      if (!bot || hostileId === null) return null
+      const e = bot.entities[hostileId]
+      if (e === undefined || e.isValid === false) return null
+      return distanceFrom(bot, e.position)
+    }
+    const gapGrew = (): boolean => {
+      if (startGap === null) return false
+      const g = gapNow()
+      return g === null || g > startGap
+    }
+
+    return this.runAction<{ fled: boolean }>(
+      opts,
+      FLEE_TIMEOUT_MS,
+      async (bot, signal) => {
+        const hostiles = this.getState().nearbyEntities.filter((e) => e.kind === 'hostile')
+        const nearest = hostiles.reduce<EntityInfo | null>(
+          (best, e) => (best === null || e.distance < best.distance ? e : best),
+          null,
+        )
+        // Nothing to flee from is the safest outcome, not a failure.
+        if (!nearest) return ok({ fled: false })
+
+        hostileId = nearest.id
+        startGap = distanceFrom(bot, nearest.position)
+        const from = bot.entity.position.clone()
+
+        // Furthest-from-the-hostile first, across the whole ladder at once, so a
+        // reachable 32-block escape is preferred over an unreachable 100-block one
+        // only because the latter cannot be pathed — not because of ring order.
+        const candidates = FLEE_RADII.flatMap((radius) =>
+          Array.from({ length: FLEE_BEARINGS }, (_, i) => {
+            const theta = (2 * Math.PI * i) / FLEE_BEARINGS
+            return {
+              x: Math.round(from.x + radius * Math.cos(theta)),
+              y: Math.round(from.y),
+              z: Math.round(from.z + radius * Math.sin(theta)),
+            }
+          }),
+        )
+          .map((p) => ({ p, gap: distanceFrom2D(p, nearest.position) }))
+          // Strictly further, or it is not fleeing.
+          .filter((c) => c.gap > (startGap ?? 0))
+          .sort((a, b) => b.gap - a.gap)
+
+        for (const { p } of candidates) {
+          if (signal.aborted) break
+          const r = await this.gotoGoal(
+            bot,
+            signal,
+            new goals.GoalNear(p.x, p.y, p.z, 1),
+            () => distanceFrom(bot, p) <= ARRIVAL_TOLERANCE,
+          )
+          // Verified against the world, never from the promise: goto() resolves
+          // ok on a zero-length path, so arrival is not evidence of movement and
+          // movement is not evidence of escape.
+          if (gapGrew()) return ok({ fled: true })
+          // An abort is the caller's or the timer's business, not a candidate
+          // that failed — stop rather than burning the rest of the list.
+          if (!r.ok && r.reason === 'interrupted') break
+        }
+
+        if (gapGrew()) return ok({ fled: true })
+        if (signal.aborted) return ok({ fled: false })
+        return fail(
+          'unreachable',
+          `could not increase the gap to ${nearest.name} from ${startGap.toFixed(1)} blocks — ` +
+            `${candidates.length} candidate destination(s) tried, none further away and reachable`,
+        )
+      },
+      // The timer is the expected ending, not an error: with a 100-block target
+      // and a 10s bound it fires on any successful long run.
+      () =>
+        gapGrew()
+          ? ok({ fled: true })
+          : fail(
+              'timeout',
+              `fled for ${FLEE_TIMEOUT_MS}ms without increasing the gap to the nearest hostile`,
+            ),
+    )
   }
 
   /**
