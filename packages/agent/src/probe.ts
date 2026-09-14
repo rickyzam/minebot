@@ -185,6 +185,36 @@ const SCENARIOS: readonly Scenario[] = [
     hoped: ['give_up'],
   },
   {
+    // Spec §4.4. The DISCRIMINATION, not the acquire policy. The bot holds a
+    // usable pickaxe and a second target is visible; missing_tool on ONE block
+    // (deepslate needs better than stone) does not make the goal impossible.
+    // The paired control is the pre-existing 'inventory empty' scenario above,
+    // where give_up IS right — together they show the model is reading the
+    // situation rather than reacting to the word missing_tool.
+    name: 'missing_tool but another route remains',
+    goal: 'get me some coal',
+    inventory: [PICKAXE],
+    history: [
+      step(
+        1,
+        { action: 'find_blocks', names: ['coal_ore'], maxDistance: 32, limit: 5 },
+        {
+          kind: 'blocks',
+          blocks: [
+            { name: 'deepslate_coal_ore', position: { x: 20, y: 55, z: -30 }, distance: 9.5 },
+            { name: 'coal_ore', position: COAL_AT, distance: 7.94 },
+          ],
+        },
+      ),
+      step(
+        2,
+        { action: 'mine_block_at', x: 20, y: 55, z: -30, maxDistance: 32 },
+        { kind: 'result', result: fail('missing_tool', 'needs an iron pickaxe or better') },
+      ),
+    ],
+    hoped: ['mine_block_at'],
+  },
+  {
     name: 'mined but the drop was lost',
     goal: 'get me some coal',
     inventory: [PICKAXE],

@@ -207,8 +207,10 @@ const DECISION = [
   '  sees from where the bot stands. give_up only once a report says FINISHED.',
   '- a mine_block_at that FAILED with not_found — that position is finished, so do not',
   '  mine it or move_to it again.',
-  '- an action that FAILED with missing_tool — walking somewhere else will not conjure a',
-  '  tool, so give_up.',
+  '- an action that FAILED with missing_tool — check the most recently reported blocks',
+  '  (from find_blocks or explore_for) for one you have not yet tried mining: if one',
+  '  remains, mine_block_at it. Only give_up once every reported block has already been',
+  '  tried.',
 ].join('\n')
 
 /**

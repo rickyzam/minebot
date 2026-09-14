@@ -231,7 +231,7 @@ describe('renderPrompt decision block', () => {
     expect(text.indexOf('Recent actions:')).toBeLessThan(
       text.indexOf('Before you answer, look at the LAST line above'),
     )
-    expect(text.trimEnd().endsWith('so give_up.')).toBe(true)
+    expect(text.trimEnd().endsWith('tried.')).toBe(true)
   })
 
   // The block tells the model to act on two phrases. If `describeValue` ever

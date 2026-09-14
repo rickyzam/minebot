@@ -163,6 +163,57 @@ offers an option, checking the model does not abandon.
 
 The "go and acquire it" half is **out of scope** — see §8.
 
+### 4.4 as built — measured, and a rule was needed
+
+Measured 2026-09-13, `qwen3:14b` at `100.96.8.28`, `npm run agent:probe -- 4
+5` (4 replicates x 5 attempts, each replicate a fresh process). Full working
+in `.superpowers/sdd/2026-09-10-phase-4-track-b/task-5-report.md`.
+
+**Scenario added:** `missing_tool but another route remains` — bot holds a
+usable pickaxe, `find_blocks` reported two ore blocks, `mine_block_at` on one
+(deepslate, needs a better pickaxe) failed with `missing_tool`, and the other
+(plain coal ore) has not been tried. Hoped: `mine_block_at`. Paired with the
+pre-existing `after missing_tool, inventory empty` control, where `give_up`
+is and remains correct — together they test discrimination, not a reversal.
+
+**Before any rule, against the shipped Task 4 `DECISION` block:** the new
+scenario answered `give_up` 4/4, stable — off target. This is exactly what
+Task 4's third bullet ("an action that FAILED with missing_tool ... so
+give_up") instructs unconditionally, so the model followed the instruction
+rather than discriminating. All 9 pre-existing scenarios matched Task 4's
+final table exactly; nothing else was disturbed by adding the scenario alone.
+
+**Fix, on the first candidate.** Per §4.1's lesson (a checkable comparison,
+not a claim to weigh) and per the constraint that this is an in-place rewrite
+of the same slot at the same position with the same bullet count (§12's
+fragility measurements only clear an edit shaped that way), the third
+`DECISION` bullet in `prompt.ts` changed from:
+
+```
+- an action that FAILED with missing_tool — walking somewhere else will not conjure a
+  tool, so give_up.
+```
+
+to:
+
+```
+- an action that FAILED with missing_tool — check the most recently reported blocks
+  (from find_blocks or explore_for) for one you have not yet tried mining: if one
+  remains, mine_block_at it. Only give_up once every reported block has already been
+  tried.
+```
+
+Re-probed, all 10 scenarios: **10/10 stable and on target, 0 stable but
+wrong, 0 UNSTABLE, 200/200 decoded, median latency 285ms.** The new scenario
+reached `mine_block_at` 4/4. The `after missing_tool, inventory empty`
+control still answered `give_up` 4/4 — the discrimination is real, not a
+blanket reversal, since only the scenario with an untried block left in the
+last report changed answer. The other eight scenarios, including the two
+most sensitive to this exact bullet's wording and position (`position dead,
+ground remains`, `mine_block_at already returned not_found`), sit exactly
+where Task 4's final table left them. No second or third candidate was
+needed.
+
 ### 4.5 Every fix ships with a paired control
 
 A rule that always answers `explore_for` passes §4.1's scenario while being
