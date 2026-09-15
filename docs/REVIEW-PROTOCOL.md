@@ -12,9 +12,9 @@ Read this whole document once, then read the section for your role. **[§4 Autho
 
 Three reasons, in order of weight:
 
-1. **Token budgets are unequal, and review is the expensive part.** Ricky is on Max 5; Dorel is on Max 10. On this repo, reviewing has routinely cost more than writing: parallel reviewer bundles, fix rounds, then a re-review. Phase 5's plan took three independent reviews before it was executable, and its Task 7 took three fix rounds after that. When the author also reviews, most of the author's budget goes on review. Moving review to Dorel's plan leaves Ricky's budget for the work only Ricky can do: deciding what Track B should be, and building it.
+1. **Token budgets are unequal, and review is the expensive part.** Ricky is on Max 5; Dorel is on Max 10. On this repo, reviewing has routinely cost more than writing: parallel reviewer bundles, fix rounds, then a re-review. Phase 5's plan took three independent reviews before it was executable, and its Task 7 took three fix rounds after that. Any review the author runs comes out of the smaller budget. Moving it to Dorel's plan leaves Ricky's budget for the work only Ricky can do: deciding what Track B should be, and building it. **How much that saves is not known.** Ricky implements mostly with `executing-plans` and only sometimes with `subagent-driven-development` (PR #25), so the saving is not simply "stop the per-task reviewers". §9 measures it rather than assuming it. Reason 2 holds either way.
 2. **A reviewer that did not write the work does not share the author's blind spots.** The author has absorbed the plan's assumptions and cannot see what was assumed. A reviewer starting from the committed files alone can.
-3. **The reviewer runs on the machine the work is ultimately tested on.** The reviewer's instance runs on **bellatrix**, where the dev server and Ollama (`qwen3:30b-a3b`) live. Ricky's instance runs on his laptop and reaches bellatrix over Tailscale. Ollama listens on every interface, so `agent:probe` works from the laptop. The backend is loopback-only (`127.0.0.1:25566`), and the integration suite drives the server console through a local `tmux` session. So `test:integration`, `smoke` and the `demo:*` scripts only run **on** bellatrix itself. A Track B change that reaches the seam can therefore be verified against the real executor during review, without Ricky having to run the server-side checks.
+3. **The reviewer runs on the machine the work is ultimately tested on.** The reviewer's instance runs on **bellatrix**, where the dev server and Ollama (`qwen3:30b-a3b`) live. Ricky's instance runs on his laptop and reaches bellatrix over Tailscale only, with no shell there (confirmed on PR #25). Ollama listens on every interface, so `agent:probe` works from the laptop. The backend is loopback-only (`127.0.0.1:25566`), and the integration suite drives the server console through a local `tmux` session. So `test:integration`, `smoke` and the `demo:*` scripts only run **on** bellatrix itself. A Track B change that reaches the seam can therefore be verified against the real executor during review, without Ricky having to run the server-side checks.
 
 What it costs, stated plainly so nobody is surprised:
 
@@ -72,7 +72,7 @@ Several skills you would normally use launch reviewer subagents by themselves. E
 | `superpowers:brainstorming` | **Yes.** Its "spec self-review" is an inline checklist, not a subagent, so keep it. Both it and `writing-plans` ship a document-reviewer *prompt* file. superpowers 6.3.0 does not dispatch either, but **if your version launches a spec or plan reviewer subagent, skip that step.** | Specs are your work. |
 | `superpowers:writing-plans` | **Yes.** Keep its inline self-review. When it offers an execution mode, it labels subagent-driven "(recommended)". **Choose inline execution** (`superpowers:executing-plans`) anyway. | |
 | `superpowers:executing-plans` | **Yes, as the default way to implement.** | Runs tasks in your own context with no per-task reviewer. |
-| `superpowers:subagent-driven-development` | **No.** | Every task gets a spec-compliance and quality reviewer, up to 5 fix rounds, and a final whole-branch review. That duplicates this protocol and is probably the largest avoidable cost on your plan. |
+| `superpowers:subagent-driven-development` | **No.** | Every task gets a spec-compliance and quality reviewer, up to 5 fix rounds, and a final whole-branch review. That duplicates this protocol. |
 | `superpowers:test-driven-development`, `superpowers:systematic-debugging`, `superpowers:verification-before-completion` | **Yes.** | Cheap, and they stop red work reaching the reviewer at all. |
 | `superpowers:receiving-code-review` | **Yes, when writing a response.** | It is about checking feedback before agreeing with it, which is exactly what §4.5 asks. |
 | `superpowers:requesting-code-review`, `/code-review`, `/simplify`, `compound-engineering:ce-code-review`, `compound-engineering:ce-doc-review` | **No.** | Review bundles. The reviewer runs these. |
@@ -379,7 +379,7 @@ The rule:
 3. **A red integration run while another job may have overlapped proves nothing.** Re-run it alone before recording any finding from it.
 4. **Prefer not to overlap `agent:probe` with the other side's `agent:probe` or `demo:*` runs** that call the model. This rule is looser than 1–3, because a shared GPU costs time, not correctness, as far as anyone knows.
 
-If this rule proves too loose in practice, the next step is a lock file on bellatrix, not more prose. Ricky should say in the adoption PR if he wants that from the start.
+Ricky agreed on PR #25 that the manual `list` check is enough to start with. If it proves too loose in practice, the next step is a lock file on bellatrix, not more prose. Since Ricky has no shell on bellatrix, in practice this rule binds the reviewer's instance and anything Dorel runs by hand, plus rule 4 for Ricky's probe runs.
 
 ---
 
@@ -438,7 +438,7 @@ For both instances. If one of these conflicts with a skill's default behaviour, 
 
 ## 9. Judging whether this works
 
-The protocol is itself an experiment. After the **first three cycles**, Dorel's instance writes a short retrospective at `docs/reviews/RETROSPECTIVE-<date>.md`, built from the budget lines and PR timestamps and nothing else:
+The protocol is itself an experiment. **Phase 4b was nearly finished when it was agreed**, so it lands the old way. The first cycle is the next Track B unit to start fresh (Ricky, PR #25). After the **first three cycles**, Dorel's instance writes a short retrospective at `docs/reviews/RETROSPECTIVE-<date>.md`, built from the budget lines and PR timestamps and nothing else:
 
 - rounds per stage,
 - blocking findings by origin,
