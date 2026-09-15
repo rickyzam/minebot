@@ -10,7 +10,7 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 - [Phase 1 plan](docs/superpowers/plans/2026-09-07-phase-1-track-a.md) — its "Verified environment facts" block is measurements, not assumptions.
 - [Perception: line of sight](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — **Implemented 2026-09-08.** `findBlocks` used to see through solid rock; it no longer does. Read §5.2 before touching perception — the filter belongs in `useExtraInfo`, not in `matching` and not in the returned array, and §5.2 says why. §5.5 records what implementation turned up. §7.1 stays open for Ricky to confirm the cost wording only.
 - [Phase 5 design](docs/superpowers/specs/2026-09-09-phase-5-full-toolbox-design.md) and [plan](docs/superpowers/plans/2026-09-09-phase-5-track-a.md) — the reflex arbiter, `followPlayer`, `placeBlock`, schematics, `attack`/`flee`. **Task 0's contract decisions were agreed with Track B on 2026-09-11** and are recorded in spec §7, including two that differ from the original proposal: `followPlayer` has **no default timeout**, and `flee` returns `Result<{ fled: boolean }>`. The plan is v2 — three reviews found v1 unexecutable, and why is at the top of it. **Track A landed on 2026-09-12, except `flee`** — see "Scope boundaries".
-- [Review protocol](docs/REVIEW-PROTOCOL.md) — **PROPOSED, not yet binding.** How Track B's author instance (Ricky's) and a separate reviewer instance (Dorel's) hand work across through files on the PR branch. See "Cross-instance review" below for which half applies to you.
+- [Review protocol](docs/REVIEW-PROTOCOL.md) — **ADOPTED 2026-09-15 (PR #25).** How Track B's author instance (Ricky's) and a separate reviewer instance (Dorel's) hand work across through files on the PR branch. See "Cross-instance review" below for which half applies to you.
 - [Memory and recall](docs/notes/Memory%20and%20Recall.md) — roadmap. Its two invariants ("memory is written only from perception output", "memory produces search hints, never action targets") constrain work being done now, not just later.
 
 ## Commands
@@ -189,7 +189,7 @@ When you add a guard, prove it can fire. A safety check nobody has seen trigger 
 
 ## Cross-instance review
 
-**Status: PROPOSED.** Act on this section only once the first line of [docs/REVIEW-PROTOCOL.md](docs/REVIEW-PROTOCOL.md) reads **ADOPTED**. Until then, work as before.
+**Status: ADOPTED 2026-09-15 (PR #25)**, for Track B work started after Phase 4b, which lands the old way.
 
 Track B is authored in one Claude Code instance and reviewed in another, because the two humans' token budgets differ and review is the expensive part. Work away from the author's plan and a reviewer that did not write the work sees what the author assumed. The protocol is the authority; this is the summary that tells you which half is yours.
 

@@ -196,7 +196,7 @@ cave-following the next capability rather than a guess.
 - [Phase 2 design](docs/superpowers/specs/2026-09-07-phase-2-pathfinding-and-mining-design.md) and [plan](docs/superpowers/plans/2026-09-07-phase-2-track-a.md) — pathfinding and mining, with the measurements that shaped them
 - [Perception: line of sight](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — why `findBlocks` must not see through rock, and the contract change it needs
 - [Phase 5 design](docs/superpowers/specs/2026-09-09-phase-5-full-toolbox-design.md) and [plan](docs/superpowers/plans/2026-09-09-phase-5-track-a.md) — the reflex arbiter, `followPlayer`, `placeBlock`, schematics, and combat
-- [Review protocol](docs/REVIEW-PROTOCOL.md) — **proposed**: how Track B work is reviewed by a separate Claude Code instance, through findings files on the PR branch
+- [Review protocol](docs/REVIEW-PROTOCOL.md) — how Track B work is reviewed by a separate Claude Code instance, through findings files on the PR branch
 - [Memory and recall](docs/notes/Memory%20and%20Recall.md) — roadmap design for short-term spatial memory and durable landmarks
 - [Design notes](docs/notes/) — original architecture reasoning, phase plan, feasibility
 

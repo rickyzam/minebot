@@ -22,7 +22,7 @@ If it does, both tracks build against those, so say what changed and confirm it 
 
 ## Review
 
-<!-- Track B (Ricky's instance) PRs only, once docs/REVIEW-PROTOCOL.md is ADOPTED.
+<!-- Track B (Ricky's instance) PRs only — see docs/REVIEW-PROTOCOL.md.
      Delete this section for Track A and trivial PRs. -->
 
 - Cycle folder: `docs/reviews/<YYYY-MM-DD>-<slug>/`

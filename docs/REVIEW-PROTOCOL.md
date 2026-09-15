@@ -1,6 +1,6 @@
 # Cross-instance review protocol
 
-> **Status: PROPOSED.** Not binding on either side until Ricky and Dorel have both agreed on the PR that introduces it. Until then Track B works exactly as it did before. When it is adopted, this line changes to **ADOPTED <date>, PR #<n>**, and that is the only signal either Claude instance should act on.
+> **Status: ADOPTED 2026-09-15, PR #25.** Agreed by Ricky and Dorel, and binding on both instances for all Track B work started after Phase 4b (§9). Merging PR #25 was the act of adoption: if you are reading this on a branch that does not contain that merge, it is not yet in force. A change to this protocol follows the same route — a PR both humans agree to.
 
 Track B's author works in one Claude Code instance, and Track B's reviewer works in a different instance on a different person's plan. They hand work across through **files committed to the PR branch**, with a short PR comment each time as the notification.
 
