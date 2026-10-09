@@ -25,7 +25,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { MineflayerExecutor } from '@minebot/executor'
+import {MineflayerExecutor, requireBackend } from '@minebot/executor'
 import { OllamaClient, SchemaDecider, renderStep } from '@minebot/agent'
 import { runBotGoal } from './session.js'
 
@@ -55,6 +55,7 @@ const mc = (command: string): void => {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 async function main(): Promise<number> {
+  await requireBackend()
   // Shelled out rather than reimplemented: `bench:world setup` places the ore
   // AND proves each one landed at surface level, from its own connection. A
   // demo that placed its own ore without that check could fail for a fixture

@@ -202,6 +202,29 @@ export interface BotExecutor {
   // when called while not connected. See the `disconnected` FailureReason
   // doc comment above.
   moveTo(target: Vec3, opts?: ActionOptions): Promise<Result>
+  /**
+   * Follow a player, re-targeting as they move.
+   *
+   * Follows **until aborted**, by `opts.signal` or `stop()`. `timeoutMs` is
+   * honoured when passed, and elapsing resolves **`ok`** — the bot followed for
+   * as long as it was asked to, which is success, not `timeout`. There is **no
+   * default timeout**, and a non-finite `timeoutMs` is treated as none.
+   *
+   * **Called with neither `timeoutMs` nor a signal that something will abort,
+   * this never resolves.** That is what "follow" means, and it has a cost the
+   * caller owns: the planning loop dispatches actions with a signal only, so a
+   * follow issued there blocks the loop until something aborts it. Bounding it
+   * — by passing `timeoutMs`, or by guaranteeing an abort — is the caller's
+   * job, not the executor's. Agreed 2026-09-11 (Phase 5 spec §7).
+   *
+   * Fails `not_found` when no player of that name is in sight — at call time, or
+   * because the target left or moved out of sight mid-follow. Agreed 2026-09-14
+   * (Phase 5 spec §7, Decision 4): the real executor produced this from the
+   * start and `MockExecutor` did not, so mock and real disagreed on a reason the
+   * planner sees. The mock now derives it from its own entities — no seeded
+   * entity with `kind: 'player'` and that name — which means **a mock world must
+   * seed a player entity for `followPlayer` to succeed.**
+   */
   followPlayer(playerName: string, opts?: ActionOptions): Promise<Result>
   /**
    * Mine a block and try to collect its drop.
@@ -225,7 +248,52 @@ export interface BotExecutor {
     maxDistance: number,
     opts?: ActionOptions,
   ): Promise<Result<{ position: Vec3; collected: boolean }>>
+  /**
+   * Place one `blockName` from the inventory at `position`, moving into reach
+   * first. Consumes that block on success.
+   *
+   * Fails:
+   * - `not_found` — there is no `blockName` in the inventory. Deliberately not
+   *   `missing_tool`: having no material to place and having no tool to
+   *   harvest with are different facts, and call for different recoveries.
+   * - `invalid_target` — `position` is already occupied, or has no adjacent
+   *   solid block to place against, **or `blockName` is not a placeable block
+   *   at all** (a `stick`, say). Freestanding mid-air placement is not
+   *   supported; build bottom-up.
+   * - `unreachable` — the bot cannot get within reach of `position`.
+   *
+   * **"Occupied" excludes replaceable blocks.** Water, grass, ferns, vines,
+   * snow layers and the like do not occupy a cell — Minecraft replaces them —
+   * so placing into one succeeds. **Lava and fire are the deliberate
+   * exceptions:** vanilla's `#minecraft:replaceable` tag includes both, and both
+   * are treated as occupied here, because a bot replacing lava unprompted loses
+   * the block, the item, or itself. Agreed 2026-09-14 (Phase 5 spec §7,
+   * Decision 4).
+   *
+   * Note the ordering, which both implementations share: the **inventory** is
+   * checked before placeability, so `placeBlock('stick', …)` with no stick held
+   * is `not_found`, and `invalid_target` only once one is.
+   *
+   * Agreed 2026-09-11 (Phase 5 spec §7).
+   */
   placeBlock(blockName: string, position: Vec3, opts?: ActionOptions): Promise<Result>
+  /**
+   * Swing once at an entity, then resolve `ok`. One swing, not a fight to the
+   * death: `ok` says the swing happened, not that the entity died. Call again
+   * to keep attacking.
+   *
+   * Fails `not_found` when no entity with `entityId` exists any more — it
+   * died, despawned, or left the loaded world since the caller saw it.
+   *
+   * Fails `unreachable` when the bot cannot get within reach of it. Agreed
+   * 2026-09-14 (Phase 5 spec §7, Decision 4), promoted from executor-only
+   * behaviour. Note the asymmetry this leaves deliberately in place:
+   * `MockExecutor` does **not** derive it — the mock has no geometry, and
+   * inventing a seeded-distance concept to fake one was rejected — so against
+   * the mock this reason is reachable only through failure injection.
+   *
+   * Agreed 2026-09-11 (Phase 5 spec §7).
+   */
   attack(entityId: number, opts?: ActionOptions): Promise<Result>
   /**
    * Go and look for blocks that are not currently visible.
@@ -247,7 +315,32 @@ export interface BotExecutor {
     maxDistance: number,
     opts?: ExploreOptions,
   ): Promise<Result<ExplorationReport>>
-  flee(opts?: ActionOptions): Promise<Result>
+  /**
+   * Move away from the nearest hostile.
+   *
+   * Resolves **`ok` either way**: `fled: true` when there was a hostile and the
+   * bot moved away from it, `fled: false` when there was none. Nothing to flee
+   * from is the safest outcome, not a failure — and it is a routine race, since
+   * a hostile can die or despawn between whatever prompted the flee and the
+   * call. The same shape as `mineBlock`'s `collected`: a fact about how it went
+   * that must not be lost by reporting a failure.
+   *
+   * **Agreed 2026-09-14 (Phase 5 spec §7, Decision 4): it aims for 100 blocks
+   * from the nearest hostile, bounded by 10 seconds.** The 100 is a TARGET, not
+   * a requirement — the two cannot both be satisfied, because a bot's top speed
+   * is 5.60 blocks/sec (measured) and 100 blocks therefore needs ≥17.9s, so 10
+   * seconds buys ~56 blocks at best. The bound wins and the run is truncated;
+   * `fled: true` still means what it says, that the gap grew.
+   *
+   * Fails:
+   * - `unreachable` — there was a hostile and the bot could not increase the
+   *   gap at all: nowhere to run that is further away, or nowhere it can path
+   *   to. Distinct from `fled: false`, which means there was nothing to flee.
+   * - `timeout` — the 10 seconds elapsed with the gap no larger than it
+   *   started. Running and gaining ground resolves `ok` even when the timer is
+   *   what ended it, which is the common case given the numbers above.
+   */
+  flee(opts?: ActionOptions): Promise<Result<{ fled: boolean }>>
 
   chat(message: string): void
   /** Halt movement immediately. Always safe to call, including when disconnected. */

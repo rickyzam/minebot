@@ -9,7 +9,7 @@
  * badly rather than the wiring being broken.
  */
 import { execFileSync } from 'node:child_process'
-import { MineflayerExecutor } from '@minebot/executor'
+import {MineflayerExecutor, requireBackend } from '@minebot/executor'
 import { OllamaClient, SchemaDecider, renderStep } from '@minebot/agent'
 import { runBotGoal } from './session.js'
 
@@ -38,6 +38,7 @@ const mc = (command: string): void => {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 async function main(): Promise<number> {
+  await requireBackend()
   // The arena must exist before the goal starts, and building it needs a bot
   // in the world to confirm it took. connect() is reentrant, so runBotGoal
   // connecting again is a no-op rather than a duplicate login.

@@ -82,7 +82,58 @@ export interface MockOptions {
    * to test the retry policy the contract's closed reason set exists for.
    */
   failures?: Partial<Record<MockActionName, InjectedFailure>>
+  /**
+   * Which names count as placeable blocks, for `placeBlock`. Defaults to
+   * {@link DEFAULT_PLACEABLE_BLOCKS}; anything outside the set returns
+   * `invalid_target`, matching the real executor's registry check.
+   *
+   * Agreed 2026-09-14 (Phase 5 spec §7, Decision 4). Before it, the mock had no
+   * notion of placeability, so `placeBlock('stick', …)` resolved **`ok`**, spent
+   * the stick and pushed a stick *block* into the mock world — after which
+   * `findBlocks({ names: ['stick'] })` reported a stick standing in it. The real
+   * executor returns `invalid_target` and does not move. The alternative
+   * considered was an opt-in list of NON-placeable names defaulting to empty;
+   * that was rejected because it would have left the divergence on by default.
+   *
+   * Pass your own set to place something the default list does not know about.
+   */
+  placeableBlocks?: readonly string[]
 }
+
+/**
+ * The block names {@link MockExecutor} treats as placeable by default.
+ *
+ * Deliberately a short, ordinary list rather than an attempt at Minecraft's
+ * whole registry: the mock has no registry to consult, and the point of the set
+ * is to make "this is not a block" reachable at all. Covers what the contract
+ * suite and the planning-loop tests actually place, plus the common building
+ * blocks. Pass `placeableBlocks` to extend it.
+ */
+export const DEFAULT_PLACEABLE_BLOCKS: readonly string[] = [
+  'dirt',
+  'coarse_dirt',
+  'grass_block',
+  'stone',
+  'cobblestone',
+  'stone_bricks',
+  'sand',
+  'gravel',
+  'oak_planks',
+  'oak_log',
+  'spruce_planks',
+  'glass',
+  'torch',
+  'crafting_table',
+  'furnace',
+  'chest',
+  'ladder',
+  'glowstone',
+  'obsidian',
+  'coal_ore',
+  'iron_ore',
+  'iron_block',
+  'emerald_block',
+]
 
 export interface RecordedCall {
   name: string
@@ -120,6 +171,7 @@ export class MockExecutor implements BotExecutor {
    */
   private inFlightStop: (() => void) | null = null
   private readonly failures = new Map<MockActionName, InjectedFailure>()
+  private readonly placeable: ReadonlySet<string>
   private pendingConnect: Promise<Result> | null = null
   private disconnectRequested = false
 
@@ -132,6 +184,7 @@ export class MockExecutor implements BotExecutor {
     this.blocks = opts.blocks ?? []
     this.delayMs = opts.actionDelayMs ?? 0
     this.exploreDelayMs = opts.exploreDelayMs ?? 0
+    this.placeable = new Set(opts.placeableBlocks ?? DEFAULT_PLACEABLE_BLOCKS)
     for (const [action, failure] of Object.entries(opts.failures ?? {})) {
       if (failure) this.failures.set(action as MockActionName, failure)
     }
@@ -249,9 +302,31 @@ export class MockExecutor implements BotExecutor {
     return ok(undefined)
   }
 
+  /**
+   * Follows until aborted. `timeoutMs` is honoured when passed, with no
+   * default, and elapsing resolves `ok` — it followed as asked. Agreed
+   * 2026-09-11, Phase 5 spec §7. The mock has no players, so any name follows.
+   */
   async followPlayer(playerName: string, opts?: ActionOptions): Promise<Result> {
     this.record('followPlayer', playerName)
-    return this.simulate('followPlayer', opts)
+    const r = await this.simulate('followPlayer', opts)
+    if (!r.ok) return r
+    // Agreed 2026-09-14 (Phase 5 spec §7, Decision 4). Derived from the seeded
+    // entities rather than from a new seeding concept: `EntityInfo` already
+    // carries `name` and `kind`, so "in sight" is "there is a player entity of
+    // that name". The real executor has always produced this and the mock did
+    // not, which left mock and real disagreeing on a reason the planner sees.
+    //
+    // The accepted consequence: a mock world must seed a player entity for
+    // `followPlayer` to succeed at all.
+    if (!this.entities.some((e) => e.kind === 'player' && e.name === playerName)) {
+      return fail('not_found', `no player named "${playerName}" is in sight`)
+    }
+    // Non-finite means "never elapses", and must not reach wait(): see
+    // untilAborted() for what setTimeout does with Infinity.
+    const timeoutMs = opts?.timeoutMs
+    if (timeoutMs !== undefined && Number.isFinite(timeoutMs)) return this.wait(timeoutMs, opts)
+    return this.untilAborted(opts)
   }
 
   async mineBlock(
@@ -295,9 +370,65 @@ export class MockExecutor implements BotExecutor {
     return ok({ position: match.position, collected: true })
   }
 
+  /**
+   * Inventory-aware, agreed 2026-09-11 (Phase 5 spec §7). The mock has no
+   * geometry, so of the real failures it can produce `not_found` and the
+   * occupied half of `invalid_target`; "no adjacent face" and `unreachable`
+   * are reachable through failure injection.
+   *
+   * **One divergence this enumeration used to omit, which is worse than saying
+   * nothing:** the real executor rejects a NON-BLOCK item up front —
+   * `placeBlock('stick', …)` returns `invalid_target`, because
+   * `bot.registry.blocksByName` has no entry for it (executor ruling R24). The
+   * mock has no notion of placeability, so the same call resolves **`ok`**,
+   * spends the stick, and pushes a stick *block* into `this.blocks` — after
+   * which `findBlocks({ names: ['stick'] })` reports a stick standing in the
+   * world. Anything built against the mock alone can therefore depend on a
+   * success the real executor never gives.
+   *
+   * Deliberately NOT fixed here: R24 is executor-only and this is shared
+   * surface, so making the mock reject non-blocks is a behaviour change to the
+   * integration boundary and needs agreeing first (it is on the list for
+   * Ricky, with R5's `followPlayer` → `not_found` and R9's `attack` →
+   * `unreachable`). Documented so the gap is visible in the meantime.
+   */
   async placeBlock(blockName: string, position: Vec3, opts?: ActionOptions): Promise<Result> {
     this.record('placeBlock', blockName, position)
-    return this.simulate('placeBlock', opts)
+    const r = await this.simulate('placeBlock', opts)
+    if (!r.ok) return r
+
+    // Inventory before target, the order the real executor checks in.
+    // not_found, NOT missing_tool: "no material to place" and "no tool to
+    // harvest" are different facts, and the planner will need different
+    // policies for them once acquiring actions exist.
+    if (!this.inventory.some((i) => i.name === blockName)) {
+      return fail('not_found', `${blockName} is not in the inventory`)
+    }
+    // Placeability AFTER the inventory, because that is the order the real
+    // executor checks in — so `placeBlock('stick', …)` with no stick held is
+    // `not_found` in both, and `invalid_target` in both once one is held.
+    if (!this.placeable.has(blockName)) {
+      return fail('invalid_target', `"${blockName}" is not a placeable block`)
+    }
+    // Occupancy is a fact about the world, not about perception, so a block
+    // seeded invisible still occupies its position.
+    const occupant = this.blocks.find(
+      (b) => b.position.x === position.x && b.position.y === position.y && b.position.z === position.z,
+    )
+    if (occupant) {
+      return fail('invalid_target', `${describeVec(position)} is occupied by ${occupant.name}`)
+    }
+
+    this.inventory = this.inventory
+      .map((i) => (i.name === blockName ? { ...i, count: i.count - 1 } : i))
+      .filter((i) => i.count > 0)
+    const distance = Math.hypot(
+      position.x - this.position.x,
+      position.y - this.position.y,
+      position.z - this.position.z,
+    )
+    this.blocks = [...this.blocks, { name: blockName, position: { ...position }, distance }]
+    return ok(undefined)
   }
 
   async attack(entityId: number, opts?: ActionOptions): Promise<Result> {
@@ -310,9 +441,16 @@ export class MockExecutor implements BotExecutor {
     return ok(undefined)
   }
 
-  async flee(opts?: ActionOptions): Promise<Result> {
+  /**
+   * `ok` either way, agreed 2026-09-11 (Phase 5 spec §7): `fled: false` when
+   * there is no hostile. Nothing to flee from is the safest outcome, not a
+   * failure.
+   */
+  async flee(opts?: ActionOptions): Promise<Result<{ fled: boolean }>> {
     this.record('flee')
-    return this.simulate('flee', opts)
+    const r = await this.simulate('flee', opts)
+    if (!r.ok) return r
+    return ok({ fled: this.entities.some((e) => e.kind === 'hostile') })
   }
 
   /**
@@ -393,6 +531,16 @@ export class MockExecutor implements BotExecutor {
     else this.failures.delete(action)
   }
 
+  /**
+   * Change the health a snapshot reports, so a test can drive the state a
+   * reflex layer escalates on (e.g. low health while a hostile is near).
+   * Emits nothing: pair it with `emit('damaged' | 'health', …)` when the test
+   * needs the push stream too. Agreed 2026-09-11, Phase 5 spec §7.
+   */
+  setHealth(health: number): void {
+    this.health = health
+  }
+
   private record(name: string, ...args: unknown[]): void {
     this.calls.push({ name, args })
   }
@@ -443,6 +591,34 @@ export class MockExecutor implements BotExecutor {
       const stopThisAction = (): void => finish(fail('interrupted', 'stopped via stop()'))
       this.inFlightStop = stopThisAction
       const timer = setTimeout(() => finish(ok(undefined)), ms)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+
+  /**
+   * Settles only on abort or `stop()` — never on its own.
+   *
+   * Deliberately NOT `this.wait(Infinity, opts)`. `wait` arms a setTimeout,
+   * and setTimeout(fn, Infinity) fires after ~2ms in Node (measured
+   * 2026-09-11): the delay overflows and clamps. A mock built that way would
+   * report a follow that never ends as one that finished instantly.
+   */
+  private untilAborted(opts?: ActionOptions): Promise<Result> {
+    // Same re-check as wait(): the caller awaited simulate() first.
+    if (opts?.signal?.aborted) return Promise.resolve(fail('interrupted', 'aborted mid-action'))
+    return new Promise<Result>((resolve) => {
+      let settled = false
+      const signal = opts?.signal
+      const finish = (result: Result): void => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        if (this.inFlightStop === stopThisAction) this.inFlightStop = null
+        resolve(result)
+      }
+      const onAbort = (): void => finish(fail('interrupted', 'aborted mid-action'))
+      const stopThisAction = (): void => finish(fail('interrupted', 'stopped via stop()'))
+      this.inFlightStop = stopThisAction
       signal?.addEventListener('abort', onAbort, { once: true })
     })
   }

@@ -32,10 +32,28 @@ const visibilityBlocks = [
   { name: 'coal_ore', position: { x: 6, y: 64, z: 0 }, distance: 6 },
 ]
 
+/**
+ * A player for `followPlayer` to find.
+ *
+ * Required as of 2026-09-14 (Phase 5 spec §7, Decision 4): the mock now derives
+ * `followPlayer`'s `not_found` from its own entities, so a world with no player
+ * entity makes every follow fail. That is the agreed consequence of closing a
+ * divergence where the real executor produced `not_found` and the mock never
+ * could.
+ */
+const FOLLOWED_PLAYER = {
+  id: 501,
+  name: 'SomePlayer',
+  kind: 'player' as const,
+  position: { x: 4, y: 64, z: 0 },
+  distance: 4,
+}
+
 runContractSuite('MockExecutor', async () => {
   const executor = new MockExecutor({
     actionDelayMs: 20,
     blocks: [...seededBlocks, ...visibilityBlocks],
+    entities: [FOLLOWED_PLAYER],
   })
   await executor.connect()
   return {
@@ -48,6 +66,14 @@ runContractSuite('MockExecutor', async () => {
         control: { name: 'coal_ore', position: visibilityBlocks[1]!.position },
         maxDistance: 16,
       }),
+    // Supplying these is what keeps the Phase 5 guarantees from skipping here.
+    // `prepareFollowFixture` now names a SEEDED player: as of Decision 4 the mock
+    // derives `not_found` from its entities, so an unseeded name would make every
+    // follow guarantee fail rather than pass.
+    prepareFollowFixture: () => Promise.resolve({ playerName: FOLLOWED_PLAYER.name }),
+    preparePlaceFixture: () =>
+      Promise.resolve({ blockName: 'dirt', position: { x: 1, y: 64, z: 1 } }),
+    prepareFleeFixture: () => Promise.resolve({}),
   }
 })
 
@@ -207,6 +233,181 @@ describe('MockExecutor failure injection', () => {
     const r = await m.moveTo({ x: 1, y: 64, z: 1 })
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toBe('disconnected')
+  })
+})
+
+describe('MockExecutor Phase 5 toolbox', () => {
+  const zombie = { id: 7, name: 'zombie', kind: 'hostile' as const, position: { x: 3, y: 64, z: 0 }, distance: 3 }
+  const cow = { id: 8, name: 'cow', kind: 'passive' as const, position: { x: 2, y: 64, z: 0 }, distance: 2 }
+  const settledWithin = <T>(p: Promise<T>, ms: number): Promise<T | 'pending'> =>
+    Promise.race([p, new Promise<'pending'>((r) => setTimeout(() => r('pending'), ms))])
+
+  it('placeBlock consumes one block and puts it in the world', async () => {
+    const m = new MockExecutor({ inventory: [{ name: 'dirt', count: 2, slot: 0 }] })
+    await m.connect()
+    const r = await m.placeBlock('dirt', { x: 1, y: 64, z: 0 })
+    expect(r.ok).toBe(true)
+    expect(m.getState().self.inventory).toEqual([{ name: 'dirt', count: 1, slot: 0 }])
+    const placed = m.findBlocks({ names: ['dirt'], maxDistance: 16, limit: 5 })
+    expect(placed.map((b) => b.position)).toEqual([{ x: 1, y: 64, z: 0 }])
+  })
+
+  it('placeBlock removes the stack when the last block is placed', async () => {
+    const m = new MockExecutor({ inventory: [{ name: 'dirt', count: 1, slot: 0 }] })
+    await m.connect()
+    expect((await m.placeBlock('dirt', { x: 1, y: 64, z: 0 })).ok).toBe(true)
+    expect(m.getState().self.inventory).toEqual([])
+    const again = await m.placeBlock('dirt', { x: 2, y: 64, z: 0 })
+    expect(again.ok).toBe(false)
+    if (!again.ok) expect(again.reason).toBe('not_found')
+  })
+
+  it('placeBlock fails invalid_target on an occupied position, spending nothing', async () => {
+    // Occupied by a block the bot cannot even see: occupancy is a fact about
+    // the world, not about perception.
+    const m = new MockExecutor({
+      inventory: [{ name: 'dirt', count: 1, slot: 0 }],
+      blocks: [{ name: 'stone', position: { x: 1, y: 60, z: 0 }, distance: 4, visible: false }],
+    })
+    await m.connect()
+    const r = await m.placeBlock('dirt', { x: 1, y: 60, z: 0 })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('invalid_target')
+    expect(m.getState().self.inventory).toEqual([{ name: 'dirt', count: 1, slot: 0 }])
+  })
+
+  it('placeBlock checks the inventory before the target', async () => {
+    // The real executor rejects an absent block before looking at the world
+    // (plan Task 4). Occupied AND not held must agree on which reason wins.
+    const m = new MockExecutor({
+      blocks: [{ name: 'stone', position: { x: 1, y: 64, z: 0 }, distance: 1 }],
+    })
+    await m.connect()
+    const r = await m.placeBlock('dirt', { x: 1, y: 64, z: 0 })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('not_found')
+  })
+
+  it('flee reports fled: true when a hostile is present', async () => {
+    const m = new MockExecutor({ entities: [zombie] })
+    await m.connect()
+    expect(await m.flee()).toEqual({ ok: true, value: { fled: true } })
+  })
+
+  it('flee does not flee from a passive entity', async () => {
+    const m = new MockExecutor({ entities: [cow] })
+    await m.connect()
+    expect(await m.flee()).toEqual({ ok: true, value: { fled: false } })
+  })
+
+  it('followPlayer treats timeoutMs: Infinity as no timeout', async () => {
+    // setTimeout(fn, Infinity) fires after ~2ms in Node. A mock that armed it
+    // would report a follow that never ends as one that finished at once.
+    // The player must be seeded: as of Decision 4 an unknown name fails
+    // `not_found` immediately, which would make this test pass for the wrong reason.
+    const m = new MockExecutor({ entities: [FOLLOWED_PLAYER] })
+    await m.connect()
+    const c = new AbortController()
+    const pending = m.followPlayer(FOLLOWED_PLAYER.name, { timeoutMs: Infinity, signal: c.signal })
+    expect(await settledWithin(pending, 100)).toBe('pending')
+    c.abort()
+    const r = await pending
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('interrupted')
+  })
+
+  it('stop() ends a follow that has no timeout', async () => {
+    const m = new MockExecutor({ entities: [FOLLOWED_PLAYER] })
+    await m.connect()
+    const pending = m.followPlayer(FOLLOWED_PLAYER.name)
+    expect(await settledWithin(pending, 50)).toBe('pending')
+    m.stop()
+    const r = await settledWithin(pending, 100)
+    expect(r).toEqual({ ok: false, reason: 'interrupted', detail: 'stopped via stop()' })
+  })
+
+  // ---- Decision 4 (2026-09-14): the two divergences the review found ----
+
+  it('followPlayer fails not_found for a player that is not seeded', async () => {
+    const m = new MockExecutor({ entities: [FOLLOWED_PLAYER] })
+    await m.connect()
+    const r = await m.followPlayer('NobodyHere')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('not_found')
+  })
+
+  it('followPlayer ignores a non-player entity of the same name', async () => {
+    // `kind` matters, not just the name: an item stack or a mob called
+    // "SomePlayer" is not a player to follow.
+    const m = new MockExecutor({
+      entities: [{ ...FOLLOWED_PLAYER, kind: 'passive' as const }],
+    })
+    await m.connect()
+    const r = await m.followPlayer(FOLLOWED_PLAYER.name, { timeoutMs: 50 })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('not_found')
+  })
+
+  it('placeBlock fails invalid_target for a non-block item, spending nothing', async () => {
+    // Before this, the mock resolved `ok`, spent the stick, and pushed a stick
+    // *block* into its world — so findBlocks reported a stick standing in it.
+    const m = new MockExecutor({ inventory: [{ name: 'stick', count: 3, slot: 0 }] })
+    await m.connect()
+    const r = await m.placeBlock('stick', { x: 1, y: 64, z: 1 })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('invalid_target')
+    // The stick is untouched, and no stick block appeared in the world.
+    expect(m.getState().self.inventory).toEqual([{ name: 'stick', count: 3, slot: 0 }])
+    expect(m.findBlocks({ names: ['stick'], maxDistance: 16, limit: 10 })).toEqual([])
+  })
+
+  it('checks the inventory before placeability, as the real executor does', async () => {
+    // Ordering is part of the agreed contract: no stick held is `not_found`,
+    // not `invalid_target`.
+    const m = new MockExecutor()
+    await m.connect()
+    const r = await m.placeBlock('stick', { x: 1, y: 64, z: 1 })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('not_found')
+  })
+
+  it('places a block that IS in the default placeable set', async () => {
+    const m = new MockExecutor({ inventory: [{ name: 'dirt', count: 1, slot: 0 }] })
+    await m.connect()
+    expect((await m.placeBlock('dirt', { x: 1, y: 64, z: 1 })).ok).toBe(true)
+    expect(m.getState().self.inventory).toEqual([])
+  })
+
+  it('honours a caller-supplied placeableBlocks set', async () => {
+    const m = new MockExecutor({
+      inventory: [
+        { name: 'sculk', count: 1, slot: 0 },
+        { name: 'dirt', count: 1, slot: 1 },
+      ],
+      placeableBlocks: ['sculk'],
+    })
+    await m.connect()
+    // In the custom set even though the default does not know it.
+    expect((await m.placeBlock('sculk', { x: 1, y: 64, z: 1 })).ok).toBe(true)
+    // And the custom set REPLACES the default rather than extending it.
+    const r = await m.placeBlock('dirt', { x: 2, y: 64, z: 1 })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('invalid_target')
+  })
+
+  it('followPlayer still honours injected failures', async () => {
+    const m = new MockExecutor({ failures: { followPlayer: { reason: 'not_found' } } })
+    await m.connect()
+    const r = await m.followPlayer('Nobody')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('not_found')
+  })
+
+  it('setHealth drives the health a snapshot reports', async () => {
+    const m = new MockExecutor()
+    await m.connect()
+    m.setHealth(3)
+    expect(m.getState().self.health).toBe(3)
   })
 })
 

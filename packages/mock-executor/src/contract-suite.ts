@@ -23,6 +23,35 @@ export interface VisibilityFixture {
   release?: () => Promise<void>
 }
 
+/**
+ * The Phase 5 toolbox fixtures (agreed 2026-09-11, Phase 5 spec §7).
+ *
+ * Each exists for the same two reasons as {@link VisibilityFixture}: the real
+ * executor has to arrange its world before the guarantee can be checked, and
+ * an executor that has not implemented the action yet must report SKIPPED for
+ * it rather than green. Supplying one is the declaration that the action is
+ * implemented. An implementation that lands without supplying its fixture
+ * leaves its guarantees unchecked — say so in review.
+ */
+export interface FollowFixture {
+  /** A player currently online and near enough to follow. */
+  playerName: string
+  release?: () => Promise<void>
+}
+
+export interface PlaceFixture {
+  /** A block the executor's inventory holds NONE of. The suite verifies this. */
+  blockName: string
+  /** An otherwise valid place to put it: empty, with a solid neighbour, in reach. */
+  position: Vec3
+  release?: () => Promise<void>
+}
+
+export interface FleeFixture {
+  /** Nothing to arrange beyond "no hostile nearby", which the suite verifies. */
+  release?: () => Promise<void>
+}
+
 export interface ContractSuiteContext {
   executor: BotExecutor
   cleanup?: () => Promise<void>
@@ -53,6 +82,12 @@ export interface ContractSuiteContext {
    * fixture this suite has been bitten by before.
    */
   prepareVisibilityFixture?: () => Promise<VisibilityFixture>
+  /** See {@link FollowFixture}. Omit until `followPlayer` is implemented. */
+  prepareFollowFixture?: () => Promise<FollowFixture>
+  /** See {@link PlaceFixture}. Omit until `placeBlock` is implemented. */
+  preparePlaceFixture?: () => Promise<PlaceFixture>
+  /** See {@link FleeFixture}. Omit until `flee` is implemented. */
+  prepareFleeFixture?: () => Promise<FleeFixture>
 }
 
 /**
@@ -544,6 +579,95 @@ export function runContractSuite(
           if (second.ok) expect(second.value.exhausted).toBe(true)
         }
       })
+    })
+
+    // Phase 5 spec §7, agreed with Track B 2026-09-11. Each guarantee runs only
+    // when the factory supplies its fixture, and SKIPS at runtime otherwise —
+    // the real executor's stubs stay unchecked, visibly, until each lands.
+    describe('the Phase 5 toolbox', () => {
+      /**
+       * Runs `body` against a prepared fixture, skipping loudly when the factory
+       * declared none, and always releasing what it prepared. The same runtime
+       * skip as `requireFixture` above, for the same reason: an early `return`
+       * would report an unchecked executor as a passing one.
+       */
+      const withFixture = async <F extends { release?: () => Promise<void> }>(
+        t: { skip: (note?: string) => never },
+        prepare: (() => Promise<F>) | undefined,
+        label: string,
+        body: (fixture: F) => Promise<void>,
+      ): Promise<void> => {
+        if (!prepare) t.skip(`executor declares no ${label}`)
+        const fixture = await prepare()
+        try {
+          await body(fixture)
+        } finally {
+          await fixture.release?.()
+        }
+      }
+
+      /** Resolves to `'pending'` if `p` has not settled within `ms`. */
+      const settledWithin = <T>(p: Promise<T>, ms: number): Promise<T | 'pending'> =>
+        Promise.race([p, new Promise<'pending'>((r) => setTimeout(() => r('pending'), ms))])
+
+      it('placeBlock fails not_found when the block is not in the inventory', (t) =>
+        withFixture(t, ctx.preparePlaceFixture, 'preparePlaceFixture', async (f) => {
+          // Verify the precondition rather than trusting it: a fixture that
+          // left the block in the inventory would make a real placement look
+          // like a broken guarantee, or a broken placement look like a pass.
+          const held = ctx.executor.getState().self.inventory.some((i) => i.name === f.blockName)
+          if (held) throw new Error(`preparePlaceFixture left ${f.blockName} in the inventory`)
+
+          const r = await ctx.executor.placeBlock(f.blockName, f.position)
+          expect(r.ok).toBe(false)
+          // not_found, NOT missing_tool: no material to place and no tool to
+          // harvest are different facts.
+          if (!r.ok) expect(r.reason).toBe('not_found')
+        }))
+
+      it('flee resolves ok with fled: false when there is no hostile', (t) =>
+        withFixture(t, ctx.prepareFleeFixture, 'prepareFleeFixture', async () => {
+          const hostile = ctx.executor.getState().nearbyEntities.find((e) => e.kind === 'hostile')
+          if (hostile) throw new Error(`prepareFleeFixture left a hostile nearby: ${hostile.name}`)
+
+          // Nothing to flee from is the safest outcome, not a failure.
+          const r = await ctx.executor.flee()
+          expect(r.ok).toBe(true)
+          if (r.ok) expect(r.value.fled).toBe(false)
+        }))
+
+      it('followPlayer resolves ok — not timeout — once a passed timeoutMs elapses', (t) =>
+        withFixture(t, ctx.prepareFollowFixture, 'prepareFollowFixture', async (f) => {
+          const timeoutMs = 1_000
+          const started = Date.now()
+          const r = await ctx.executor.followPlayer(f.playerName, { timeoutMs })
+          const elapsed = Date.now() - started
+          // It followed for as long as it was asked to, which is success.
+          expect(r).toEqual({ ok: true, value: undefined })
+          // And it did follow for that long. The lower bound is what catches a
+          // timer that fires early — setTimeout(fn, Infinity) fires after ~2ms
+          // in Node — reported as a follow that finished.
+          expect(elapsed).toBeGreaterThanOrEqual(timeoutMs - 50)
+          expect(elapsed).toBeLessThan(timeoutMs + 5_000)
+        }))
+
+      it('followPlayer with no timeoutMs does not return until aborted', (t) =>
+        withFixture(t, ctx.prepareFollowFixture, 'prepareFollowFixture', async (f) => {
+          const controller = new AbortController()
+          const pending = ctx.executor.followPlayer(f.playerName, { signal: controller.signal })
+          try {
+            // No default timeout: still following, with nothing to stop it.
+            expect(await settledWithin(pending, 1_500)).toBe('pending')
+          } finally {
+            controller.abort()
+          }
+          const r = await settledWithin(pending, 2_000)
+          expect(r).not.toBe('pending')
+          if (r !== 'pending') {
+            expect(r.ok).toBe(false)
+            if (!r.ok) expect(r.reason).toBe('interrupted')
+          }
+        }))
     })
   })
 }
