@@ -56,10 +56,12 @@ Three properties are worth knowing:
   interface and every test uses a scripted fake, the same way every test uses
   `MockExecutor` instead of a Minecraft server.
 - **It codes no retry policy.** Failures — with their `FailureReason` and
-  detail — are rendered into the next prompt and the model decides. The only
-  hardcoded guards are a step budget and a repetition check. Phase 4 writes the
-  real policy against the step logs this produces.
-- **Prompt changes are measured, not assumed.** `npm run agent:probe` runs seven
+  detail — are rendered into the next prompt and the model decides. Phase 4B
+  kept that bet: what the loop knows and the model cannot see (a repeated
+  action, a nearly spent step budget) is shown to it as a fact, never imposed
+  as a decision. The only hardcoded guards are a step budget and a repetition
+  check, and both now warn before they end a goal.
+- **Prompt changes are measured, not assumed.** `npm run agent:probe` runs ten
   scenarios against a real model and reports what it chose. This caught defects
   that every unit test passed straight through, and established that the
   system-rules block outweighs the action menu for guidance about *when* to
@@ -159,7 +161,7 @@ server that it went back.
 | `npm run demo:phase4` | Phase 4 deliverable: find coal it cannot see | Yes — server **and** Ollama |
 | `npm run demo:phase5` | Phase 5 deliverable: the reflex layer preempts the plan under a live mob | Yes — server **and** Ollama |
 | `npm run agent:demo` | Track B deliverable: the loop against a fake model and a mock world | No |
-| `npm run agent:probe` | Ask a real model for one action across seven scenarios, replicated across processes | No (needs Ollama) |
+| `npm run agent:probe` | Ask a real model for one action across ten scenarios, replicated across processes | No (needs Ollama) |
 | `npm run bench:world` | Qualify, place and verify the benchmark world's terrain and ore | Yes |
 | `npm run bench:explore` | Score the search: success rate and medians over N runs | Yes |
 | `npm run bench:perception` | What line-of-sight perception costs, by block and radius | Yes |
@@ -174,11 +176,13 @@ server that it went back.
 | 3 | Close the LLM loop once, end to end | **Done** |
 | 4 (Track A) | Search: `exploreFor`, a scored benchmark, and the `explore_for` action | **Done** |
 | 4.5 | [Line-of-sight perception](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — stop `findBlocks` seeing through rock | **Done** |
-| 4 (rest) | Retry and recovery policy, against the step logs the loop now produces | Next |
+| 4 (Track B) | [Failure policy, prompt first](docs/superpowers/specs/2026-09-10-phase-4-track-b-failure-policy-design.md) — the model stops abandoning goals it can still reach | **Done offline** — live validation pending |
 | 5 (Track A) | Full toolbox: the reflex arbiter, `followPlayer`, `placeBlock`, schematics, `attack` | **Done** |
 | 5 (`flee`) | Disengage on low health — 100 blocks as a target, bounded by 10s | **Done** |
-| 6 | Multi-bot scaling against one shared model | |
-| 7 | [Memory and recall](docs/notes/Memory%20and%20Recall.md) — short-term spatial memory, durable landmarks | Roadmap only |
+| 5 (Track B) | Chat, and a tool-selection prompt that grows with each Track A action | |
+| 6 | [Resource acquisition](docs/notes/resource-acquisition-requirement.md) — containers, designated areas, gathering | Requirement written |
+| 7 | Multi-bot scaling against one shared model | |
+| 8 | [Memory and recall](docs/notes/Memory%20and%20Recall.md) — short-term spatial memory, durable landmarks | Roadmap only |
 
 **What Phase 4 Track A established, measured rather than assumed.** A horizontal
 surface spiral does **not** find naturally-occurring coal in real terrain: 0 of 3
@@ -195,6 +199,7 @@ cave-following the next capability rather than a guess.
 - [Phase 1 plan](docs/superpowers/plans/2026-09-07-phase-1-track-a.md) — task breakdown plus verified environment facts
 - [Phase 2 design](docs/superpowers/specs/2026-09-07-phase-2-pathfinding-and-mining-design.md) and [plan](docs/superpowers/plans/2026-09-07-phase-2-track-a.md) — pathfinding and mining, with the measurements that shaped them
 - [Perception: line of sight](docs/superpowers/specs/2026-09-08-perception-line-of-sight-design.md) — why `findBlocks` must not see through rock, and the contract change it needs
+- [Phase 4 Track B design](docs/superpowers/specs/2026-09-10-phase-4-track-b-failure-policy-design.md) — failure policy, prompt first; §11–13 are the measurements, including every candidate that failed
 - [Phase 5 design](docs/superpowers/specs/2026-09-09-phase-5-full-toolbox-design.md) and [plan](docs/superpowers/plans/2026-09-09-phase-5-track-a.md) — the reflex arbiter, `followPlayer`, `placeBlock`, schematics, and combat
 - [Review protocol](docs/REVIEW-PROTOCOL.md) — how Track B work is reviewed by a separate Claude Code instance, through findings files on the PR branch
 - [Memory and recall](docs/notes/Memory%20and%20Recall.md) — roadmap design for short-term spatial memory and durable landmarks

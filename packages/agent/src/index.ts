@@ -16,6 +16,7 @@ export type { DecodeError, DecodeResult, DecideResult, Decider } from './decide.
 export {
   HISTORY_WINDOW,
   renderAction,
+  renderAdvice,
   renderOutcome,
   renderPrompt,
   renderSnapshot,
@@ -24,6 +25,8 @@ export {
 export type { GoalOutcome, GoalStatus, Step, StepOutcome } from './step.js'
 
 export { dispatch } from './dispatch.js'
+export { advise, signatureOf, repeatCounts, repeatWarnAt, BUDGET_WARN_AT } from './advice.js'
+export type { Advice, AdviseOptions } from './advice.js'
 export {
   runGoal,
   DEFAULT_MAX_STEPS,

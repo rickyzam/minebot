@@ -17,6 +17,7 @@ const FIND = '{"action":"find_blocks","names":["coal_ore"],"maxDistance":32,"lim
 const MINE_AT = '{"action":"mine_block_at","x":18,"y":60,"z":-34,"maxDistance":32}'
 const DONE = '{"action":"done","summary":"mined one coal ore"}'
 const WALK = '{"action":"move_to","x":1,"y":64,"z":1}'
+const CHAT = '{"action":"chat","message":"hi"}'
 
 const run = (executor: MockExecutor, llm: FakeLlmClient, over = {}) =>
   runGoal('get me some coal', { executor, decider: new SchemaDecider(llm), ...over })
@@ -202,5 +203,61 @@ describe('runGoal — failure feedback', () => {
     expect(out.status).toBe('done')
     expect(llm.requests).toHaveLength(2)
     expect(llm.lastPromptText()).toContain('FAILED (missing_tool): no pickaxe in inventory')
+  })
+})
+
+describe('the stuck guard is a nudge before it is an executioner', () => {
+  const promptsOf = (llm: FakeLlmClient): string[] =>
+    llm.requests.map((r) => r.messages.map((x) => x.content).join('\n'))
+
+  it('warns the model before ending the goal', async () => {
+    const m = await connected()
+    const llm = new FakeLlmClient([WALK], { repeatLast: true })
+    const out = await run(m, llm, { maxSteps: 20 })
+
+    expect(out.status).toBe('stuck')
+    expect(promptsOf(llm).some((p) => p.includes('You have already tried'))).toBe(true)
+  })
+
+  it('does not fire at three repeats, which used to be fatal', async () => {
+    // At the old default of 3 this run was already dead on the third WALK.
+    // At 4 the model has had a notice and two turns to act on it.
+    const m = await connected()
+    const out = await run(m, new FakeLlmClient([WALK, WALK, WALK, DONE]))
+    expect(out.status).toBe('done')
+  })
+
+  it('still stops a model that ignores the warning', async () => {
+    const m = await connected()
+    const out = await run(m, new FakeLlmClient([WALK], { repeatLast: true }), { maxSteps: 50 })
+    expect(out.status).toBe('stuck')
+    expect(out.steps.length).toBeLessThan(10)
+  })
+})
+
+describe('the budget notice', () => {
+  it('reaches the model before the budget runs out, counting down to exactly 1', async () => {
+    const m = await connected()
+    const llm = new FakeLlmClient([CHAT], { repeatLast: true })
+    // stuckThreshold: 99 so this measures the BUDGET notice and nothing else —
+    // repeated identical chats would otherwise trip the stuck guard first.
+    await run(m, llm, { maxSteps: 5, stuckThreshold: 99 })
+
+    const prompts = llm.requests.map((r) => r.messages.map((x) => x.content).join('\n'))
+    const remaining = prompts
+      .map((p) => p.match(/Steps remaining: (\d+)\./)?.[1])
+      .filter((v): v is string => v !== undefined)
+      .map(Number)
+
+    // Not a membership check: the exact descending run for maxSteps: 5 and
+    // BUDGET_WARN_AT: 3 is [3, 2, 1] — one notice per remaining step from the
+    // warning threshold down to the last turn that can still act. A
+    // stepsTaken off-by-one (counting the in-flight step as already taken)
+    // shifts every count one early, producing [3, 2, 1, 0] instead: an extra,
+    // wrong notice claiming zero steps remain while a turn is still live, and
+    // a genuine last turn that reads "1" arriving un-warned. Asserting the
+    // literal ordered list — not `.some(...includes(...))` — catches that
+    // shift; a substring-presence check would pass under either sequence.
+    expect(remaining).toEqual([3, 2, 1])
   })
 })

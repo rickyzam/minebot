@@ -18,7 +18,9 @@ import { fileURLToPath } from 'node:url'
 import type { ItemStack, Vec3, WorldSnapshot } from '@minebot/contract'
 import { ok, fail } from '@minebot/contract'
 import { ACTION_SCHEMA, type ActionName } from './actions.js'
+import { advise } from './advice.js'
 import { decode } from './decide.js'
+import { DEFAULT_MAX_STEPS, DEFAULT_STUCK_THRESHOLD } from './loop.js'
 import { OllamaClient } from './ollama.js'
 import { renderPrompt } from './prompt.js'
 import type { Step } from './step.js'
@@ -115,6 +117,60 @@ const SCENARIOS: readonly Scenario[] = [
     hoped: ['explore_for'],
   },
   {
+    // Spec §4.1. The measured defect: the model reasons "no more coal can be
+    // collected from this position" and gives up on the GOAL. The position is
+    // finished; the goal is not, and the report says so — "more ground
+    // remains" is on the screen in front of it.
+    name: 'position dead, ground remains',
+    goal: 'get me some coal',
+    inventory: [PICKAXE],
+    position: COAL_AT,
+    history: [
+      found,
+      step(
+        2,
+        { action: 'mine_block_at', ...COAL_AT, maxDistance: 32 },
+        { kind: 'result', result: fail('not_found', `no block at ${COAL_AT.x},${COAL_AT.y},${COAL_AT.z}`) },
+      ),
+      step(
+        3,
+        { action: 'explore_for', names: ['coal_ore'], maxDistance: 64 },
+        {
+          kind: 'result',
+          result: ok({ found: [], searchedTo: 32, exhausted: false }),
+        },
+      ),
+    ],
+    hoped: ['explore_for'],
+  },
+  {
+    // THE PAIRED CONTROL (spec §4.5). Identical but exhausted: true. Without
+    // this, "the rule works" and "the rule fires unconditionally" are
+    // indistinguishable — the same reason the contract suite pairs every
+    // hidden block with a visible one.
+    name: 'position dead, search exhausted',
+    goal: 'get me some coal',
+    inventory: [PICKAXE],
+    position: COAL_AT,
+    history: [
+      found,
+      step(
+        2,
+        { action: 'mine_block_at', ...COAL_AT, maxDistance: 32 },
+        { kind: 'result', result: fail('not_found', `no block at ${COAL_AT.x},${COAL_AT.y},${COAL_AT.z}`) },
+      ),
+      step(
+        3,
+        { action: 'explore_for', names: ['coal_ore'], maxDistance: 64 },
+        {
+          kind: 'result',
+          result: ok({ found: [], searchedTo: 64, exhausted: true }),
+        },
+      ),
+    ],
+    hoped: ['give_up'],
+  },
+  {
     name: 'after missing_tool, inventory empty',
     goal: 'get me some coal',
     inventory: [],
@@ -127,6 +183,36 @@ const SCENARIOS: readonly Scenario[] = [
       ),
     ],
     hoped: ['give_up'],
+  },
+  {
+    // Spec §4.4. The DISCRIMINATION, not the acquire policy. The bot holds a
+    // usable pickaxe and a second target is visible; missing_tool on ONE block
+    // (deepslate needs better than stone) does not make the goal impossible.
+    // The paired control is the pre-existing 'inventory empty' scenario above,
+    // where give_up IS right — together they show the model is reading the
+    // situation rather than reacting to the word missing_tool.
+    name: 'missing_tool but another route remains',
+    goal: 'get me some coal',
+    inventory: [PICKAXE],
+    history: [
+      step(
+        1,
+        { action: 'find_blocks', names: ['coal_ore'], maxDistance: 32, limit: 5 },
+        {
+          kind: 'blocks',
+          blocks: [
+            { name: 'deepslate_coal_ore', position: { x: 20, y: 55, z: -30 }, distance: 9.5 },
+            { name: 'coal_ore', position: COAL_AT, distance: 7.94 },
+          ],
+        },
+      ),
+      step(
+        2,
+        { action: 'mine_block_at', x: 20, y: 55, z: -30, maxDistance: 32 },
+        { kind: 'result', result: fail('missing_tool', 'needs an iron pickaxe or better') },
+      ),
+    ],
+    hoped: ['mine_block_at'],
   },
   {
     name: 'mined but the drop was lost',
@@ -213,10 +299,16 @@ async function runReplicate(attempts: number): Promise<ReplicateResult[]> {
   const results: ReplicateResult[] = []
 
   for (const scenario of SCENARIOS) {
+    const advice = advise(scenario.history, {
+      stepsTaken: scenario.history.length,
+      maxSteps: DEFAULT_MAX_STEPS,
+      stuckThreshold: DEFAULT_STUCK_THRESHOLD,
+    })
     const messages = renderPrompt(
       scenario.goal,
       snapshot(scenario.inventory, scenario.position),
       scenario.history,
+      advice,
     )
     const chose: Record<string, number> = {}
     const latencies: number[] = []

@@ -26,7 +26,18 @@ export interface Step {
 export type GoalStatus =
   | 'done'
   | 'gave_up'
+  /**
+   * The budget ran out. As of Phase 4B the model was WARNED first — it saw
+   * "Steps remaining: 3" and did not finish — so this is no longer "the loop
+   * ran out of patience" but "the model had notice and did not use it".
+   */
   | 'budget_exhausted'
+  /**
+   * The same action-and-outcome repeated past `stuckThreshold`. As of Phase 4B
+   * the model was warned from the second occurrence, so this now means "the
+   * model was told it was repeating and repeated anyway" rather than merely
+   * "the loop noticed".
+   */
   | 'stuck'
   | 'undecodable'
   | 'interrupted'

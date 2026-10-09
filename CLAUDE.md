@@ -16,7 +16,7 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 ## Commands
 
 ```bash
-npm test                  # 435 unit tests. No network, no model. Fast. Run these constantly.
+npm test                  # 466 unit tests. No network, no model. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
 npm run test:integration  # 141 tests, NO SKIPS. Requires the live dev server. The last skip — the contract suite's `flee` guarantee — closed when Task 6b landed and `prepareFleeFixture` was supplied
 npm run smoke             # Minimal "can a bot connect at all" check.
@@ -26,7 +26,7 @@ npm run demo:phase3       # Real state, real model, real action. The Phase 3 del
 npm run demo:phase4       # Find coal that is NOT visible, on real terrain. The Phase 4 deliverable.
 npm run demo:phase5       # A zombie interrupts the plan; the reflex preempts and recovers. The Phase 5 deliverable. Raises difficulty to easy and restores it in a finally. CAN LEGITIMATELY GO RED — see below
 npm run agent:demo        # The planning loop against a fake model and a mock world. No server.
-npm run agent:probe       # Seven scenarios, replicated across fresh processes. Needs Ollama — OLLAMA_HOST is optional, defaulting to 127.0.0.1:11434
+npm run agent:probe       # Ten scenarios, replicated across fresh processes. Needs Ollama — OLLAMA_HOST is optional, defaulting to 127.0.0.1:11434
 npm run bench:world       # Qualify / place / verify the benchmark world. `-- setup`, `-- verify`
 npm run bench:explore     # Score the search over N runs. `-- 3 --one-per-run`, `-- 3 --natural`
 npm run explore:path      # The exact waypoints a search visits; `--mark` builds them in-world
@@ -117,6 +117,9 @@ These cost real debugging time to discover. Treat them as settled.
 | **Entities do not obstruct the pathfinder** | MEASURED 2026-09-14 while building `flee`'s `unreachable` fixture: a 1×1 pocket walled on four sides with a zombie standing in the only opening is NOT sealed — the bot walked straight past the mob and fled successfully. A fixture that needs the bot boxed in must wall every side and put the hostile OUTSIDE; the mob is never the wall. Note it is still SEEN from in there, because `nearbyEntities` is distance-based rather than line-of-sight |
 | **`tmux capture-pane` hard-wraps the console reply at the pane width (80), mid-word, and `queryConsole` matches line by line** | So a read-back pattern must match within the FIRST line of the reply — and the `[HH:MM:SS] [Server thread/INFO]: ` prefix eats 33 of the 80, leaving ~47 characters of the message itself. MEASURED 2026-09-12: `Unmarked 2 chunks in minecraft:overworld from [` / `128, 0] to [129, 0] for force loading` — so `/Unmarked \d+ chunk/` matches and a "more robust" `/Unmarked .*for force loading/` does NOT. Keep console patterns short and anchored near the start of the message; a descriptive one silently degrades into an 8s timeout |
 | **`forceload remove` on a region that was never added answers "No chunks were removed from force loading"** — `commands.forceload.removed.failure` | NOT the similar-looking "No chunks were **marked** for force loading", which is `added.failure`, the reply to a failed *add*, and can never appear for a remove. MEASURED live 2026-09-12, and the distinction is load-bearing wherever a cleanup releases a pin it may never have taken: with the wrong string the read-back polls its full 8s and then reports the shared server as possibly polluted when nothing was ever pinned |
+| A single `agent:probe` run cannot judge a prompt change | One byte-identical prompt gave `give_up` in nine runs and `move_to` in five, each run internally unanimous. The probe spawns a fresh process per replicate; treat an `UNSTABLE` flag as "no result", not "a result" |
+| Rewording or reordering a prompt *claim* measured 4/4 failures; changing *what the model is asked to check* worked 7/7 | Write rules the model can verify against two lines of its own prompt, not ones it must infer from the step history |
+| The trailing `DECISION` block in `prompt.ts` is load-bearing by **position, occupancy and order** | Measured in Phase 4B: a contentless trailing line moved an unrelated scenario 9/9; the same three bullets reordered moved one 9/9; a fourth bullet moved one 9/9 and was removed. Never append to, reorder or pad it without `npm run agent:probe -- 4 5` across all scenarios — its JSDoc has the details |
 
 ## The dev server
 
@@ -219,7 +222,7 @@ The full table is in [§2](docs/REVIEW-PROTOCOL.md#2-scope). If none of these fi
 Deliberately unimplemented — do not "helpfully" fill these in:
 
 - **Nothing in `BotExecutor` is a stub any more.** `flee` was the last one and landed 2026-09-14 (Task 6b), once Ricky pinned its distance and timeout — **100 blocks as a TARGET, bounded by 10s**, spec §7 Decision 4. The contract suite's `flee` guarantee was the single SKIP in the integration run and **there are now no skips at all**. `placeBlock`, `followPlayer`, `attack`, `buildSchematic` and the `ReflexExecutor` arbiter all shipped earlier in Phase 5 Track A. Every action checks `opts?.signal?.aborted` first and returns `interrupted` — the contract suite asserts this for all eight abortable cases across seven actions (`contract-suite.ts:302-330` — the `abortableActions` table and its `it.each`), and `runAction()` gives it for free; do not re-add it by hand.
-- `packages/agent/` is the planning loop. It must never depend on `mineflayer` **or `@minebot/executor`** — `check-invariants.mjs` enforces both, including the transitive case, and reports 2 of 2. Anything needing both tracks belongs in `packages/bot/`. It codes **no per-`FailureReason` retry policy**; that is Phase 4's, and the loop feeds failures back to the model instead. Do not "helpfully" add branching there.
+- `packages/agent/` is the planning loop. It must never depend on `mineflayer` **or `@minebot/executor`** — `check-invariants.mjs` enforces both, including the transitive case, and reports 2 of 2. Anything needing both tracks belongs in `packages/bot/`. It still codes **no per-`FailureReason` branching**: Phase 4B kept that bet and put the burden of proof on any code rule — fix it in the prompt, measure it replicated, add code only for a case the prompt measurably fails, citing the measurement. `advice.ts` reports facts about the run and has no power to rewrite or veto the model's choice.
 - `packages/bot/` is only the composition root — `runBotGoal()` plus the demo. Planning logic belongs in `agent`, game logic in `executor`; code landing here that is really one or the other is in the wrong package.
 
 ## Conventions

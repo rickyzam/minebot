@@ -1,4 +1,5 @@
 import type { BotExecutor, WorldSnapshot } from '@minebot/contract'
+import { advise, repeatCounts } from './advice.js'
 import type { DecideResult, Decider } from './decide.js'
 import { dispatch } from './dispatch.js'
 import { isAbortError } from './llm.js'
@@ -6,7 +7,19 @@ import { renderPrompt } from './prompt.js'
 import type { GoalOutcome, Step, StepOutcome } from './step.js'
 
 export const DEFAULT_MAX_STEPS = 16
-export const DEFAULT_STUCK_THRESHOLD = 3
+
+/**
+ * Ends a goal when one action-and-outcome signature occurs this many times
+ * inside the last `threshold * 2` steps.
+ *
+ * WAS 3. Raised to 4 when the model started being WARNED at 2 (spec §5).
+ * Warning at 2 while still killing at 3 gives it exactly one turn to act on
+ * information it has never had before, then ends the goal anyway — which
+ * would be shipping the old behaviour while claiming a nudge. Two turns is a
+ * real chance, and costs one step out of sixteen.
+ */
+export const DEFAULT_STUCK_THRESHOLD = 4
+
 export const DEFAULT_MAX_UNDECODABLE = 3
 
 export interface RunGoalOptions {
@@ -20,25 +33,6 @@ export interface RunGoalOptions {
 }
 
 const describeError = (e: unknown): string => (e instanceof Error ? e.message : String(e))
-
-/** Collapses an outcome to what "the same thing happened again" means. */
-const outcomeSignature = (o: StepOutcome): string => {
-  switch (o.kind) {
-    case 'blocks':
-      return `blocks:${o.blocks.length}`
-    case 'result':
-      return o.result.ok ? 'result:ok' : `result:${o.result.reason}`
-    case 'undecodable':
-      return 'undecodable'
-    case 'done':
-      return 'done'
-    case 'gave_up':
-      return 'gave_up'
-  }
-}
-
-const signatureOf = (s: Step): string | null =>
-  s.action === null ? null : `${JSON.stringify(s.action)}|${outcomeSignature(s.outcome)}`
 
 /**
  * Has the run stopped making progress?
@@ -61,16 +55,14 @@ const signatureOf = (s: Step): string | null =>
  */
 const isStuck = (steps: readonly Step[], threshold: number): boolean => {
   if (threshold < 1 || steps.length < threshold) return false
-  const counts = new Map<string, number>()
-  for (const s of steps.slice(-threshold * 2)) {
-    const signature = signatureOf(s)
-    if (signature === null) continue
-    const seen = (counts.get(signature) ?? 0) + 1
-    if (seen >= threshold) return true
-    counts.set(signature, seen)
+  for (const count of repeatCounts(steps, threshold * 2).values()) {
+    if (count >= threshold) return true
   }
   return false
 }
+
+/** Exported for `advice.test.ts`, which asserts the guard and the notice agree. */
+export const isStuckForTest = isStuck
 
 /**
  * Observe, decide, dispatch, record — until the model says done or give_up, or
@@ -111,7 +103,11 @@ export async function runGoal(goal: string, opts: RunGoalOptions): Promise<GoalO
     try {
       let decided: DecideResult
       try {
-        decided = await decider.decide(renderPrompt(goal, snapshot, steps), controller.signal)
+        const advice = advise(steps, { stepsTaken: steps.length, maxSteps, stuckThreshold })
+        decided = await decider.decide(
+          renderPrompt(goal, snapshot, steps, advice),
+          controller.signal,
+        )
       } catch (e) {
         return isAbortError(e)
           ? { status: 'interrupted', detail: 'the model call was aborted', steps }

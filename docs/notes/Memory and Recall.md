@@ -243,7 +243,7 @@ Everything so far is either in-repo (code, fixtures) or ephemeral (a session's
 step log). That raises questions with no current precedent:
 
 - Where does it live? Not in the repo — it is per-world data, not source.
-- Per-bot, or shared between bots? Phase 6 is multi-bot; a shared landmark store
+- Per-bot, or shared between bots? Phase 7 is multi-bot; a shared landmark store
   is a plausible and powerful thing, and also a coordination problem.
 - What happens on a world reseed? Landmarks silently become lies. They need the
   world's identity (seed and/or a world id) recorded alongside them, and must be

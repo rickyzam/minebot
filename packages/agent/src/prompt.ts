@@ -1,5 +1,6 @@
 import type { BlockInfo, EntityInfo, ItemStack, Vec3, WorldSnapshot } from '@minebot/contract'
 import { ACTION_MENU, type ActionRequest } from './actions.js'
+import type { Advice } from './advice.js'
 import type { ChatMessage } from './llm.js'
 import type { Step, StepOutcome } from './step.js'
 
@@ -57,7 +58,17 @@ const describeValue = (v: unknown): string => {
         : `found ${r.found.length}: ${r.found
             .map((b) => `${b.name} at ${vec(b.position)}, ${dist(b.distance)} away`)
             .join('; ')}`
-    const more = r.exhausted ? 'nowhere left to search' : 'more ground remains'
+    // Spec §4.1. This used to read as a bare fact — "more ground remains" — and
+    // three separate rules failed to get the model to draw the conclusion from
+    // it. Reading the raw replies showed why: it answered give_up because "no
+    // new coal_ore was found in the surrounding area", i.e. it was treating ONE
+    // empty explore_for as proof of absence. Naming the search's state outright
+    // is what broke that belief: the give_up went away at the same measurement
+    // this wording landed. {@link DECISION} quotes both strings verbatim —
+    // change one and you must change the other.
+    const more = r.exhausted
+      ? 'this search is FINISHED - nowhere left to search'
+      : 'this search is UNFINISHED - more ground remains'
     // Rounded because searchedTo is a raw distance: the Phase 4 demo put
     // "searched out to 32.202484376209235" in front of the model. Fifteen
     // significant figures of noise in a prompt is not free, and the number is
@@ -153,6 +164,80 @@ const SYSTEM = [
 ].join('\n')
 
 /**
+ * Read LAST, because it is rendered last (spec §4.1/§4.2).
+ *
+ * This block says nothing the rules above do not already say. Its whole value
+ * is where it sits, and that was measured rather than guessed. The same
+ * `explore_for` guidance was tried in four other forms — as a claim about
+ * dead positions, as "read the LAST line of Recent actions", beside the
+ * `find_blocks` rule it is modelled on, and as the final rule before the menu.
+ * All four left `position dead, ground remains` off target. Moved here, after
+ * the history, it lands 4/4.
+ *
+ * It is unconditional on purpose. Rendering it only after an unfinished
+ * `explore_for` would be a code-level rule deciding what the model is told,
+ * which spec §2 requires be earned by a prompt failing first — and this one
+ * does not fail.
+ *
+ * **Do not append to, reorder, or pad this block without re-running
+ * `npm run agent:probe -- 4 5` across ALL scenarios.** Three measurements say
+ * why, and each is a change a reasonable editor would think was free:
+ *
+ * - **The slot is load-bearing by OCCUPANCY, not only by content.** A trailing
+ *   line saying nothing at all — "check your choice against the rules above" —
+ *   left `ground remains` exactly where it was (so the words here matter) and
+ *   still moved `mine_block_at already returned not_found` to `move_to` 9/9 (so
+ *   merely putting something here costs an unrelated scenario). Whatever goes
+ *   last has to carry every decision that competes with it. That is why there
+ *   are three bullets and not one: with only the `explore_for` bullet, a
+ *   `missing_tool` failure was answered `explore_for` 9/9, because the most
+ *   salient thing in the prompt had become "go and look".
+ * - **ORDER is load-bearing.** The same three bullets with `missing_tool` first
+ *   moved `not_found already` to `mine_block_at` 9/9.
+ * - **Adding one is not additive.** A fourth bullet for `drop collected: false`
+ *   moved `not_found already` to `move_to` 9/9, and was removed.
+ *
+ * Nothing above is covered by a unit test, because none of it can be: the
+ * failures are in what a model chooses. Spec §12 has the full tables.
+ */
+const DECISION = [
+  'Before you answer, look at the LAST line above and decide from it:',
+  '- an explore_for whose report says "this search is UNFINISHED" — the search has not',
+  '  looked everywhere yet, so run explore_for again. find_blocks cannot help; it only',
+  '  sees from where the bot stands. give_up only once a report says FINISHED.',
+  '- a mine_block_at that FAILED with not_found — that position is finished, so do not',
+  '  mine it or move_to it again.',
+  '- an action that FAILED with missing_tool — check the most recently reported blocks',
+  '  (from find_blocks or explore_for) for one you have not yet tried mining: if one',
+  '  remains, mine_block_at it. Only give_up once every reported block has already been',
+  '  tried.',
+].join('\n')
+
+/**
+ * What the loop knows and the model cannot see, as a notices block.
+ *
+ * Conditional on purpose. Rendering "Steps remaining: 14" every turn is noise
+ * the model has to read past on every one of sixteen prompts.
+ *
+ * States facts and gives no instruction. Spec §5: if the bare fact measurably
+ * does nothing, guidance is added then, with the measurement as its
+ * justification. Instructing first would bake in the early-give_up risk
+ * before knowing whether it exists.
+ */
+export const renderAdvice = (a: Advice): string | null => {
+  const lines: string[] = []
+  if (a.warnRepeat) {
+    lines.push(
+      `- You have already tried this exact action and got the same result ${a.repeatedTimes} times.`,
+    )
+  }
+  if (a.warnBudget) {
+    lines.push(`- Steps remaining: ${a.stepsRemaining}.`)
+  }
+  return lines.length === 0 ? null : ['Notices:', ...lines].join('\n')
+}
+
+/**
  * Built fresh every turn rather than appended to a transcript. Token cost stays
  * flat, and — more importantly — a transcript would carry stale world state the
  * model can anchor on. After the reflex layer has fled a mob, the bot's old
@@ -162,18 +247,29 @@ export const renderPrompt = (
   goal: string,
   snapshot: WorldSnapshot,
   steps: readonly Step[],
+  advice: Advice,
 ): ChatMessage[] => {
   const window = steps.slice(-HISTORY_WINDOW)
   const history =
     window.length === 0
       ? 'Recent actions: (none yet)'
       : ['Recent actions:', ...window.map(renderStep)].join('\n')
+  const notices = renderAdvice(advice)
 
   return [
     { role: 'system', content: SYSTEM },
     {
       role: 'user',
-      content: [`Goal: ${goal}`, '', renderSnapshot(snapshot), '', history].join('\n'),
+      content: [
+        `Goal: ${goal}`,
+        '',
+        renderSnapshot(snapshot),
+        '',
+        ...(notices === null ? [] : [notices, '']),
+        history,
+        '',
+        DECISION,
+      ].join('\n'),
     },
   ]
 }
