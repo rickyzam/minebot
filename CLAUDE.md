@@ -14,7 +14,7 @@ Guidance for Claude Code working in this repository. Read [README.md](README.md)
 ## Commands
 
 ```bash
-npm test                  # 310 unit tests. No network, no model. Fast. Run these constantly.
+npm test                  # 339 unit tests. No network, no model. Fast. Run these constantly.
 npm run typecheck         # Whole repo, including scripts/.
 npm run test:integration  # 103 tests. Requires the live dev server.
 npm run smoke             # Minimal "can a bot connect at all" check.
@@ -23,7 +23,7 @@ npm run demo:phase2       # Connect, path around a wall, mine coal. The Phase 2 
 npm run demo:phase3       # Real state, real model, real action. The Phase 3 deliverable.
 npm run demo:phase4       # Find coal that is NOT visible, on real terrain. The Phase 4 deliverable.
 npm run agent:demo        # The planning loop against a fake model and a mock world. No server.
-npm run agent:probe       # Seven scenarios, replicated across fresh processes. Needs OLLAMA_HOST.
+npm run agent:probe       # Ten scenarios, replicated across fresh processes. Needs OLLAMA_HOST.
 npm run bench:world       # Qualify / place / verify the benchmark world. `-- setup`, `-- verify`
 npm run bench:explore     # Score the search over N runs. `-- 3 --one-per-run`, `-- 3 --natural`
 npm run explore:path      # The exact waypoints a search visits; `--mark` builds them in-world

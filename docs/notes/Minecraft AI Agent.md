@@ -20,7 +20,7 @@ Build a **generic, tool-calling LLM agent** that connects to a real Minecraft se
 
 ## Plan — Phases
 
-Phases 1–6 below are the overview; **[Phase Plan and Parallel Work Split](./Phase%20Plan%20and%20Parallel%20Work%20Split.md) has the detailed task breakdown, a dependency diagram, and which phases the two tracks can work on at the same time versus which need to happen together.**
+Phases 1–7 below are the overview; **[Phase Plan and Parallel Work Split](./Phase%20Plan%20and%20Parallel%20Work%20Split.md) has the detailed task breakdown, a dependency diagram, and which phases the two tracks can work on at the same time versus which need to happen together.**
 
 ### Phase 1 — Bare Mineflayer PoC
 A Node + Mineflayer script logs into the (now-local) server, reads its own position/inventory, and walks to a fixed coordinate. No LLM yet. Confirms the server accepts bot connections at all and that the bridge to game state actually works — the two things worth confirming before writing anything more elaborate.
@@ -37,7 +37,10 @@ The real engineering work. Coal isn't always visible in already-loaded chunks, s
 ### Phase 5 — Generalize to a "smarter NPC"
 Expand the toolbox to the full behavior set — build from blueprint, follow player, chat, reflex-layer combat — per [Architecture and Approach](./Architecture%20and%20Approach.md). Same tool-calling loop, bigger tool menu.
 
-### Phase 6 — Multi-bot scaling test
+### Phase 6 — Resource acquisition
+When the bot lacks a tool or material, go and get more instead of abandoning the goal: check a container first, then gather from a **designated** area only. Needs new container actions and an executor-enforced allowlist, which Phase 5's build safety also needs. See [the requirement](./resource-acquisition-requirement.md).
+
+### Phase 7 — Multi-bot scaling test
 Run 2+ bots against the shared Ollama instance, tune `OLLAMA_NUM_PARALLEL`, observe decision-latency under concurrent load. See [Hardware and Feasibility](./Hardware%20and%20Feasibility.md).
 
 ## Hardware & Feasibility

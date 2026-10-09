@@ -524,3 +524,76 @@ not_found` moved from `give_up` to `explore_for`. Both are in that scenario's
 `hoped` set and `probe.ts` records `explore_for` as the move the position calls
 for, so it is a move to the better of two accepted answers — recorded here
 because "every pre-existing scenario unmoved" is the bar, and this one moved.
+
+## 13. Results — measured 2026-10-08
+
+Final measurement for the phase, on the branch head carrying every Task 1–6
+change. Same command, model and host as the §11 baseline, so the two are
+directly comparable:
+
+```bash
+OLLAMA_HOST=http://100.96.8.28:11434 npm run agent:probe -- 6 5
+```
+
+**10/10 scenarios stable and on target; 0 stable but wrong; 0 UNSTABLE.
+300/300 attempts decoded. Median latency 339ms** (279ms at baseline; the GPU is
+shared, §6.7 of the review protocol, so latency is not compared).
+
+| # | Scenario | Hoped | Baseline (§11) | Before its fix | Final, 6 replicates |
+|---|---|---|---|---|---|
+| 1 | no history | `find_blocks` | `find_blocks` 6/6 | — | `find_blocks` 6/6 |
+| 2 | after a search | `mine_block_at` | `mine_block_at` 6/6 | — | `mine_block_at` 6/6 |
+| 3 | find_blocks found nothing | `explore_for` | `explore_for` 6/6 | — | `explore_for` 6/6 |
+| 4 | position dead, ground remains | `explore_for` | *added in Task 4* | **`give_up` 4/4** | `explore_for` 6/6 |
+| 5 | position dead, search exhausted | `give_up` | *added in Task 4* | `give_up` 4/4 (control) | `give_up` 6/6 |
+| 6 | after missing_tool, inventory empty | `give_up` | `give_up` 6/6 | — | `give_up` 6/6 |
+| 7 | missing_tool but another route remains | `mine_block_at` | *added in Task 5* | **`give_up` 4/4** | `mine_block_at` 6/6 |
+| 8 | mined but the drop was lost | `move_to` | `move_to` 6/6 | — | `move_to` 6/6 |
+| 9 | mine_block_at already returned not_found | `explore_for` or `give_up` | `give_up` 6/6 | — | `explore_for` 6/6 |
+| 10 | goal met | `done` | `done` 6/6 | — | `done` 6/6 |
+
+"Before its fix" is each new scenario measured against the prompt as it stood
+when the scenario was added, at `-- 4 5`. Both defects reproduced cleanly, and
+both paired controls (5 and 6) were already right — which is what made each fix
+a **discrimination** problem rather than a persuasion one: a rule that moved the
+defect and its control together would have proved nothing.
+
+**Scenario 9 moved, and that is accepted.** `give_up` → `explore_for`, both in
+its hoped set. It moved in Task 4, toward the answer decided on 2026-09-10 — a
+dead position should send the bot searching, not home.
+
+### What failed on the way
+
+**§4.1, the dead position (Task 4): five candidates failed before the sixth
+worked.** §12 has each one and why. In short: two claims and a string-keyed
+rule changed nothing; a `searchedTo`-vs-`maxDistance` comparison failed because
+the model conflated the radius it asked for with the ground it covered; naming
+the search's state in the report (`UNFINISHED` / `FINISHED`) killed the wrong
+*belief* but not the wrong *action*; only moving the guidance **after the step
+history** fixed the action, and a contentless line in that slot was run as a
+control and moved nothing. The cost of that slot — every bullet in it is
+load-bearing by occupancy and order — is in §12 and in `DECISION`'s JSDoc.
+
+**§4.4, `missing_tool` (Task 5): no candidate failed, but only because the
+conflict was caught first.** The shipped `DECISION` block's third bullet said
+`give_up` on `missing_tool` *unconditionally* — so the defect was being
+**instructed**, not merely tolerated. Measuring before editing confirmed it
+(scenario 7, `give_up` 4/4). The bullet was rewritten in place — same slot,
+same three-bullet count — to check a fact (is there an untried block in the most
+recent report?) rather than react to the word. First candidate: 10/10, and no
+other scenario moved.
+
+**The guard notices (Tasks 2–3) needed no prompt candidates.** Task 2 was
+byte-identical on the quiet path and its probe matched the baseline exactly.
+None of the ten scenarios contains a repeat or a low budget, so the probe does
+not see the notices at all; their effect on a live run is §7's gate, still open.
+
+### What this does not show
+
+- **Nothing here ran against the server.** §7 is unmet as of this section and
+  blocks the merge; it is handed to whoever has local access to bellatrix.
+- **One model.** `qwen3:14b` only. The review protocol records `qwen3:30b-a3b`
+  on bellatrix as well; the `DECISION` block's fragility makes a model swap a
+  re-measurement, not an assumption.
+- **§10 risk 1 did not materialise.** No code rule was needed; `advice.ts`
+  reports facts and nothing in the loop branches on a `FailureReason`.
