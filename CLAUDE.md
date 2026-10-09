@@ -95,6 +95,9 @@ These cost real debugging time to discover. Treat them as settled.
 | The same search finds **placed** coal 3/3, from three bearings at the outermost ring (r≈63) | Positive control for the above. Without it, `found=0` could not be distinguished from a search that never looked |
 | `exploreFor` waypoints are deterministic and enumerable — `npm run explore:path` prints them from the same pure `nextWaypoint` the executor uses | 21 waypoints for radius 64 / spacing 32, in rings at r=0/32/63/64. Place fixtures at computed points rather than estimating a distance by watching the bot |
 | `bot.pathfinder.searchRadius` defaults to `-1` (unlimited) | A genuinely unreachable target burns the whole `thinkTimeout` (5s) and reports `timeout` rather than `noPath`, so the planner is told "retry" when the truth is "pick another target". See issue on bounding it |
+| A single `agent:probe` run cannot judge a prompt change | One byte-identical prompt gave `give_up` in nine runs and `move_to` in five, each run internally unanimous. The probe spawns a fresh process per replicate; treat an `UNSTABLE` flag as "no result", not "a result" |
+| Rewording or reordering a prompt *claim* measured 4/4 failures; changing *what the model is asked to check* worked 7/7 | Write rules the model can verify against two lines of its own prompt, not ones it must infer from the step history |
+| The trailing `DECISION` block in `prompt.ts` is load-bearing by **position, occupancy and order** | Measured in Phase 4B: a contentless trailing line moved an unrelated scenario 9/9; the same three bullets reordered moved one 9/9; a fourth bullet moved one 9/9 and was removed. Never append to, reorder or pad it without `npm run agent:probe -- 4 5` across all scenarios — its JSDoc has the details |
 
 ## The dev server
 
@@ -156,7 +159,7 @@ When you add a guard, prove it can fire. A safety check nobody has seen trigger 
 Deliberately unimplemented — do not "helpfully" fill these in:
 
 - `placeBlock`, `followPlayer`, `attack` and `flee` are stubs returning `fail('internal', '… arrives in Phase 5')`. They **do** still check `opts?.signal?.aborted` first and return `interrupted` — the contract suite asserts this for all six actions. `runAction()` now gives them that check for free; do not re-add it by hand.
-- `packages/agent/` is the planning loop. It must never depend on `mineflayer` **or `@minebot/executor`** — `check-invariants.mjs` enforces both, including the transitive case, and reports 2 of 2. Anything needing both tracks belongs in `packages/bot/`. It codes **no per-`FailureReason` retry policy**; that is Phase 4's, and the loop feeds failures back to the model instead. Do not "helpfully" add branching there.
+- `packages/agent/` is the planning loop. It must never depend on `mineflayer` **or `@minebot/executor`** — `check-invariants.mjs` enforces both, including the transitive case, and reports 2 of 2. Anything needing both tracks belongs in `packages/bot/`. It still codes **no per-`FailureReason` branching**: Phase 4B kept that bet and put the burden of proof on any code rule — fix it in the prompt, measure it replicated, add code only for a case the prompt measurably fails, citing the measurement. `advice.ts` reports facts about the run and has no power to rewrite or veto the model's choice.
 - `packages/bot/` is only the composition root — `runBotGoal()` plus the demo. Planning logic belongs in `agent`, game logic in `executor`; code landing here that is really one or the other is in the wrong package.
 
 ## Conventions

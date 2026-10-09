@@ -1,6 +1,6 @@
 # Phase Plan and Parallel Work Split — Minecraft AI Agent
 
-Detailed breakdown of Phases 1–6, written for **two people working in parallel**. Two tracks run independently for most of the project and merge at a few clearly marked points — the goal is that neither person sits idle waiting on the other.
+Detailed breakdown of Phases 1–7, written for **two people working in parallel**. Two tracks run independently for most of the project and merge at a few clearly marked points — the goal is that neither person sits idle waiting on the other.
 
 ---
 
@@ -41,7 +41,8 @@ flowchart TD
     P4B["Phase 4 — Retry/failure policy + prompt refinement (Track B)"]
     P5A["Phase 5 — Building, follow-player, reflex/combat layer (Track A)"]
     P5B["Phase 5 — Chat + expanding tool-selection prompt (Track B)"]
-    P6["Phase 6 — Multi-bot scaling test (JOINT, split sub-tasks)"]
+    P6["Phase 6 — Resource acquisition: containers, designated areas (Track A)"]
+    P7["Phase 7 — Multi-bot scaling test (JOINT, split sub-tasks)"]
 
     P1 --> P2 --> P3
     LLM --> P3
@@ -50,7 +51,8 @@ flowchart TD
     P4A --> P5A
     P4B --> P5B
     P5A --> P6
-    P5B --> P6
+    P5A --> P7
+    P5B --> P7
 ```
 
 ---
@@ -114,7 +116,15 @@ flowchart TD
 - Chat integration — LLM generates in-character responses to nearby player chat messages.
 - Expanding the tool-selection prompt/schema as each Track A tool lands, and verifying the model still picks correctly from a growing menu of actions (a bigger toolbox is a real test of whether a 14B-class model stays reliable at tool selection — worth tracking failures here).
 
-## Phase 6 — Multi-bot scaling test (JOINT, but splits into 2 live sub-tasks)
+## Phase 6 — Resource acquisition (Track A)
+
+**Blocked by:** Phase 5. **Agreed 2026-09-10.**
+
+Containers, the designated-area allowlist, and gathering. See
+[the requirement](./resource-acquisition-requirement.md). Multi-bot scaling,
+previously Phase 6, becomes Phase 7.
+
+## Phase 7 — Multi-bot scaling test (JOINT, but splits into 2 live sub-tasks)
 
 **Blocked by:** Phase 5 (or at least a stable single-bot version).
 
